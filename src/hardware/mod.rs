@@ -4,12 +4,14 @@ pub mod backend;
 pub mod capabilities;
 pub mod device;
 pub mod paths;
+pub mod sysfs;
 pub mod values;
 
 pub use backend::{BackendError, EcBackend};
 pub use capabilities::{BacklightCapability, Capabilities};
 pub use device::{DeviceInfo, HardwareSnapshot};
 pub use paths::{PathValidationError, SystemPaths};
+pub use sysfs::{LinuxSysfsReader, SysfsError, SysfsReader};
 pub use values::{
     FanMode, FanPercent, ModeValidationError, SensorValueError, ShiftMode, TemperatureCelsius,
 };
