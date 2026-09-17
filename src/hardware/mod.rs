@@ -1,0 +1,13 @@
+//! Hardware domain types and the read-only backend interface.
+
+pub mod backend;
+pub mod capabilities;
+pub mod device;
+pub mod values;
+
+pub use backend::{BackendError, EcBackend};
+pub use capabilities::{BacklightCapability, Capabilities};
+pub use device::{DeviceInfo, HardwareSnapshot};
+pub use values::{
+    FanMode, FanPercent, ModeValidationError, SensorValueError, ShiftMode, TemperatureCelsius,
+};
