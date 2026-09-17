@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod capabilities;
+pub mod capability_detector;
 pub mod detector;
 pub mod device;
 pub mod paths;
@@ -10,6 +11,7 @@ pub mod values;
 
 pub use backend::{BackendError, EcBackend};
 pub use capabilities::{BacklightCapability, Capabilities};
+pub use capability_detector::{CapabilityDetector, CapabilityDiscoveryError};
 pub use detector::{DetectionError, DeviceDetector};
 pub use device::{DeviceInfo, HardwareSnapshot};
 pub use paths::{PathValidationError, SystemPaths};

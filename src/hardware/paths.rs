@@ -76,6 +76,15 @@ impl SystemPaths {
         self.root.join("sys").join("class").join("power_supply")
     }
 
+    /// The base directory of the `msi-ec` platform driver interface.
+    pub fn msi_ec_root(&self) -> PathBuf {
+        self.root
+            .join("sys")
+            .join("devices")
+            .join("platform")
+            .join("msi-ec")
+    }
+
     pub fn leds_root(&self) -> PathBuf {
         self.root.join("sys").join("class").join("leds")
     }
@@ -118,6 +127,22 @@ mod tests {
         assert_eq!(
             SystemPaths::linux().power_supply_root(),
             PathBuf::from("/sys/class/power_supply")
+        );
+    }
+
+    #[test]
+    fn linux_msi_ec_root() {
+        assert_eq!(
+            SystemPaths::linux().msi_ec_root(),
+            PathBuf::from("/sys/devices/platform/msi-ec")
+        );
+    }
+
+    #[test]
+    fn custom_msi_ec_root() {
+        assert_eq!(
+            SystemPaths::new("/tmp/fake-root").msi_ec_root(),
+            PathBuf::from("/tmp/fake-root/sys/devices/platform/msi-ec")
         );
     }
 
