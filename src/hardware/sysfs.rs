@@ -88,6 +88,8 @@ pub trait SysfsReader {
     fn read_u16(&self, path: &Path) -> Result<u16, SysfsError>;
 
     fn list_dirs(&self, path: &Path) -> Result<Vec<PathBuf>, SysfsError>;
+
+    fn list_entries(&self, path: &Path) -> Result<Vec<PathBuf>, SysfsError>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -125,6 +127,17 @@ impl SysfsReader for LinuxSysfsReader {
         }
         directories.sort();
         Ok(directories)
+    }
+
+    fn list_entries(&self, path: &Path) -> Result<Vec<PathBuf>, SysfsError> {
+        let entries = fs::read_dir(path).map_err(|error| map_io_error(path, error))?;
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| map_io_error(path, error))?;
+            paths.push(entry.path());
+        }
+        paths.sort();
+        Ok(paths)
     }
 }
 
@@ -385,5 +398,117 @@ mod tests {
             reader().list_dirs(dir.path()).unwrap(),
             vec![dir.path().join("real_dir")]
         );
+    }
+
+    #[test]
+    fn list_entries_includes_regular_file() {
+        let dir = tempdir().unwrap();
+        let path = write_file(dir.path(), "online", b"1");
+        assert_eq!(reader().list_entries(dir.path()).unwrap(), vec![path]);
+    }
+
+    #[test]
+    fn list_entries_includes_real_directory() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("BAT0")).unwrap();
+        assert_eq!(
+            reader().list_entries(dir.path()).unwrap(),
+            vec![dir.path().join("BAT0")]
+        );
+    }
+
+    #[test]
+    fn list_entries_includes_symlink_to_directory() {
+        let dir = tempdir().unwrap();
+        let target = tempdir().unwrap();
+        symlink(target.path(), dir.path().join("AC")).unwrap();
+        assert_eq!(
+            reader().list_entries(dir.path()).unwrap(),
+            vec![dir.path().join("AC")]
+        );
+    }
+
+    #[test]
+    fn list_entries_includes_symlink_to_file() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let target = write_file(outside.path(), "target_value", b"1");
+        symlink(target, dir.path().join("uevent")).unwrap();
+        assert_eq!(
+            reader().list_entries(dir.path()).unwrap(),
+            vec![dir.path().join("uevent")]
+        );
+    }
+
+    #[test]
+    fn list_entries_includes_broken_symlink() {
+        let dir = tempdir().unwrap();
+        symlink(dir.path().join("nowhere"), dir.path().join("dangling")).unwrap();
+        assert_eq!(
+            reader().list_entries(dir.path()).unwrap(),
+            vec![dir.path().join("dangling")]
+        );
+    }
+
+    #[test]
+    fn list_entries_returns_immediate_children_only() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("parent")).unwrap();
+        fs::create_dir(dir.path().join("parent").join("child")).unwrap();
+        write_file(&dir.path().join("parent").clone(), "nested_value", b"1");
+        assert_eq!(
+            reader().list_entries(dir.path()).unwrap(),
+            vec![dir.path().join("parent")]
+        );
+    }
+
+    #[test]
+    fn list_entries_sorts_deterministically() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("b_dir")).unwrap();
+        write_file(dir.path(), "c_file", b"1");
+        symlink(dir.path().join("c_file"), dir.path().join("a_link")).unwrap();
+        assert_eq!(
+            reader().list_entries(dir.path()).unwrap(),
+            vec![
+                dir.path().join("a_link"),
+                dir.path().join("b_dir"),
+                dir.path().join("c_file"),
+            ]
+        );
+    }
+
+    #[test]
+    fn list_entries_missing_root_is_not_found() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        match reader().list_entries(&missing) {
+            Err(SysfsError::NotFound(reported)) => assert_eq!(reported, missing),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_dirs_still_excludes_symlinks() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("real_dir")).unwrap();
+        let target = write_file(dir.path(), "value", b"1");
+        symlink(target, dir.path().join("linked_file")).unwrap();
+        symlink(dir.path().join("real_dir"), dir.path().join("linked_dir")).unwrap();
+        symlink(dir.path().join("nowhere"), dir.path().join("broken")).unwrap();
+        assert_eq!(
+            reader().list_dirs(dir.path()).unwrap(),
+            vec![dir.path().join("real_dir")]
+        );
+    }
+
+    #[test]
+    fn list_entries_does_not_canonicalize() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        symlink(outside.path(), dir.path().join("link")).unwrap();
+        let entries = reader().list_entries(dir.path()).unwrap();
+        assert_eq!(entries, vec![dir.path().join("link")]);
+        assert!(entries[0].starts_with(dir.path()));
     }
 }
