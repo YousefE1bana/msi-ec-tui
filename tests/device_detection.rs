@@ -296,3 +296,24 @@ fn detection_is_deterministic() {
         }
     );
 }
+
+#[test]
+fn identity_succeeds_without_ec_enrichment_when_ec_path_is_malformed() {
+    let fixture = Fixture::new();
+    fixture.write_vendor_product("MSI\n", "GF63 Thin 11UC\n");
+    // Replace the driver directory with a regular file: reading
+    // `msi-ec/fw_version` through it fails deterministically on any user.
+    let ec_path = fixture._root.path().join("sys/devices/platform/msi-ec");
+    fs::create_dir_all(ec_path.parent().unwrap()).unwrap();
+    fs::write(&ec_path, b"not a directory\n").unwrap();
+
+    let identity = fixture.detector().detect_identity().unwrap();
+    assert_eq!(identity, msi_device("MSI", "GF63 Thin 11UC"));
+
+    match fixture.detector().detect() {
+        Err(mec::hardware::DetectionError::ReadFailure { field, .. }) => {
+            assert_eq!(field, "fw_version");
+        }
+        other => panic!("unexpected result: {other:?}"),
+    }
+}

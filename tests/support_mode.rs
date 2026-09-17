@@ -39,6 +39,14 @@ impl Fixture {
         self.root.path().join("sys/devices/platform/msi-ec")
     }
 
+    /// Replaces the driver directory with a regular file so enumeration
+    /// fails deterministically on any platform/user.
+    fn write_broken_ec_root(&self) {
+        let path = self.ec_dir();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not a directory\n").unwrap();
+    }
+
     fn ensure_ec_root(&self) {
         fs::create_dir_all(self.ec_dir()).unwrap();
     }
@@ -140,9 +148,7 @@ fn non_enumerable_msi_ec_root_is_unreadable() {
     fixture.write_msi_identity("GF63 Thin 11UC\n");
     // A regular file where the driver directory belongs: list_entries()
     // fails deterministically with a typed I/O error on any platform/user.
-    let path = fixture.ec_dir();
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, b"not a directory\n").unwrap();
+    fixture.write_broken_ec_root();
     assert_eq!(
         fixture.evaluate(),
         SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnreadable)
@@ -324,4 +330,27 @@ fn repeated_evaluation_is_stable() {
     let evaluator = SupportEvaluator::new(fixture.paths.clone(), LinuxSysfsReader);
     assert_eq!(evaluator.evaluate(), SupportMode::Ready);
     assert_eq!(evaluator.evaluate(), SupportMode::Ready);
+}
+
+#[test]
+fn non_msi_with_broken_ec_root_is_still_non_msi() {
+    let fixture = Fixture::new();
+    fixture.write_dmi("sys_vendor", b"Dell Inc.\n");
+    fixture.write_dmi("product_name", b"XPS 15\n");
+    fixture.write_broken_ec_root();
+    assert_eq!(
+        fixture.evaluate(),
+        SupportMode::ReadOnly(ReadOnlyReason::NonMsiHardware)
+    );
+}
+
+#[test]
+fn unverified_identity_with_broken_ec_root_is_still_unverified() {
+    let fixture = Fixture::new();
+    fixture.write_dmi("product_name", b"GF63 Thin 11UC\n");
+    fixture.write_broken_ec_root();
+    assert_eq!(
+        fixture.evaluate(),
+        SupportMode::ReadOnly(ReadOnlyReason::UnverifiedHardwareIdentity)
+    );
 }

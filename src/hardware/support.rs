@@ -45,23 +45,18 @@ where
         Self { paths, reader }
     }
 
-    /// Evaluates support deterministically: interface readability, then
-    /// identity, then capability coherence. Uncertainty means read-only.
+    /// Evaluates support deterministically: MSI DMI identity, then
+    /// interface readability, then capability coherence. Uncertainty means
+    /// read-only.
     ///
-    /// The root readability probe runs before identity on purpose: identity
-    /// detection itself reads the optional `msi-ec/fw_version`, so a
-    /// present-but-corrupt driver root would otherwise surface as an
-    /// unverifiable identity instead of the hard interface failure it is.
-    /// A merely absent root defers to identity first, so non-MSI machines
-    /// are still reported as non-MSI rather than as missing-driver machines.
+    /// Identity uses [`DeviceDetector::detect_identity`], which never touches
+    /// the `msi-ec` interface: a malformed driver path can therefore never
+    /// mask the vendor verdict. Only after MSI identity succeeds does the
+    /// evaluator inspect the driver root.
     pub fn evaluate(&self) -> SupportMode {
-        let root_readable = match self.reader.list_entries(&self.paths.msi_ec_root()) {
-            Ok(_) => true,
-            Err(SysfsError::NotFound(_)) => false,
-            Err(_) => return SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnreadable),
-        };
-
-        if let Err(error) = DeviceDetector::new(self.paths.clone(), self.reader.clone()).detect() {
+        if let Err(error) =
+            DeviceDetector::new(self.paths.clone(), self.reader.clone()).detect_identity()
+        {
             return match error {
                 DetectionError::UnsupportedVendor { .. } => {
                     SupportMode::ReadOnly(ReadOnlyReason::NonMsiHardware)
@@ -70,8 +65,15 @@ where
             };
         }
 
-        if !root_readable {
-            return SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnavailable);
+        if let Err(error) = self
+            .reader
+            .list_entries(&self.paths.msi_ec_root())
+            .map(|_| ())
+        {
+            return match error {
+                SysfsError::NotFound(_) => SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnavailable),
+                _ => SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnreadable),
+            };
         }
 
         match CapabilityDetector::new(self.paths.clone(), self.reader.clone()).discover() {

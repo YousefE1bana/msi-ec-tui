@@ -88,8 +88,18 @@ where
         Self { paths, reader }
     }
 
-    /// Detects device identity from DMI, without requiring the msi-ec driver.
+    /// Detects device identity from DMI plus the optional EC firmware
+    /// version, without requiring the msi-ec driver.
     pub fn detect(&self) -> Result<DeviceInfo, DetectionError> {
+        let mut device = self.detect_identity()?;
+        device.ec_firmware_version = self.optional(DmiField::EcFirmwareVersion)?;
+        Ok(device)
+    }
+
+    /// Detects device identity from DMI alone, without touching the
+    /// `msi-ec` interface at all. Optional EC firmware enrichment must
+    /// never determine whether identity can be established.
+    pub fn detect_identity(&self) -> Result<DeviceInfo, DetectionError> {
         let manufacturer = self.required(DmiField::SysVendor)?;
         if !is_msi_vendor(&manufacturer) {
             return Err(DetectionError::UnsupportedVendor {
@@ -99,13 +109,12 @@ where
         let product_name = self.required(DmiField::ProductName)?;
         let board_name = self.optional(DmiField::BoardName)?;
         let bios_version = self.optional(DmiField::BiosVersion)?;
-        let ec_firmware_version = self.optional(DmiField::EcFirmwareVersion)?;
         Ok(DeviceInfo {
             manufacturer,
             product_name,
             board_name,
             bios_version,
-            ec_firmware_version,
+            ec_firmware_version: None,
         })
     }
 
