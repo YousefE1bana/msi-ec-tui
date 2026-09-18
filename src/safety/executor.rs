@@ -765,6 +765,28 @@ mod tests {
     }
 
     #[test]
+    fn verification_failed_wraps_as_boundary_error() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.enable_presence("cooler_boost");
+        let boundary = RecordingBoundary::failing(vec![Err(
+            WriteBoundaryError::VerificationFailed("cooler boost"),
+        )]);
+        let executor = fixture.executor(boundary.clone());
+        let error = executor
+            .execute(&HardwareCommand::SetCoolerBoost(true))
+            .expect_err("verification failure must propagate");
+        assert!(
+            matches!(
+                error,
+                CommandExecutionError::Boundary(WriteBoundaryError::VerificationFailed(_))
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(boundary.calls(), 1);
+    }
+
+    #[test]
     fn error_display_is_stable_and_human_readable() {
         assert_eq!(
             CommandExecutionError::Validation(CommandValidationError::ReadOnly).to_string(),

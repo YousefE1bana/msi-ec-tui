@@ -7,6 +7,7 @@ pub mod command;
 pub mod detector;
 pub mod device;
 pub mod msi_ec;
+pub(crate) mod msi_ec_write;
 pub mod paths;
 pub mod support;
 pub mod sysfs;

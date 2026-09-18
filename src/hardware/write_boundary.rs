@@ -5,8 +5,9 @@
 //! itself: [`HardwareCommand::validate`] is a point-in-time safety policy,
 //! and support/capability verdicts can go stale, so validation must happen
 //! immediately before every crossing in the final executor. There is no
-//! storable authorization token, no path/value API, and no production
-//! implementation yet.
+//! storable authorization token and no path/value API. The restricted
+//! production implementation lives in `msi_ec_write` and verifies every
+//! write by readback.
 
 use thiserror::Error;
 
@@ -36,6 +37,9 @@ pub enum WriteBoundaryError {
     /// The write was attempted but failed.
     #[error("hardware write failed: {0}")]
     ExecutionFailed(String),
+    /// The write completed but readback did not show the requested state.
+    #[error("hardware write verification failed: {0}")]
+    VerificationFailed(&'static str),
 }
 
 #[cfg(test)]
@@ -210,6 +214,10 @@ mod tests {
         assert_eq!(
             WriteBoundaryError::ExecutionFailed("fan write rejected".to_owned()).to_string(),
             "hardware write failed: fan write rejected"
+        );
+        assert_eq!(
+            WriteBoundaryError::VerificationFailed("fan mode").to_string(),
+            "hardware write verification failed: fan mode"
         );
     }
 

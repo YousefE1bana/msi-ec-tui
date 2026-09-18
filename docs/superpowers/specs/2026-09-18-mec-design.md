@@ -219,16 +219,22 @@ mec/
 # 5. Hardware Backend
 
 ```rust
+// Read-only hardware introspection.
 trait EcBackend {
     fn detect_device(&self) -> Result<DeviceInfo>;
     fn capabilities(&self) -> Result<Capabilities>;
     fn snapshot(&self) -> Result<HardwareSnapshot>;
-    fn execute(&self, command: HardwareCommand) -> Result<()>;
+}
+
+// Separate execution transport, crossed only after fresh support
+// evaluation, fresh capability discovery, and command validation.
+trait HardwareWriteBoundary {
+    fn execute(&self, command: &HardwareCommand) -> Result<()>;
 }
 ```
 
-Production: `RealSysfsBackend`  
-Tests: `MockSysfsBackend`
+Read backend: `MsiEcBackend`
+Write transport: crate-private `MsiEcSysfsWriteBoundary`
 
 No application component writes arbitrary paths directly.
 
