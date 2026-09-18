@@ -14,15 +14,17 @@ use crate::hardware::{
 };
 use crate::monitoring::{MonitorEngine, PollInterval, SnapshotHistory};
 
+use super::signal::subscribe_stop;
+
 /// Failures that terminate monitoring with a non-zero exit.
 #[derive(Debug, Error)]
 pub enum MonitorError {
     /// Hardware collection failed (fail-fast; Task 6 owns degradation).
     #[error(transparent)]
     Collection(#[from] BackendError),
-    /// The Ctrl+C handler could not be installed.
+    /// The one-time process Ctrl+C handler could not be installed.
     #[error("failed to install Ctrl+C handler: {0}")]
-    Signal(ctrlc::Error),
+    Signal(String),
     /// Monitor output could not be written.
     #[error("failed to write monitor output: {0}")]
     Output(#[from] std::io::Error),
@@ -47,12 +49,10 @@ pub fn run_monitor(
     let device = backend.detect_device()?;
     let mut engine = MonitorEngine::new(backend, SnapshotHistory::default());
 
-    // Minimal handler: only wakes the loop. No I/O, no collection here.
-    let (stop_tx, stop_rx) = mpsc::channel();
-    ctrlc::set_handler(move || {
-        let _ = stop_tx.send(());
-    })
-    .map_err(MonitorError::Signal)?;
+    // One process-global handler fans out to this session's fresh
+    // receiver; repeated in-process sessions stay safe. The handler only
+    // wakes the loop: no I/O, no collection there.
+    let stop_rx = subscribe_stop()?;
 
     writeln!(out, "MEC Monitor")?;
     writeln!(out)?;

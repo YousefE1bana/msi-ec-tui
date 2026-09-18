@@ -2,6 +2,7 @@
 
 mod args;
 pub mod monitor;
+mod signal;
 pub mod status;
 
 pub use args::{Cli, Command};
