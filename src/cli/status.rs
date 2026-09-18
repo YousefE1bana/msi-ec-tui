@@ -13,16 +13,33 @@ use crate::hardware::{
 };
 
 /// Owned, deterministically renderable hardware status.
+///
+/// A report may carry a degraded presentation snapshot: when strict
+/// snapshot collection fails, the snapshot is an all-`None` default and
+/// the original error is retained for out-of-band warning output.
+/// Device identity failure stays fatal and never produces a report.
 #[derive(Debug, Clone)]
 pub struct StatusReport {
     pub device: DeviceInfo,
     pub mode: SupportMode,
     pub snapshot: HardwareSnapshot,
+    snapshot_error: Option<BackendError>,
+}
+
+impl StatusReport {
+    /// The snapshot collection error behind a degraded report, if any.
+    pub fn snapshot_error(&self) -> Option<&BackendError> {
+        self.snapshot_error.as_ref()
+    }
 }
 
 /// Collects device identity, support mode, and snapshot through the
 /// existing backend abstractions. Read-only verdicts do not block
 /// monitoring: a coherent snapshot stays usable when read-only.
+///
+/// Identity failure is fatal. Snapshot failure degrades to an all-`None`
+/// presentation snapshot with the original error retained; values are
+/// never fabricated.
 pub fn status<R>(paths: SystemPaths, reader: R) -> Result<StatusReport, BackendError>
 where
     R: SysfsReader + Clone,
@@ -30,12 +47,20 @@ where
     let mode = SupportEvaluator::new(paths.clone(), reader.clone()).evaluate();
     let backend = MsiEcBackend::new(paths, reader);
     let device = backend.detect_device()?;
-    let snapshot = backend.snapshot()?;
-    Ok(StatusReport {
-        device,
-        mode,
-        snapshot,
-    })
+    match backend.snapshot() {
+        Ok(snapshot) => Ok(StatusReport {
+            device,
+            mode,
+            snapshot,
+            snapshot_error: None,
+        }),
+        Err(error) => Ok(StatusReport {
+            device,
+            mode,
+            snapshot: HardwareSnapshot::default(),
+            snapshot_error: Some(error),
+        }),
+    }
 }
 
 fn on_off(value: Option<bool>) -> &'static str {

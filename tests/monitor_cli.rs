@@ -1,11 +1,13 @@
 //! CLI integration tests for `mec monitor` against committed fixtures.
 
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use tempfile::tempdir;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -198,6 +200,10 @@ struct ChildGuard {
 }
 
 impl ChildGuard {
+    fn from_child(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+
     fn spawn(sys_root: &str, interval: &str, workdir: PathBuf) -> Self {
         let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mec"));
         command
@@ -254,4 +260,111 @@ fn send_sigint(pid: u32) {
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+/// Spawns `mec monitor` with stdout/stderr redirected to files under `dir`,
+/// so output can be polled without pipe-deadlock risk.
+fn spawn_monitor_to_files(
+    sys_root: &str,
+    interval: &str,
+    workdir: &Path,
+    dir: &Path,
+) -> ChildGuard {
+    use std::fs::File;
+    let out = File::create(dir.join("stdout.log")).unwrap();
+    let err = File::create(dir.join("stderr.log")).unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mec"));
+    command
+        .args(["--sys-root", sys_root, "monitor", "--interval", interval])
+        .current_dir(workdir)
+        .stdout(out)
+        .stderr(err);
+    ChildGuard::from_child(command.spawn().unwrap())
+}
+
+fn wait_for_file_contains(path: &Path, needle: &str, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let content = fs::read_to_string(path).unwrap_or_default();
+        if content.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what} ({needle:?})"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn count_in_file(path: &Path, needle: &str) -> usize {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .matches(needle)
+        .count()
+}
+
+#[test]
+fn broken_fixture_monitor_degrades_without_telemetry() {
+    let scratch = tempdir().unwrap();
+    let child = spawn_monitor_to_files(
+        &fixture_arg("broken-sysfs"),
+        "5s",
+        &manifest_dir(),
+        scratch.path(),
+    );
+    let out_log = scratch.path().join("stdout.log");
+    let err_log = scratch.path().join("stderr.log");
+    wait_for_file_contains(&out_log, "MEC Monitor", "monitor header");
+    wait_for_file_contains(&err_log, "MEC monitor degraded:", "degraded warning");
+    // Give the loop a chance to attempt another tick: no sample may appear.
+    std::thread::sleep(Duration::from_millis(600));
+    send_sigint(child.id());
+    let output = child.wait_bounded();
+    assert!(output.status.success());
+    let stdout = fs::read_to_string(&out_log).unwrap();
+    let stderr = fs::read_to_string(&err_log).unwrap();
+    assert!(stdout.contains("MEC Monitor"));
+    assert!(stdout.contains("Device: Broken Interface Test Fixture"));
+    assert!(stdout.contains("Mode: READ-ONLY"));
+    assert_eq!(count_in_file(&err_log, "MEC monitor degraded:"), 1);
+    assert!(stdout.contains("Monitoring stopped."));
+    assert!(!stdout.contains("CPU:"));
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+}
+
+#[test]
+fn transient_backend_recovers_with_single_warnings() {
+    let root = tempdir().unwrap();
+    let dmi = root.path().join("sys/class/dmi/id");
+    fs::create_dir_all(&dmi).unwrap();
+    fs::write(dmi.join("sys_vendor"), b"MSI\n").unwrap();
+    fs::write(dmi.join("product_name"), b"Recovery Test Fixture\n").unwrap();
+    let ec = root.path().join("sys/devices/platform/msi-ec/cpu");
+    fs::create_dir_all(&ec).unwrap();
+    let temperature = ec.join("realtime_temperature");
+    fs::write(&temperature, b"60\n").unwrap();
+
+    let scratch = tempdir().unwrap();
+    let sys_root = root.path().to_string_lossy().into_owned();
+    let child = spawn_monitor_to_files(&sys_root, "500ms", &manifest_dir(), scratch.path());
+    let out_log = scratch.path().join("stdout.log");
+    let err_log = scratch.path().join("stderr.log");
+
+    wait_for_file_contains(&out_log, "CPU: 60°C", "initial sample");
+    fs::write(&temperature, b"hot\n").unwrap();
+    wait_for_file_contains(&err_log, "MEC monitor degraded:", "degraded warning");
+    fs::write(&temperature, b"61\n").unwrap();
+    wait_for_file_contains(&err_log, "MEC monitor recovered.", "recovery message");
+    wait_for_file_contains(&out_log, "CPU: 61°C", "recovered sample");
+
+    send_sigint(child.id());
+    let output = child.wait_bounded();
+    assert!(output.status.success());
+    assert_eq!(count_in_file(&err_log, "MEC monitor degraded:"), 1);
+    assert_eq!(count_in_file(&err_log, "MEC monitor recovered."), 1);
+    let stdout = fs::read_to_string(&out_log).unwrap();
+    assert!(stdout.contains("Monitoring stopped."));
+    let stderr = fs::read_to_string(&err_log).unwrap();
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
 }

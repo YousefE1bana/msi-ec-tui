@@ -255,14 +255,42 @@ fn doctor_remains_available() {
 }
 
 #[test]
-fn broken_snapshot_fails_cleanly() {
+fn broken_snapshot_degrades_cleanly() {
     mec()
         .args(["--sys-root", &fixture_arg("broken-sysfs"), "status"])
         .assert()
-        .failure()
-        .code(1)
-        .stderr(predicates::str::contains("MEC status unavailable:"))
+        .success()
+        .stdout(predicates::str::contains("MEC Status"))
+        .stdout(predicates::str::contains(
+            "Device: Broken Interface Test Fixture",
+        ))
+        .stdout(predicates::str::contains("Mode: READ-ONLY"))
+        .stdout(predicates::str::contains("CPU Temperature: N/A"))
+        .stdout(predicates::str::contains("CPU Fan: N/A"))
+        .stdout(predicates::str::contains("Charge: N/A"))
+        .stdout(predicates::str::contains("panicked").not())
+        .stderr(predicates::str::contains("MEC status degraded:"))
         .stderr(predicates::str::contains("panicked").not());
+}
+
+#[test]
+fn healthy_status_has_empty_stderr() {
+    for fixture in ["gf63", "partial-device", "unknown-device"] {
+        mec()
+            .args(["--sys-root", &fixture_arg(fixture), "status"])
+            .assert()
+            .success()
+            .stderr(predicates::str::is_empty());
+    }
+}
+
+#[test]
+fn identity_failure_stays_fatal() {
+    mec()
+        .args(["--sys-root", "/nonexistent-mec-fixture-root", "status"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("MEC status unavailable:"));
 }
 
 fn status_json_output(args: &[String]) -> serde_json::Value {
@@ -519,8 +547,8 @@ fn doctor_unaffected_by_json_task() {
 }
 
 #[test]
-fn broken_status_json_fails_like_human_status() {
-    mec()
+fn broken_status_json_degrades_cleanly() {
+    let output = mec()
         .args([
             "--sys-root",
             &fixture_arg("broken-sysfs"),
@@ -528,8 +556,55 @@ fn broken_status_json_fails_like_human_status() {
             "--json",
         ])
         .assert()
+        .success()
+        .stderr(predicates::str::contains("MEC status degraded:"))
+        .stderr(predicates::str::contains("panicked").not())
+        .get_output()
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["device"]["product_name"],
+        "Broken Interface Test Fixture"
+    );
+    assert_eq!(json["mode"], "READ-ONLY");
+    for pointer in [
+        "/thermals/cpu_celsius",
+        "/thermals/gpu_celsius",
+        "/fans/cpu_percent",
+        "/fans/mode",
+        "/battery/percentage",
+        "/battery/ac_connected",
+        "/devices/webcam",
+    ] {
+        assert_eq!(
+            json.pointer(pointer),
+            Some(&serde_json::Value::Null),
+            "{pointer} must be explicit null"
+        );
+    }
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("MEC status degraded:"));
+}
+
+#[test]
+fn healthy_json_has_empty_stderr() {
+    mec()
+        .args(["--sys-root", &fixture_arg("gf63"), "status", "--json"])
+        .assert()
+        .success()
+        .stderr(predicates::str::is_empty());
+}
+
+#[test]
+fn identity_failure_json_stays_fatal() {
+    mec()
+        .args([
+            "--sys-root",
+            "/nonexistent-mec-fixture-root",
+            "status",
+            "--json",
+        ])
+        .assert()
         .failure()
-        .code(1)
         .stderr(predicates::str::contains("MEC status unavailable:"));
 }
 

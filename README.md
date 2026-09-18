@@ -21,15 +21,20 @@ Implemented in this tree:
 - Conservative `READY` / `READ-ONLY` compatibility policy
 - Read-only `msi-ec` backend with validated hardware snapshots
 - `mec doctor [--sys-root PATH]` diagnostics (read-only)
+- Read-only `mec status` with human-readable and `--json` output
+- Runtime battery state (charge, status, AC presence)
+- Read-only `mec monitor` with validated 500ms/1s/2s/5s polling,
+  bounded in-memory history, Ctrl+C shutdown, and graceful
+  snapshot-error degradation with recovery notices
 - Reusable fake sysfs fixtures under `tests/fixtures/`
 
 Explicitly NOT implemented yet:
 
 - Hardware writes of any kind
 - Profiles / transactional apply
-- `status` / monitoring CLI (PLAN-002)
 - TUI
 - Physical hardware validation
+- Packaging/release binaries
 
 See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
 [implementation plan](docs/superpowers/plans/2026-09-18-mec-v1-implementation-plan.md).

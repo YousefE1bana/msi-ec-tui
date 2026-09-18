@@ -16,6 +16,7 @@ fn main() {
                 SystemPaths::new(cli.sys_root),
                 interval,
                 &mut std::io::stdout(),
+                &mut std::io::stderr(),
             ) {
                 Ok(()) => {}
                 Err(error) => {
@@ -27,6 +28,9 @@ fn main() {
         Some(Command::Status { json }) => {
             match mec::cli::status::status(SystemPaths::new(cli.sys_root), LinuxSysfsReader) {
                 Ok(report) => {
+                    if let Some(error) = report.snapshot_error() {
+                        eprintln!("MEC status degraded: {error}");
+                    }
                     if json {
                         match report.to_json() {
                             Ok(document) => println!("{document}"),
