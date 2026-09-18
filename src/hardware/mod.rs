@@ -11,6 +11,7 @@ pub mod paths;
 pub mod support;
 pub mod sysfs;
 pub mod values;
+pub mod write_boundary;
 
 pub use backend::{BackendError, EcBackend};
 pub use capabilities::{BacklightCapability, Capabilities};
@@ -27,3 +28,4 @@ pub use sysfs::{LinuxSysfsReader, SysfsError, SysfsReader};
 pub use values::{
     FanMode, FanPercent, ModeValidationError, SensorValueError, ShiftMode, TemperatureCelsius,
 };
+pub use write_boundary::{HardwareWriteBoundary, WriteBoundaryError};
