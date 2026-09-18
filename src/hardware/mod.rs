@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod capabilities;
 pub mod capability_detector;
+pub mod command;
 pub mod detector;
 pub mod device;
 pub mod msi_ec;
@@ -14,6 +15,9 @@ pub mod values;
 pub use backend::{BackendError, EcBackend};
 pub use capabilities::{BacklightCapability, Capabilities};
 pub use capability_detector::{CapabilityDetector, CapabilityDiscoveryError};
+pub use command::{
+    BatteryThreshold, BatteryThresholdError, CommandValidationError, HardwareCommand,
+};
 pub use detector::{DetectionError, DeviceDetector};
 pub use device::{BatteryStatus, DeviceInfo, HardwareSnapshot};
 pub use msi_ec::MsiEcBackend;
