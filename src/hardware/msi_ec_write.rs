@@ -10,11 +10,6 @@
 //! The boundary performs no validation itself. [`HardwareCommand::validate`]
 //! runs in the executor immediately before every crossing.
 
-// The writer lands one task before its first caller: Task 4 forbids CLI/TUI
-// wiring by design, so the lib target sees this module as dead until Task 5
-// connects it to the executor. Revisit this allowance then.
-#![allow(dead_code)]
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
