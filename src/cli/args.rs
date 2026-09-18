@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::monitoring::PollInterval;
+
 /// MEC command-line interface.
 #[derive(Debug, Parser)]
 #[command(name = "mec", about = "MSI EC Control Center for Linux")]
@@ -21,4 +23,16 @@ pub struct Cli {
 pub enum Command {
     /// Inspect hardware compatibility and report diagnostics.
     Doctor,
+    /// Show hardware state.
+    Status {
+        /// Emit machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Continuously monitor hardware state until Ctrl+C.
+    Monitor {
+        /// Poll interval between samples.
+        #[arg(long, default_value_t = PollInterval::default())]
+        interval: PollInterval,
+    },
 }
