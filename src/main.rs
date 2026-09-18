@@ -11,5 +11,14 @@ fn main() {
             let report = doctor(SystemPaths::new(cli.sys_root), LinuxSysfsReader);
             println!("{report}");
         }
+        Some(Command::Status) => {
+            match mec::cli::status::status(SystemPaths::new(cli.sys_root), LinuxSysfsReader) {
+                Ok(report) => println!("{report}"),
+                Err(error) => {
+                    eprintln!("MEC status unavailable: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 }
