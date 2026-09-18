@@ -41,6 +41,61 @@ impl Lifecycle {
     }
 }
 
+/// Setup progress reached before [`TerminalSession::enter`] failed.
+///
+/// Keeps alternate-screen entry and cursor hiding as distinct stages so a
+/// cursor-hide failure still leaves the alternate screen it must clean up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnterStage {
+    /// Raw mode enabled; alternate screen not yet entered.
+    Raw,
+    /// Alternate screen entered; cursor not yet hidden.
+    Alternate,
+    /// Cursor hidden; terminal construction pending.
+    CursorHidden,
+}
+
+/// One best-effort restoration operation for partial `enter` cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnterCleanup {
+    ShowCursor,
+    LeaveAlternateScreen,
+    DisableRawMode,
+}
+
+/// Cleanup required when `enter` fails after reaching `completed`.
+///
+/// Pure so the staged contract stays testable without touching a real
+/// terminal. Cleanup failures never replace the original setup error.
+fn cleanup_after_enter_failure(completed: EnterStage) -> &'static [EnterCleanup] {
+    match completed {
+        EnterStage::Raw => &[EnterCleanup::DisableRawMode],
+        EnterStage::Alternate | EnterStage::CursorHidden => &[
+            EnterCleanup::ShowCursor,
+            EnterCleanup::LeaveAlternateScreen,
+            EnterCleanup::DisableRawMode,
+        ],
+    }
+}
+
+/// Runs the staged partial-`enter` cleanup best-effort.
+fn cleanup_partial_enter(completed: EnterStage) {
+    let mut stdout = std::io::stdout();
+    for step in cleanup_after_enter_failure(completed) {
+        match step {
+            EnterCleanup::ShowCursor => {
+                let _ = execute!(stdout, Show);
+            }
+            EnterCleanup::LeaveAlternateScreen => {
+                let _ = execute!(stdout, LeaveAlternateScreen);
+            }
+            EnterCleanup::DisableRawMode => {
+                let _ = disable_raw_mode();
+            }
+        }
+    }
+}
+
 /// Owns the Crossterm/Ratatui terminal from entry to restoration.
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -49,12 +104,16 @@ pub struct TerminalSession {
 
 impl TerminalSession {
     /// Enters raw mode, the alternate screen, and a hidden cursor, then
-    /// constructs the Ratatui terminal. Cleans up best-effort and returns
-    /// the original error when a later step fails.
+    /// constructs the Ratatui terminal. Each stage cleans up on failure
+    /// and returns the original error.
     pub fn enter() -> std::io::Result<Self> {
         enable_raw_mode()?;
-        if let Err(error) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
-            let _ = disable_raw_mode();
+        if let Err(error) = execute!(std::io::stdout(), EnterAlternateScreen) {
+            cleanup_partial_enter(EnterStage::Raw);
+            return Err(error);
+        }
+        if let Err(error) = execute!(std::io::stdout(), Hide) {
+            cleanup_partial_enter(EnterStage::Alternate);
             return Err(error);
         }
         match Terminal::new(CrosstermBackend::new(std::io::stdout())) {
@@ -63,8 +122,7 @@ impl TerminalSession {
                 lifecycle: Lifecycle::default(),
             }),
             Err(error) => {
-                let _ = execute!(std::io::stdout(), Show, LeaveAlternateScreen);
-                let _ = disable_raw_mode();
+                cleanup_partial_enter(EnterStage::CursorHidden);
                 Err(error)
             }
         }
@@ -111,7 +169,7 @@ impl Drop for TerminalSession {
 
 #[cfg(test)]
 mod tests {
-    use super::Lifecycle;
+    use super::{EnterCleanup, EnterStage, Lifecycle, cleanup_after_enter_failure};
 
     #[test]
     fn first_restore_transition_runs_once() {
@@ -124,5 +182,53 @@ mod tests {
         let mut lifecycle = Lifecycle::default();
         assert!(lifecycle.restore());
         assert!(!lifecycle.restore());
+    }
+
+    #[test]
+    fn alternate_entry_failure_cleans_only_raw_mode() {
+        assert_eq!(
+            cleanup_after_enter_failure(EnterStage::Raw),
+            &[EnterCleanup::DisableRawMode]
+        );
+    }
+
+    #[test]
+    fn hide_failure_cleans_cursor_screen_and_raw() {
+        assert_eq!(
+            cleanup_after_enter_failure(EnterStage::Alternate),
+            &[
+                EnterCleanup::ShowCursor,
+                EnterCleanup::LeaveAlternateScreen,
+                EnterCleanup::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_construction_failure_runs_full_cleanup() {
+        assert_eq!(
+            cleanup_after_enter_failure(EnterStage::CursorHidden),
+            &[
+                EnterCleanup::ShowCursor,
+                EnterCleanup::LeaveAlternateScreen,
+                EnterCleanup::DisableRawMode,
+            ]
+        );
+    }
+
+    #[test]
+    fn enter_stages_stay_distinct() {
+        assert_ne!(EnterStage::Raw, EnterStage::Alternate);
+        assert_ne!(EnterStage::Alternate, EnterStage::CursorHidden);
+        assert!(
+            !cleanup_after_enter_failure(EnterStage::Raw)
+                .contains(&EnterCleanup::LeaveAlternateScreen),
+            "raw-only failure must not leave the alternate screen"
+        );
+        assert!(
+            cleanup_after_enter_failure(EnterStage::Alternate)
+                .contains(&EnterCleanup::LeaveAlternateScreen),
+            "cursor-hide failure must leave the alternate screen"
+        );
     }
 }
