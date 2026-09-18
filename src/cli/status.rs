@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::hardware::{
     BackendError, BatteryStatus, DeviceInfo, EcBackend, HardwareSnapshot, MsiEcBackend,
     SupportEvaluator, SupportMode, SysfsReader, SystemPaths,
@@ -52,6 +54,125 @@ fn battery_state(status: Option<&BatteryStatus>) -> &'static str {
         Some(BatteryStatus::NotCharging) => "Not charging",
         Some(BatteryStatus::Full) => "Full",
         None => "N/A",
+    }
+}
+
+/// Explicit machine-output DTOs. Hardware-domain structs are deliberately
+/// not `Serialize`; the CLI schema evolves independently of the domain.
+#[derive(Debug, Clone, Serialize)]
+struct DeviceDto {
+    manufacturer: String,
+    product_name: String,
+    board_name: Option<String>,
+    bios_version: Option<String>,
+    ec_firmware_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ThermalsDto {
+    cpu_celsius: Option<u8>,
+    gpu_celsius: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FansDto {
+    cpu_percent: Option<u16>,
+    gpu_percent: Option<u16>,
+    mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerformanceDto {
+    shift_mode: Option<String>,
+    cooler_boost: Option<bool>,
+    super_battery: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BatteryDto {
+    percentage: Option<u8>,
+    status: Option<String>,
+    ac_connected: Option<bool>,
+    start_threshold_percent: Option<u8>,
+    end_threshold_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DevicesDto {
+    webcam: Option<bool>,
+    webcam_block: Option<bool>,
+    keyboard_backlight: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StatusDto {
+    device: DeviceDto,
+    mode: &'static str,
+    thermals: ThermalsDto,
+    fans: FansDto,
+    performance: PerformanceDto,
+    battery: BatteryDto,
+    devices: DevicesDto,
+}
+
+fn battery_status_text(status: Option<&BatteryStatus>) -> Option<String> {
+    status.map(|value| battery_state(Some(value)).to_owned())
+}
+
+impl StatusReport {
+    fn to_dto(&self) -> StatusDto {
+        let snapshot = &self.snapshot;
+        StatusDto {
+            device: DeviceDto {
+                manufacturer: self.device.manufacturer.clone(),
+                product_name: self.device.product_name.clone(),
+                board_name: self.device.board_name.clone(),
+                bios_version: self.device.bios_version.clone(),
+                ec_firmware_version: self.device.ec_firmware_version.clone(),
+            },
+            mode: match self.mode {
+                SupportMode::Ready => "READY",
+                SupportMode::ReadOnly(_) => "READ-ONLY",
+            },
+            thermals: ThermalsDto {
+                cpu_celsius: snapshot.cpu_temperature.map(|value| value.get()),
+                gpu_celsius: snapshot.gpu_temperature.map(|value| value.get()),
+            },
+            fans: FansDto {
+                cpu_percent: snapshot.cpu_fan.map(|value| value.get()),
+                gpu_percent: snapshot.gpu_fan.map(|value| value.get()),
+                mode: snapshot
+                    .fan_mode
+                    .as_ref()
+                    .map(|mode| mode.as_str().to_owned()),
+            },
+            performance: PerformanceDto {
+                shift_mode: snapshot
+                    .shift_mode
+                    .as_ref()
+                    .map(|mode| mode.as_str().to_owned()),
+                cooler_boost: snapshot.cooler_boost,
+                super_battery: snapshot.super_battery,
+            },
+            battery: BatteryDto {
+                percentage: snapshot.battery_percentage,
+                status: battery_status_text(snapshot.battery_status.as_ref()),
+                ac_connected: snapshot.ac_connected,
+                start_threshold_percent: snapshot.battery_start_threshold,
+                end_threshold_percent: snapshot.battery_end_threshold,
+            },
+            devices: DevicesDto {
+                webcam: snapshot.webcam,
+                webcam_block: snapshot.webcam_block,
+                keyboard_backlight: snapshot.keyboard_backlight,
+            },
+        }
+    }
+
+    /// Serializes the report as one compact JSON document (no trailing
+    /// newline; the CLI adds exactly one when printing).
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.to_dto())
     }
 }
 

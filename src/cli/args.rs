@@ -21,6 +21,10 @@ pub struct Cli {
 pub enum Command {
     /// Inspect hardware compatibility and report diagnostics.
     Doctor,
-    /// Show human-readable hardware state.
-    Status,
+    /// Show hardware state.
+    Status {
+        /// Emit machine-readable JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }

@@ -11,9 +11,21 @@ fn main() {
             let report = doctor(SystemPaths::new(cli.sys_root), LinuxSysfsReader);
             println!("{report}");
         }
-        Some(Command::Status) => {
+        Some(Command::Status { json }) => {
             match mec::cli::status::status(SystemPaths::new(cli.sys_root), LinuxSysfsReader) {
-                Ok(report) => println!("{report}"),
+                Ok(report) => {
+                    if json {
+                        match report.to_json() {
+                            Ok(document) => println!("{document}"),
+                            Err(error) => {
+                                eprintln!("MEC status JSON unavailable: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        println!("{report}");
+                    }
+                }
                 Err(error) => {
                     eprintln!("MEC status unavailable: {error}");
                     std::process::exit(1);
