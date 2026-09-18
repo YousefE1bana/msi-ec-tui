@@ -9,19 +9,18 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::LiveHardware;
-use crate::hardware::{
-    EcBackend, FanMode, FanPercent, HardwareSnapshot, ShiftMode, SupportMode, TemperatureCelsius,
-};
+use crate::hardware::{EcBackend, SupportMode};
 
 use crate::tui::ui::{
-    ac_text, battery_status_text, on_off_text, read_only_reason_text, support_mode_text,
-    telemetry_state_text,
+    MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH, battery_lines, device_lines, performance_lines,
+    read_only_reason_text, render_compact, render_panel, support_mode_text, telemetry_state_text,
+    thermals_lines,
 };
 
 /// Conservative fallback threshold: below this the dashboard cannot show
 /// its panels honestly, so a compact message replaces it.
-const MIN_DASHBOARD_WIDTH: u16 = 60;
-const MIN_DASHBOARD_HEIGHT: u16 = 14;
+const MIN_DASHBOARD_WIDTH: u16 = MIN_SCREEN_WIDTH;
+const MIN_DASHBOARD_HEIGHT: u16 = MIN_SCREEN_HEIGHT;
 
 /// Renders the read-only dashboard into `area`.
 ///
@@ -79,11 +78,6 @@ fn render_panels<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardwar
     render_panel(frame, right[1], " DEVICE ", device_lines(snapshot));
 }
 
-fn render_compact(frame: &mut Frame, area: Rect) {
-    let text = Text::from(vec![Line::from("MEC"), Line::from("Terminal too small")]);
-    frame.render_widget(Paragraph::new(text), area);
-}
-
 fn render_header<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardware<B>) {
     let mut mode_line = format!("Mode: {}", support_mode_text(live.mode()));
     if let SupportMode::ReadOnly(reason) = live.mode() {
@@ -101,99 +95,6 @@ fn render_header<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardwar
         lines.push(Line::from(error.to_string()));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
-}
-
-fn render_panel(frame: &mut Frame, area: Rect, title: &'static str, lines: Vec<Line<'static>>) {
-    let panel = Block::default().borders(Borders::ALL).title(title);
-    let inner = panel.inner(area);
-    frame.render_widget(panel, area);
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-}
-
-fn temperature_text(value: Option<TemperatureCelsius>) -> String {
-    value
-        .map(|reading| format!("{}°C", reading.get()))
-        .unwrap_or_else(|| "N/A".to_owned())
-}
-
-fn fan_text(value: Option<FanPercent>) -> String {
-    value
-        .map(|reading| format!("{}%", reading.get()))
-        .unwrap_or_else(|| "N/A".to_owned())
-}
-
-fn percent_text(value: Option<u8>) -> String {
-    value
-        .map(|level| format!("{level}%"))
-        .unwrap_or_else(|| "N/A".to_owned())
-}
-
-fn fan_mode_text(mode: Option<&FanMode>) -> String {
-    mode.map(|value| value.as_str().to_owned())
-        .unwrap_or_else(|| "N/A".to_owned())
-}
-
-fn shift_mode_text(mode: Option<&ShiftMode>) -> String {
-    mode.map(|value| value.as_str().to_owned())
-        .unwrap_or_else(|| "N/A".to_owned())
-}
-
-fn backlight_text(level: Option<u8>) -> String {
-    level
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "N/A".to_owned())
-}
-
-fn thermals_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
-    let cpu = snapshot.and_then(|state| state.cpu_temperature);
-    let gpu = snapshot.and_then(|state| state.gpu_temperature);
-    let cpu_fan = snapshot.and_then(|state| state.cpu_fan);
-    let gpu_fan = snapshot.and_then(|state| state.gpu_fan);
-    vec![
-        Line::from(format!("CPU Temperature: {}", temperature_text(cpu))),
-        Line::from(format!("GPU Temperature: {}", temperature_text(gpu))),
-        Line::from(format!("CPU Fan: {}", fan_text(cpu_fan))),
-        Line::from(format!("GPU Fan: {}", fan_text(gpu_fan))),
-    ]
-}
-
-fn performance_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
-    let shift = snapshot.and_then(|state| state.shift_mode.as_ref());
-    let fan = snapshot.and_then(|state| state.fan_mode.as_ref());
-    let cooler = snapshot.and_then(|state| state.cooler_boost);
-    let super_battery = snapshot.and_then(|state| state.super_battery);
-    vec![
-        Line::from(format!("Shift Mode: {}", shift_mode_text(shift))),
-        Line::from(format!("Fan Mode: {}", fan_mode_text(fan))),
-        Line::from(format!("Cooler Boost: {}", on_off_text(cooler))),
-        Line::from(format!("Super Battery: {}", on_off_text(super_battery))),
-    ]
-}
-
-fn battery_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
-    let charge = snapshot.and_then(|state| state.battery_percentage);
-    let state = snapshot.and_then(|state| state.battery_status.as_ref());
-    let ac = snapshot.and_then(|state| state.ac_connected);
-    let start = snapshot.and_then(|state| state.battery_start_threshold);
-    let end = snapshot.and_then(|state| state.battery_end_threshold);
-    vec![
-        Line::from(format!("Charge: {}", percent_text(charge))),
-        Line::from(format!("State: {}", battery_status_text(state))),
-        Line::from(format!("AC: {}", ac_text(ac))),
-        Line::from(format!("Start Threshold: {}", percent_text(start))),
-        Line::from(format!("End Threshold: {}", percent_text(end))),
-    ]
-}
-
-fn device_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
-    let webcam = snapshot.and_then(|state| state.webcam);
-    let block = snapshot.and_then(|state| state.webcam_block);
-    let backlight = snapshot.and_then(|state| state.keyboard_backlight);
-    vec![
-        Line::from(format!("Webcam: {}", on_off_text(webcam))),
-        Line::from(format!("Webcam Block: {}", on_off_text(block))),
-        Line::from(format!("Keyboard Backlight: {}", backlight_text(backlight))),
-    ]
 }
 
 #[cfg(test)]

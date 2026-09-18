@@ -14,5 +14,8 @@ pub mod ui;
 pub use event::{CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event};
 pub use input::action_for_key;
 pub use runtime::{run_event_loop, run_event_loop_with_ticks};
-pub use screens::render_dashboard;
+pub use screens::{
+    render_battery, render_dashboard, render_devices, render_diagnostics, render_fans,
+    render_performance, render_screen,
+};
 pub use terminal::TerminalSession;
