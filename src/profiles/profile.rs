@@ -672,10 +672,56 @@ mod tests {
     }
 
     #[test]
+    fn battery_end_0_rejected() {
+        // 0 deserializes as u8, then domain validation refuses it.
+        let input = "name = \"A\"\n\n[battery]\ncharge_end_threshold = 0\n";
+        assert!(matches!(
+            Profile::parse_toml(input),
+            Err(ProfileParseError::Validation(
+                ProfileValidationError::InvalidBatteryThreshold(
+                    BatteryThresholdError::EndOutOfRange(0)
+                )
+            ))
+        ));
+    }
+
+    #[test]
     fn battery_end_101_rejected() {
-        // 101 exceeds u8 range, so TOML decoding itself refuses it.
+        // 101 deserializes as u8, then domain validation refuses it.
         let input = "name = \"A\"\n\n[battery]\ncharge_end_threshold = 101\n";
-        assert!(Profile::parse_toml(input).is_err());
+        assert!(matches!(
+            Profile::parse_toml(input),
+            Err(ProfileParseError::Validation(
+                ProfileValidationError::InvalidBatteryThreshold(
+                    BatteryThresholdError::EndOutOfRange(101)
+                )
+            ))
+        ));
+    }
+
+    #[test]
+    fn battery_end_255_rejected() {
+        // 255 deserializes as u8, then domain validation refuses it.
+        let input = "name = \"A\"\n\n[battery]\ncharge_end_threshold = 255\n";
+        assert!(matches!(
+            Profile::parse_toml(input),
+            Err(ProfileParseError::Validation(
+                ProfileValidationError::InvalidBatteryThreshold(
+                    BatteryThresholdError::EndOutOfRange(255)
+                )
+            ))
+        ));
+    }
+
+    #[test]
+    fn battery_end_above_u8_rejected_by_parsing() {
+        // 0..=255 deserializes as u8 and reaches domain validation; values
+        // above 255 genuinely cannot decode into u8, so TOML refuses them.
+        let input = "name = \"A\"\n\n[battery]\ncharge_end_threshold = 256\n";
+        assert!(matches!(
+            Profile::parse_toml(input),
+            Err(ProfileParseError::Toml(_))
+        ));
     }
 
     #[test]
