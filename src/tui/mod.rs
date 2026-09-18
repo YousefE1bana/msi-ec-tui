@@ -11,5 +11,5 @@ mod terminal;
 
 pub use event::{CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event};
 pub use input::action_for_key;
-pub use runtime::run_event_loop;
+pub use runtime::{run_event_loop, run_event_loop_with_ticks};
 pub use terminal::TerminalSession;

@@ -18,10 +18,30 @@ pub fn run_event_loop<E: EventSource>(
     events: &mut E,
     timeout: Duration,
 ) -> std::io::Result<()> {
+    run_event_loop_with_ticks(state, events, timeout, || {})
+}
+
+/// Drives `state` until it requests quit, sampling immediately once before
+/// the first event and again on every [`TuiEvent::Tick`].
+///
+/// Actions apply to state; resizes and ignored events never tick. Source
+/// errors propagate without an extra tick and never become quits.
+pub fn run_event_loop_with_ticks<E, F>(
+    state: &mut AppState,
+    events: &mut E,
+    timeout: Duration,
+    mut on_tick: F,
+) -> std::io::Result<()>
+where
+    E: EventSource,
+    F: FnMut(),
+{
+    on_tick();
     while !state.should_quit() {
         match events.next_event(timeout)? {
             TuiEvent::Action(action) => state.apply(action),
-            TuiEvent::Tick | TuiEvent::Resize { .. } | TuiEvent::Ignored => {}
+            TuiEvent::Tick => on_tick(),
+            TuiEvent::Resize { .. } | TuiEvent::Ignored => {}
         }
     }
     Ok(())
@@ -35,7 +55,7 @@ mod tests {
 
     use crate::app::{AppAction, AppState, Screen};
 
-    use super::{EventSource, TuiEvent, run_event_loop};
+    use super::{EventSource, TuiEvent, run_event_loop, run_event_loop_with_ticks};
 
     const TIMEOUT: Duration = Duration::from_millis(10);
 
@@ -168,5 +188,178 @@ mod tests {
         run_event_loop(&mut state, &mut source, TIMEOUT).expect("pre-quit loop succeeds");
         assert_eq!(source.consumed, 0);
         assert_eq!(state.current_screen(), Screen::Dashboard);
+    }
+
+    fn run_with_ticks(script: Vec<TuiEvent>) -> (AppState, usize, usize) {
+        let mut state = AppState::default();
+        let mut source = ScriptedSource::events(script);
+        let mut ticks = 0;
+        run_event_loop_with_ticks(&mut state, &mut source, TIMEOUT, || ticks += 1)
+            .expect("scripted tick loop succeeds");
+        (state, source.consumed, ticks)
+    }
+
+    #[test]
+    fn initial_tick_runs_before_first_event() {
+        let (_, consumed, ticks) = run_with_ticks(vec![TuiEvent::Action(AppAction::Quit)]);
+        assert_eq!(ticks, 1);
+        assert_eq!(consumed, 1);
+    }
+
+    #[test]
+    fn immediate_quit_still_receives_exactly_one_initial_tick() {
+        let (state, _, ticks) = run_with_ticks(vec![TuiEvent::Action(AppAction::Quit)]);
+        assert_eq!(ticks, 1);
+        assert!(state.should_quit());
+    }
+
+    #[test]
+    fn tick_event_invokes_one_additional_callback() {
+        let (_, _, ticks) = run_with_ticks(vec![TuiEvent::Tick, TuiEvent::Action(AppAction::Quit)]);
+        assert_eq!(ticks, 2);
+    }
+
+    #[test]
+    fn two_tick_events_invoke_two_additional_callbacks() {
+        let (_, _, ticks) = run_with_ticks(vec![
+            TuiEvent::Tick,
+            TuiEvent::Tick,
+            TuiEvent::Action(AppAction::Quit),
+        ]);
+        assert_eq!(ticks, 3);
+    }
+
+    #[test]
+    fn action_does_not_invoke_extra_tick() {
+        let (state, _, ticks) = run_with_ticks(vec![
+            TuiEvent::Action(AppAction::NextScreen),
+            TuiEvent::Action(AppAction::Quit),
+        ]);
+        assert_eq!(ticks, 1);
+        assert_eq!(state.current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn resize_does_not_invoke_extra_tick() {
+        let (_, _, ticks) = run_with_ticks(vec![
+            TuiEvent::Resize {
+                width: 120,
+                height: 40,
+            },
+            TuiEvent::Action(AppAction::Quit),
+        ]);
+        assert_eq!(ticks, 1);
+    }
+
+    #[test]
+    fn ignored_does_not_invoke_extra_tick() {
+        let (_, _, ticks) =
+            run_with_ticks(vec![TuiEvent::Ignored, TuiEvent::Action(AppAction::Quit)]);
+        assert_eq!(ticks, 1);
+    }
+
+    #[test]
+    fn quit_stops_further_events_and_ticks() {
+        let (state, consumed, ticks) =
+            run_with_ticks(vec![TuiEvent::Action(AppAction::Quit), TuiEvent::Tick]);
+        assert_eq!(consumed, 1);
+        assert_eq!(ticks, 1);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+    }
+
+    #[test]
+    fn tick_loop_error_propagates_after_initial_tick_only() {
+        let mut state = AppState::default();
+        let mut source = ScriptedSource::failing("terminal gone");
+        let mut ticks = 0;
+        let error =
+            run_event_loop_with_ticks(&mut state, &mut source, TIMEOUT, || ticks += 1).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert_eq!(ticks, 1);
+        assert!(!state.should_quit());
+    }
+
+    #[test]
+    fn telemetry_recovery_flows_through_tick_loop() {
+        use std::cell::RefCell;
+
+        use crate::app::LiveHardware;
+        use crate::hardware::{
+            BackendError, Capabilities, DeviceInfo, EcBackend, HardwareSnapshot, SupportMode,
+            TemperatureCelsius,
+        };
+        use crate::monitoring::SnapshotHistory;
+
+        struct TelemetryBackend {
+            script: RefCell<VecDeque<Result<HardwareSnapshot, BackendError>>>,
+        }
+
+        impl EcBackend for TelemetryBackend {
+            fn detect_device(&self) -> Result<DeviceInfo, BackendError> {
+                panic!("tick refresh must not detect device identity");
+            }
+
+            fn capabilities(&self) -> Result<Capabilities, BackendError> {
+                panic!("tick refresh must not discover capabilities");
+            }
+
+            fn snapshot(&self) -> Result<HardwareSnapshot, BackendError> {
+                self.script
+                    .borrow_mut()
+                    .pop_front()
+                    .expect("script exhausted")
+            }
+        }
+
+        fn reading(celsius: u8) -> HardwareSnapshot {
+            HardwareSnapshot {
+                cpu_temperature: TemperatureCelsius::try_from(celsius).ok(),
+                ..Default::default()
+            }
+        }
+
+        let mut live = LiveHardware::new(
+            DeviceInfo {
+                manufacturer: "MSI".to_owned(),
+                product_name: "Tick Recovery Fixture".to_owned(),
+                board_name: None,
+                bios_version: None,
+                ec_firmware_version: None,
+            },
+            SupportMode::Ready,
+            TelemetryBackend {
+                script: RefCell::new(
+                    vec![
+                        Ok(reading(60)),
+                        Err(BackendError::Unavailable),
+                        Ok(reading(61)),
+                    ]
+                    .into(),
+                ),
+            },
+            SnapshotHistory::default(),
+        );
+        let mut state = AppState::default();
+        let mut source = ScriptedSource::events(vec![
+            TuiEvent::Tick,
+            TuiEvent::Tick,
+            TuiEvent::Action(AppAction::Quit),
+        ]);
+        run_event_loop_with_ticks(&mut state, &mut source, TIMEOUT, || live.refresh())
+            .expect("telemetry tick loop succeeds");
+
+        assert!(state.should_quit());
+        assert!(!live.is_degraded());
+        assert_eq!(live.history().len(), 2);
+        let temperatures: Vec<u8> = live
+            .history()
+            .iter()
+            .map(|snapshot| snapshot.cpu_temperature.unwrap().get())
+            .collect();
+        assert_eq!(temperatures, vec![60, 61]);
+        assert_eq!(
+            live.current_snapshot().unwrap().cpu_temperature,
+            reading(61).cpu_temperature
+        );
     }
 }

@@ -4,7 +4,9 @@
 //! paths, no terminal types.
 
 mod action;
+mod live;
 mod state;
 
 pub use action::AppAction;
+pub use live::LiveHardware;
 pub use state::{AppState, Screen};
