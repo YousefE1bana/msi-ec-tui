@@ -7,8 +7,16 @@ the [`msi-ec`](https://github.com/BeardOverflow/msi-ec) Linux kernel module.
 
 ## Status
 
-PLAN-001 (hardware foundation) is implemented. Running `cargo run` with no
-subcommand still prints exactly:
+PLAN-003 (read-only TUI) is implemented. Running `cargo run` with no
+subcommand launches the interactive read-only TUI when both stdin and stdout
+are terminals:
+
+- Arrow keys / hjkl / Tab move between screens
+- `1`–`6` jump directly to a screen
+- `?` toggles help, `q` quits
+
+When stdout is redirected or captured (pipes, scripts, CI), bare `mec` still
+prints exactly:
 
 ```text
 MEC — MSI EC Control Center
@@ -26,13 +34,15 @@ Implemented in this tree:
 - Read-only `mec monitor` with validated 500ms/1s/2s/5s polling,
   bounded in-memory history, Ctrl+C shutdown, and graceful
   snapshot-error degradation with recovery notices
+- Interactive read-only TUI (`mec` on a terminal): Dashboard, Performance,
+  Fans, Battery, Devices, and Diagnostics screens with 1-second polling,
+  keyboard navigation, help overlay, and degraded-telemetry presentation
 - Reusable fake sysfs fixtures under `tests/fixtures/`
 
 Explicitly NOT implemented yet:
 
 - Hardware writes of any kind
 - Profiles / transactional apply
-- TUI
 - Physical hardware validation
 - Packaging/release binaries
 

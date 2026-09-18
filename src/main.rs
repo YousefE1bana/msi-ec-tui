@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use clap::Parser;
 use mec::cli::{Cli, Command};
 use mec::diagnostics::doctor;
@@ -6,7 +8,19 @@ use mec::hardware::{LinuxSysfsReader, SystemPaths};
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        None => println!("MEC — MSI EC Control Center"),
+        None => {
+            if mec::tui::should_launch_tui(
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
+            ) {
+                if let Err(error) = mec::tui::run_tui(SystemPaths::new(cli.sys_root)) {
+                    eprintln!("MEC TUI unavailable: {error}");
+                    std::process::exit(1);
+                }
+            } else {
+                println!("MEC — MSI EC Control Center");
+            }
+        }
         Some(Command::Doctor) => {
             let report = doctor(SystemPaths::new(cli.sys_root), LinuxSysfsReader);
             println!("{report}");
