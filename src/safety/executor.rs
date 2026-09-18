@@ -277,7 +277,7 @@ mod tests {
         fn enable_battery_thresholds(&self) {
             let entry = self.root.path().join("sys/class/power_supply/BAT0");
             fs::create_dir_all(&entry).unwrap();
-            fs::write(entry.join("charge_control_start_threshold"), b"50\n").unwrap();
+            fs::write(entry.join("charge_control_start_threshold"), b"70\n").unwrap();
             fs::write(entry.join("charge_control_end_threshold"), b"80\n").unwrap();
         }
     }
@@ -291,7 +291,7 @@ mod tests {
     }
 
     fn threshold() -> BatteryThreshold {
-        BatteryThreshold::new(50, 80).unwrap()
+        BatteryThreshold::new(70, 80).unwrap()
     }
 
     fn every_command() -> Vec<HardwareCommand> {
@@ -334,7 +334,7 @@ mod tests {
         let HardwareCommand::SetBatteryThreshold(received) = &recorded[0] else {
             panic!("expected the threshold command, got {:?}", recorded[0]);
         };
-        assert_eq!(received.start_percent(), 50);
+        assert_eq!(received.start_percent(), 70);
         assert_eq!(received.end_percent(), 80);
     }
 

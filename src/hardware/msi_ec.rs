@@ -148,6 +148,15 @@ where
                 "{FIELD} inverted: start {start} exceeds end {end}"
             )));
         }
+        // `msi-ec` exposes one EC charge-control state through both files:
+        // only a fixed 10-point hysteresis pair is representable. A
+        // coherent-looking but impossible pair means the interface is not
+        // the expected `msi-ec` state and must not be trusted.
+        if end != start + 10 {
+            return Err(BackendError::InvalidData(format!(
+                "{FIELD} impossible pair for msi-ec: start {start}, end {end}"
+            )));
+        }
         Ok((Some(start), Some(end)))
     }
 

@@ -145,7 +145,7 @@ fn gf_fixture_status_battery() {
         .stdout(predicates::str::contains("Charge: 77%"))
         .stdout(predicates::str::contains("State: Charging"))
         .stdout(predicates::str::contains("AC: Connected"))
-        .stdout(predicates::str::contains("Start Threshold: 50%"))
+        .stdout(predicates::str::contains("Start Threshold: 70%"))
         .stdout(predicates::str::contains("End Threshold: 80%"));
 }
 
@@ -391,7 +391,7 @@ fn gf_status_json_battery() {
     assert_eq!(json["battery"]["percentage"], 77);
     assert_eq!(json["battery"]["status"], "Charging");
     assert_eq!(json["battery"]["ac_connected"], true);
-    assert_eq!(json["battery"]["start_threshold_percent"], 50);
+    assert_eq!(json["battery"]["start_threshold_percent"], 70);
     assert_eq!(json["battery"]["end_threshold_percent"], 80);
 }
 

@@ -429,6 +429,13 @@ Custom
 
 Actual values must respect the interface exposed by the device rather than assuming all firmware uses identical presets.
 
+For the v1 `msi-ec` backend, the two charge-threshold files describe one EC
+charge-control state with a fixed 10-percentage-point hysteresis:
+`end == start + 10`, with start in `0..=90` and end in `10..=100`.
+`BatteryThreshold` is valid by construction only for such pairs; the backend
+rejects any other coherent-looking pair as invalid data. This models the
+`msi-ec` contract, not every Linux power-supply driver.
+
 ---
 
 # 13. Profiles

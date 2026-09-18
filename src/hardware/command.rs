@@ -10,8 +10,11 @@ use super::{Capabilities, FanMode, ShiftMode, SupportMode};
 
 /// Validated start/end battery charge thresholds, in percent.
 ///
-/// Valid by construction: both ends are within `0..=100` and start never
-/// exceeds end. Values are never clamped, reordered, or normalized.
+/// Valid by construction for the `msi-ec` backend: the two sysfs files
+/// describe one EC charge-control state with a fixed 10-percentage-point
+/// hysteresis, so `end_percent` is always `start_percent + 10`, start is
+/// within `0..=90`, and end is within `10..=100`. Values are never clamped,
+/// reordered, or normalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatteryThreshold {
     start_percent: u8,
@@ -21,28 +24,29 @@ pub struct BatteryThreshold {
 /// Why a [`BatteryThreshold`] pair was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum BatteryThresholdError {
-    /// The start percent exceeds 100.
-    #[error("battery threshold start {0} exceeds 100 percent")]
+    /// The start percent is outside the representable `0..=90` range.
+    #[error("battery threshold start {0} is outside 0 to 90 percent")]
     StartOutOfRange(u8),
-    /// The end percent exceeds 100.
-    #[error("battery threshold end {0} exceeds 100 percent")]
+    /// The end percent is outside the representable `10..=100` range.
+    #[error("battery threshold end {0} is outside 10 to 100 percent")]
     EndOutOfRange(u8),
-    /// The start percent exceeds the end percent.
-    #[error("battery threshold start {start} exceeds end {end}")]
-    StartAfterEnd { start: u8, end: u8 },
+    /// The pair does not span exactly 10 percentage points of hysteresis.
+    #[error("battery thresholds must span exactly 10 percent hysteresis: start {start}, end {end}")]
+    UnsupportedGap { start: u8, end: u8 },
 }
 
 impl BatteryThreshold {
-    /// Builds a threshold pair without clamping or reordering.
+    /// Builds a threshold pair without clamping or reordering. Only pairs
+    /// with `end == start + 10` are representable by `msi-ec`.
     pub fn new(start_percent: u8, end_percent: u8) -> Result<Self, BatteryThresholdError> {
-        if start_percent > 100 {
+        if start_percent > 90 {
             return Err(BatteryThresholdError::StartOutOfRange(start_percent));
         }
-        if end_percent > 100 {
+        if !(10..=100).contains(&end_percent) {
             return Err(BatteryThresholdError::EndOutOfRange(end_percent));
         }
-        if start_percent > end_percent {
-            return Err(BatteryThresholdError::StartAfterEnd {
+        if end_percent != start_percent + 10 {
+            return Err(BatteryThresholdError::UnsupportedGap {
                 start: start_percent,
                 end: end_percent,
             });
@@ -51,6 +55,16 @@ impl BatteryThreshold {
             start_percent,
             end_percent,
         })
+    }
+
+    /// Derives the pair from a charge-limit end percent, for a future
+    /// `mec battery limit <end>` contract. Requires `10..=100` and derives
+    /// `start = end - 10` through the same validation.
+    pub fn from_end_percent(end_percent: u8) -> Result<Self, BatteryThresholdError> {
+        if !(10..=100).contains(&end_percent) {
+            return Err(BatteryThresholdError::EndOutOfRange(end_percent));
+        }
+        Self::new(end_percent - 10, end_percent)
     }
 
     /// Charge level where charging starts, in percent.
@@ -215,24 +229,63 @@ mod tests {
             HardwareCommand::SetWebcam(true),
             HardwareCommand::SetWebcamBlock(false),
             HardwareCommand::SetKeyboardBacklight(2),
-            HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(50, 80).unwrap()),
+            HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(70, 80).unwrap()),
         ]
     }
 
     #[test]
-    fn threshold_zero_to_full_accepted() {
-        assert!(BatteryThreshold::new(0, 100).is_ok());
+    fn threshold_minimum_pair_accepted() {
+        assert!(BatteryThreshold::new(0, 10).is_ok());
     }
 
     #[test]
     fn threshold_typical_pair_accepted() {
-        assert!(BatteryThreshold::new(50, 80).is_ok());
+        assert!(BatteryThreshold::new(50, 60).is_ok());
     }
 
     #[test]
-    fn threshold_equal_values_accepted() {
-        assert!(BatteryThreshold::new(80, 80).is_ok());
-        assert!(BatteryThreshold::new(100, 100).is_ok());
+    fn threshold_representative_pair_accepted() {
+        assert!(BatteryThreshold::new(70, 80).is_ok());
+    }
+
+    #[test]
+    fn threshold_maximum_pair_accepted() {
+        assert!(BatteryThreshold::new(90, 100).is_ok());
+    }
+
+    #[test]
+    fn threshold_full_range_rejected() {
+        assert!(BatteryThreshold::new(0, 100).is_err());
+    }
+
+    #[test]
+    fn threshold_wide_gap_rejected() {
+        assert_eq!(
+            BatteryThreshold::new(50, 80),
+            Err(BatteryThresholdError::UnsupportedGap { start: 50, end: 80 })
+        );
+    }
+
+    #[test]
+    fn threshold_equal_values_rejected() {
+        assert!(BatteryThreshold::new(80, 80).is_err());
+        assert!(BatteryThreshold::new(50, 50).is_err());
+    }
+
+    #[test]
+    fn threshold_start_above_ninety_rejected() {
+        assert_eq!(
+            BatteryThreshold::new(91, 100),
+            Err(BatteryThresholdError::StartOutOfRange(91))
+        );
+    }
+
+    #[test]
+    fn threshold_short_gap_rejected() {
+        assert_eq!(
+            BatteryThreshold::new(90, 99),
+            Err(BatteryThresholdError::UnsupportedGap { start: 90, end: 99 })
+        );
     }
 
     #[test]
@@ -246,15 +299,55 @@ mod tests {
     }
 
     #[test]
+    fn threshold_end_below_10_rejected() {
+        assert_eq!(
+            BatteryThreshold::new(0, 9),
+            Err(BatteryThresholdError::EndOutOfRange(9))
+        );
+    }
+
+    #[test]
     fn threshold_start_after_end_rejected() {
         assert!(BatteryThreshold::new(90, 80).is_err());
     }
 
     #[test]
     fn threshold_accessors_preserve_input() {
-        let threshold = BatteryThreshold::new(50, 80).unwrap();
-        assert_eq!(threshold.start_percent(), 50);
+        let threshold = BatteryThreshold::new(70, 80).unwrap();
+        assert_eq!(threshold.start_percent(), 70);
         assert_eq!(threshold.end_percent(), 80);
+    }
+
+    #[test]
+    fn threshold_from_end_derives_start() {
+        assert_eq!(
+            BatteryThreshold::from_end_percent(10).unwrap(),
+            BatteryThreshold::new(0, 10).unwrap()
+        );
+        assert_eq!(
+            BatteryThreshold::from_end_percent(60).unwrap(),
+            BatteryThreshold::new(50, 60).unwrap()
+        );
+        assert_eq!(
+            BatteryThreshold::from_end_percent(80).unwrap(),
+            BatteryThreshold::new(70, 80).unwrap()
+        );
+        assert_eq!(
+            BatteryThreshold::from_end_percent(100).unwrap(),
+            BatteryThreshold::new(90, 100).unwrap()
+        );
+    }
+
+    #[test]
+    fn threshold_from_end_rejects_outside_representable_range() {
+        assert_eq!(
+            BatteryThreshold::from_end_percent(9),
+            Err(BatteryThresholdError::EndOutOfRange(9))
+        );
+        assert_eq!(
+            BatteryThreshold::from_end_percent(101),
+            Err(BatteryThresholdError::EndOutOfRange(101))
+        );
     }
 
     #[test]
@@ -523,7 +616,7 @@ mod tests {
 
     #[test]
     fn supported_thresholds_accept_valid_threshold() {
-        let command = HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(50, 80).unwrap());
+        let command = HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(70, 80).unwrap());
         assert!(
             command
                 .validate(&SupportMode::Ready, &full_capabilities())
@@ -535,7 +628,7 @@ mod tests {
     fn unsupported_thresholds_reject_valid_threshold() {
         let mut capabilities = full_capabilities();
         capabilities.battery_thresholds = false;
-        let command = HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(50, 80).unwrap());
+        let command = HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(70, 80).unwrap());
         assert!(
             command
                 .validate(&SupportMode::Ready, &capabilities)

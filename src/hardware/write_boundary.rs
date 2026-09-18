@@ -144,13 +144,13 @@ mod tests {
     #[test]
     fn boundary_preserves_threshold_pair() {
         let boundary = RecordingBoundary::succeeding();
-        let command = HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(50, 80).unwrap());
+        let command = HardwareCommand::SetBatteryThreshold(BatteryThreshold::new(70, 80).unwrap());
         assert!(boundary.execute(&command).is_ok());
         let recorded = boundary.recorded();
         let [HardwareCommand::SetBatteryThreshold(received)] = recorded.as_slice() else {
             panic!("expected exactly one recorded threshold command");
         };
-        assert_eq!(received.start_percent(), 50);
+        assert_eq!(received.start_percent(), 70);
         assert_eq!(received.end_percent(), 80);
     }
 
