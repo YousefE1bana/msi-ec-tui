@@ -95,19 +95,39 @@ mod tests {
     }
 
     #[test]
-    fn webcam_capability_supported() {
-        assert!(text().contains("Webcam: Supported"));
-    }
-
-    #[test]
-    fn webcam_block_capability_unavailable_reports_honestly() {
-        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        let mut capabilities = full_capabilities();
-        capabilities.webcam_block = true;
-        let text = screen_text(100, 30, |frame| {
-            render_devices(frame, frame.area(), &live, &capabilities);
-        });
-        assert!(text.contains("Webcam Block: Supported"));
+    fn webcam_capabilities_report_both_states() {
+        let cases = [
+            (true, true, "Webcam: Supported", "Webcam Block: Supported"),
+            (
+                true,
+                false,
+                "Webcam: Supported",
+                "Webcam Block: Unavailable",
+            ),
+            (
+                false,
+                true,
+                "Webcam: Unavailable",
+                "Webcam Block: Supported",
+            ),
+            (
+                false,
+                false,
+                "Webcam: Unavailable",
+                "Webcam Block: Unavailable",
+            ),
+        ];
+        for (webcam, block, expected_webcam, expected_block) in cases {
+            let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+            let mut capabilities = full_capabilities();
+            capabilities.webcam = webcam;
+            capabilities.webcam_block = block;
+            let text = screen_text(100, 30, |frame| {
+                render_devices(frame, frame.area(), &live, &capabilities);
+            });
+            assert!(text.contains(expected_webcam), "webcam={webcam}");
+            assert!(text.contains(expected_block), "block={block}");
+        }
     }
 
     #[test]
