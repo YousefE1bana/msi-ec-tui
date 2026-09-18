@@ -248,7 +248,11 @@ pub(crate) fn render_panel(
 
 /// Compact fallback for areas too small for honest panels.
 pub(crate) fn render_compact(frame: &mut Frame, area: Rect) {
-    let text = Text::from(vec![Line::from("MEC"), Line::from("Terminal too small")]);
+    let text = Text::from(vec![
+        Line::from("MEC"),
+        Line::from("Terminal too small"),
+        Line::from("Q Quit"),
+    ]);
     frame.render_widget(Paragraph::new(text), area);
 }
 

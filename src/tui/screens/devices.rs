@@ -64,7 +64,7 @@ fn backlight_capability_text(capability: Option<&BacklightCapability>) -> String
     }
 }
 
-fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     let backlight_supported = capabilities.keyboard_backlight.is_some();
     vec![
         Line::styled(

@@ -56,7 +56,7 @@ pub(crate) fn render_fans_with_theme<B: EcBackend>(
     );
 }
 
-fn current_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
+pub(crate) fn current_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
     let cpu = snapshot.and_then(|state| state.cpu_fan);
     let gpu = snapshot.and_then(|state| state.gpu_fan);
     let mode = snapshot.and_then(|state| state.fan_mode.as_ref());
@@ -69,7 +69,7 @@ fn current_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
     ]
 }
 
-fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::styled(
             format!("CPU Fan Telemetry: {}", support_text(capabilities.cpu_fan)),

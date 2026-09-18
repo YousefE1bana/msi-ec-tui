@@ -57,7 +57,7 @@ pub(crate) fn render_performance_with_theme<B: EcBackend>(
     );
 }
 
-fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::from(format!(
             "Available Shift Modes: {}",

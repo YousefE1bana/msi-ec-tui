@@ -53,15 +53,23 @@ pub(crate) fn render_battery_with_theme<B: EcBackend>(
         frame,
         panels[1],
         " CAPABILITIES ",
-        vec![Line::styled(
-            format!(
-                "Threshold Control: {}",
-                support_text(capabilities.battery_thresholds)
-            ),
-            capability_style(capabilities.battery_thresholds, theme),
-        )],
+        vec![threshold_capability_line(capabilities, theme)],
         theme,
     );
+}
+
+/// Single threshold-control capability row, shared with compact tiers.
+pub(crate) fn threshold_capability_line(
+    capabilities: &Capabilities,
+    theme: &Theme,
+) -> Line<'static> {
+    Line::styled(
+        format!(
+            "Threshold Control: {}",
+            support_text(capabilities.battery_thresholds)
+        ),
+        capability_style(capabilities.battery_thresholds, theme),
+    )
 }
 
 #[cfg(test)]

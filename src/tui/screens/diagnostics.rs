@@ -73,7 +73,7 @@ fn optional_text(value: Option<&String>) -> &str {
     value.map(String::as_str).unwrap_or("N/A")
 }
 
-fn identity_lines(device: &DeviceInfo) -> Vec<Line<'static>> {
+pub(crate) fn identity_lines(device: &DeviceInfo) -> Vec<Line<'static>> {
     vec![
         Line::from(format!("Manufacturer: {}", device.manufacturer)),
         Line::from(format!("Product: {}", device.product_name)),
@@ -92,7 +92,10 @@ fn identity_lines(device: &DeviceInfo) -> Vec<Line<'static>> {
     ]
 }
 
-fn telemetry_lines<B: EcBackend>(live: &LiveHardware<B>, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn telemetry_lines<B: EcBackend>(
+    live: &LiveHardware<B>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     use ratatui::text::Span;
 
     let mut lines = vec![
@@ -134,7 +137,7 @@ fn matrix_row(label: &'static str, supported: bool, theme: &Theme) -> Line<'stat
     )
 }
 
-fn matrix_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn matrix_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         matrix_row("CPU Temperature", capabilities.cpu_temperature, theme),
         matrix_row("GPU Temperature", capabilities.gpu_temperature, theme),

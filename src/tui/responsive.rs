@@ -1,0 +1,328 @@
+//! Responsive tiers for the read-only TUI: full, compact, tiny.
+//!
+//! Full preserves the Task-4/5 layouts; compact renders the selected
+//! screen's key values as plain lines; tiny falls back safely. Tiers derive
+//! from the frame only, never from cached dimensions.
+
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::Paragraph;
+
+use crate::app::{AppState, LiveHardware, Screen};
+use crate::hardware::{Capabilities, EcBackend};
+
+use super::screens::{
+    battery as battery_screen, devices as devices_screen, diagnostics as diagnostics_screen,
+    fans as fans_screen, performance as performance_screen,
+};
+use super::theme::Theme;
+use super::ui::{
+    battery_lines, device_lines, performance_lines, read_only_reason_text, support_mode_style,
+    support_mode_text, telemetry_state_text, telemetry_style, thermals_lines,
+};
+
+/// Frame-size tier driving dispatcher routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LayoutTier {
+    /// Existing Task-4/5 layouts with navigation chrome.
+    Full,
+    /// Plain key-value lines for the selected screen.
+    Compact,
+    /// Minimal safe fallback.
+    Tiny,
+}
+
+/// Tier boundaries: full keeps navigation plus the 14-row screen minimum;
+/// compact stays useful down to 40x10; anything smaller is tiny.
+pub(crate) fn layout_tier(area: Rect) -> LayoutTier {
+    if area.width >= 60 && area.height >= 15 {
+        LayoutTier::Full
+    } else if area.width >= 40 && area.height >= 10 {
+        LayoutTier::Compact
+    } else {
+        LayoutTier::Tiny
+    }
+}
+
+/// Renders the selected screen's key values as plain truncatable lines.
+/// Current snapshots only; capabilities follow where space permits.
+pub(crate) fn render_compact_screen<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let mut lines = compact_header(app, live, theme);
+    lines.extend(compact_body(app, live, capabilities, theme));
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn compact_header<B: EcBackend>(
+    app: &AppState,
+    live: &LiveHardware<B>,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::styled(
+            format!("MEC — {}", app.current_screen().title()),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(format!("Device: {}", live.device().product_name)),
+        Line::from(vec![
+            Span::raw("Mode: "),
+            Span::styled(
+                support_mode_text(live.mode()).to_owned(),
+                support_mode_style(live.mode(), theme),
+            ),
+            Span::raw(match live.mode() {
+                crate::hardware::SupportMode::ReadOnly(reason) => {
+                    format!(" ({})", read_only_reason_text(reason))
+                }
+                _ => String::new(),
+            }),
+        ]),
+        Line::from(vec![
+            Span::raw("Telemetry: "),
+            Span::styled(
+                telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
+                    .to_owned(),
+                telemetry_style(live.is_degraded(), live.current_snapshot().is_some(), theme),
+            ),
+        ]),
+    ];
+    if let Some(error) = live.snapshot_error() {
+        lines.push(Line::styled(
+            error.to_string(),
+            Style::default().fg(theme.danger),
+        ));
+    }
+    lines
+}
+
+fn compact_body<B: EcBackend>(
+    app: &AppState,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let snapshot = live.current_snapshot();
+    match app.current_screen() {
+        Screen::Dashboard => {
+            let mut lines = thermals_lines(snapshot);
+            lines.extend(performance_lines(snapshot));
+            lines.extend(battery_lines(snapshot));
+            let devices = device_lines(snapshot);
+            lines.push(devices[0].clone());
+            lines.push(devices[2].clone());
+            lines
+        }
+        Screen::Performance => {
+            let mut lines = performance_lines(snapshot);
+            lines.extend(performance_screen::capability_lines(capabilities, theme));
+            lines
+        }
+        Screen::Fans => {
+            let mut lines = fans_screen::current_lines(snapshot);
+            lines.extend(fans_screen::capability_lines(capabilities, theme));
+            lines
+        }
+        Screen::Battery => {
+            let mut lines = battery_lines(snapshot);
+            lines.push(battery_screen::threshold_capability_line(
+                capabilities,
+                theme,
+            ));
+            lines
+        }
+        Screen::Devices => {
+            let mut lines = device_lines(snapshot);
+            lines.extend(devices_screen::capability_lines(capabilities, theme));
+            lines
+        }
+        Screen::Diagnostics => {
+            let mut lines = diagnostics_screen::identity_lines(live.device());
+            lines.extend(diagnostics_screen::telemetry_lines(live, theme));
+            lines.extend(diagnostics_screen::matrix_lines(capabilities, theme));
+            lines
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::{AppAction, AppState, Screen};
+    use crate::hardware::{BackendError, SupportMode};
+
+    use super::super::screens::render_screen;
+    use super::super::screens::support::{
+        full_capabilities, healthy_snapshot, live_for, screen_text,
+    };
+    use super::layout_tier;
+
+    fn app_on(screen: Screen) -> AppState {
+        let mut app = AppState::default();
+        app.apply(AppAction::GoTo(screen));
+        app
+    }
+
+    fn rendered(screen: Screen, width: u16, height: u16) -> String {
+        rendered_with(
+            screen,
+            width,
+            height,
+            vec![Ok(healthy_snapshot())],
+            SupportMode::Ready,
+            1,
+        )
+    }
+
+    fn rendered_with(
+        screen: Screen,
+        width: u16,
+        height: u16,
+        script: Vec<Result<crate::hardware::HardwareSnapshot, BackendError>>,
+        mode: SupportMode,
+        refreshes: usize,
+    ) -> String {
+        let (live, _) = live_for(script, mode, refreshes);
+        let capabilities = full_capabilities();
+        let app = app_on(screen);
+        screen_text(width, height, |frame| {
+            render_screen(frame, frame.area(), &app, &live, &capabilities);
+        })
+    }
+
+    #[test]
+    fn full_dashboard_at_reference_size() {
+        let text = rendered(Screen::Dashboard, 100, 30);
+        assert!(text.contains("THERMALS"));
+        assert!(text.contains("63°C"));
+    }
+
+    #[test]
+    fn full_navigation_labels_at_reference_size() {
+        let text = rendered(Screen::Dashboard, 100, 30);
+        for label in [
+            "1 Dashboard",
+            "2 Performance",
+            "3 Fans",
+            "4 Battery",
+            "5 Devices",
+            "6 Diagnostics",
+        ] {
+            assert!(text.contains(label), "{label:?} missing");
+        }
+    }
+
+    #[test]
+    fn medium_terminal_navigation_stays_meaningful() {
+        let text = rendered(Screen::Dashboard, 72, 20);
+        assert!(text.contains("1 Dashboard"));
+        assert!(text.contains("6 Diagnostics"));
+    }
+
+    #[test]
+    fn medium_terminal_uses_abbreviated_navigation() {
+        let text = rendered(Screen::Dashboard, 50, 16);
+        let nav: Vec<&str> = text.lines().collect();
+        assert_eq!(nav[0], "1 Dash  2 Perf  3 Fans  4 Batt  5 Dev  6 Diag");
+    }
+
+    #[test]
+    fn narrow_terminal_shows_current_screen_context() {
+        let text = rendered(Screen::Fans, 40, 10);
+        assert!(text.contains("3/6 Fans"));
+    }
+
+    #[test]
+    fn compact_dashboard_stays_useful() {
+        let text = rendered(Screen::Dashboard, 50, 16);
+        assert!(text.contains("MEC"));
+        assert!(text.contains("Dashboard"));
+        assert!(text.contains("63°C"));
+        assert!(text.contains("42%"));
+        assert!(text.contains("comfort"));
+    }
+
+    #[test]
+    fn smallest_compact_keeps_screen_context() {
+        let text = rendered(Screen::Battery, 40, 10);
+        assert!(text.contains("MEC"));
+        assert!(text.contains("Battery"));
+        assert!(text.contains("77%"));
+    }
+
+    #[test]
+    fn tiny_terminal_falls_back_safely() {
+        let text = rendered(Screen::Dashboard, 20, 8);
+        assert!(text.contains("MEC"));
+        assert!(text.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn minimal_terminal_does_not_panic() {
+        let text = rendered(Screen::Dashboard, 1, 1);
+        assert!(!text.is_empty() || text.is_empty());
+    }
+
+    #[test]
+    fn zero_area_does_not_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Performance);
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_screen(frame, Rect::new(0, 0, 0, 0), &app, &live, &capabilities);
+            })
+            .expect("zero-area dispatch draws");
+    }
+
+    #[test]
+    fn compact_degraded_hides_stale_telemetry() {
+        let text = rendered_with(
+            Screen::Fans,
+            50,
+            16,
+            vec![Ok(healthy_snapshot()), Err(BackendError::Unavailable)],
+            SupportMode::Ready,
+            2,
+        );
+        assert!(text.contains("DEGRADED"));
+        assert!(text.contains("CPU Fan: N/A"));
+        assert!(!text.contains("42%"));
+    }
+
+    #[test]
+    fn compact_fan_rendering_contains_no_rpm() {
+        let text = rendered(Screen::Fans, 50, 16);
+        assert!(!text.contains("RPM"));
+        assert!(text.contains("42%"));
+    }
+
+    #[test]
+    fn tier_boundaries_are_deterministic() {
+        use ratatui::layout::Rect;
+
+        use super::LayoutTier;
+
+        assert_eq!(layout_tier(Rect::new(0, 0, 100, 30)), LayoutTier::Full);
+        assert_eq!(layout_tier(Rect::new(0, 0, 60, 15)), LayoutTier::Full);
+        assert_eq!(layout_tier(Rect::new(0, 0, 59, 30)), LayoutTier::Compact);
+        assert_eq!(layout_tier(Rect::new(0, 0, 60, 14)), LayoutTier::Compact);
+        assert_eq!(layout_tier(Rect::new(0, 0, 40, 10)), LayoutTier::Compact);
+        assert_eq!(layout_tier(Rect::new(0, 0, 39, 30)), LayoutTier::Tiny);
+        assert_eq!(layout_tier(Rect::new(0, 0, 40, 9)), LayoutTier::Tiny);
+    }
+}

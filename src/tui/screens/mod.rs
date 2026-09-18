@@ -5,12 +5,12 @@
 //! The dispatcher owns the shared navigation chrome and renders the help
 //! overlay last so it sits above the active screen.
 
-mod battery;
-mod dashboard;
-mod devices;
-mod diagnostics;
-mod fans;
-mod performance;
+pub(crate) mod battery;
+pub(crate) mod dashboard;
+pub(crate) mod devices;
+pub(crate) mod diagnostics;
+pub(crate) mod fans;
+pub(crate) mod performance;
 #[cfg(test)]
 pub(crate) mod support;
 
@@ -30,7 +30,9 @@ use ratatui::widgets::Paragraph;
 use crate::app::{AppState, LiveHardware, Screen};
 use crate::hardware::{Capabilities, EcBackend};
 
+use crate::tui::responsive::{LayoutTier, layout_tier, render_compact_screen};
 use crate::tui::theme::Theme;
+use crate::tui::ui::render_compact;
 
 /// Renders the screen selected by `app` with the default theme.
 ///
@@ -60,7 +62,13 @@ pub fn render_screen_with_theme<B: EcBackend>(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
     render_navigation(frame, rows[0], app, theme);
-    render_active_screen(frame, rows[1], app, live, capabilities, theme);
+    match layout_tier(area) {
+        LayoutTier::Full => render_active_screen(frame, rows[1], app, live, capabilities, theme),
+        LayoutTier::Compact => {
+            render_compact_screen(frame, rows[1], app, live, capabilities, theme);
+        }
+        LayoutTier::Tiny => render_compact(frame, rows[1]),
+    }
     if app.help_visible() {
         super::help::render_help(frame, area, theme);
     }
@@ -96,27 +104,79 @@ fn render_active_screen<B: EcBackend>(
     }
 }
 
-/// Shared navigation row in canonical [`Screen::ALL`] order. The active
-/// entry uses the primary role plus bold; the rest stay muted.
+/// Shared navigation row in canonical [`Screen::ALL`] order. Labels shrink
+/// with the terminal: full names when they fit, short names below that,
+/// and the current screen alone on narrow displays. The active entry uses
+/// the primary role plus bold; the rest stay muted.
 fn render_navigation(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
+    let full: Vec<String> = Screen::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, screen)| format!("{} {}", index + 1, screen.title()))
+        .collect();
+    let short: Vec<String> = Screen::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, screen)| format!("{} {}", index + 1, short_title(*screen)))
+        .collect();
+    let line = if area.width as usize >= full.join("  ").len() {
+        navigation_line(&full, app, theme)
+    } else if area.width as usize >= short.join("  ").len() {
+        navigation_line(&short, app, theme)
+    } else {
+        narrow_navigation_line(app, theme)
+    };
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Abbreviated navigation labels for medium terminals.
+fn short_title(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Dashboard => "Dash",
+        Screen::Performance => "Perf",
+        Screen::Fans => "Fans",
+        Screen::Battery => "Batt",
+        Screen::Devices => "Dev",
+        Screen::Diagnostics => "Diag",
+    }
+}
+
+fn navigation_entry_style(active: bool, theme: &Theme) -> Style {
+    if active {
+        Style::default()
+            .fg(theme.primary)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.muted)
+    }
+}
+
+fn navigation_line(entries: &[String], app: &AppState, theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, screen) in Screen::ALL.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        let style = if *screen == app.current_screen() {
-            Style::default()
-                .fg(theme.primary)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.muted)
-        };
         spans.push(Span::styled(
-            format!("{} {}", index + 1, screen.title()),
-            style,
+            entries[index].clone(),
+            navigation_entry_style(*screen == app.current_screen(), theme),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    Line::from(spans)
+}
+
+fn narrow_navigation_line(app: &AppState, theme: &Theme) -> Line<'static> {
+    let position = Screen::ALL
+        .iter()
+        .position(|screen| *screen == app.current_screen())
+        .expect("current screen is a member of ALL");
+    Line::from(vec![
+        Span::styled(
+            format!("{}/6 {}", position + 1, app.current_screen().title()),
+            navigation_entry_style(true, theme),
+        ),
+        Span::styled(" • ? Help • Q Quit", navigation_entry_style(false, theme)),
+    ])
 }
 
 #[cfg(test)]
