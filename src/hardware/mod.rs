@@ -15,7 +15,7 @@ pub use backend::{BackendError, EcBackend};
 pub use capabilities::{BacklightCapability, Capabilities};
 pub use capability_detector::{CapabilityDetector, CapabilityDiscoveryError};
 pub use detector::{DetectionError, DeviceDetector};
-pub use device::{DeviceInfo, HardwareSnapshot};
+pub use device::{BatteryStatus, DeviceInfo, HardwareSnapshot};
 pub use msi_ec::MsiEcBackend;
 pub use paths::{PathValidationError, SystemPaths};
 pub use support::{ReadOnlyReason, SupportEvaluator, SupportMode};

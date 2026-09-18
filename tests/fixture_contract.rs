@@ -76,6 +76,12 @@ fn gf63_snapshot_matches_representative_values() {
     assert_eq!(snapshot.keyboard_backlight, Some(2));
     assert_eq!(snapshot.battery_start_threshold, Some(50));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
+    assert_eq!(snapshot.battery_percentage, Some(77));
+    assert_eq!(
+        snapshot.battery_status,
+        Some(mec::hardware::BatteryStatus::Charging)
+    );
+    assert_eq!(snapshot.ac_connected, Some(true));
 }
 
 #[test]

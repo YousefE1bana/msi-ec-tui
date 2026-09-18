@@ -580,3 +580,266 @@ fn empty_root_yields_empty_snapshot_without_hardware() {
         HardwareSnapshot::default()
     );
 }
+
+impl Fixture {
+    fn power_entry(&self, name: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let entry = self.class_dir("power_supply", name);
+        for (name, contents) in files {
+            self.write_in(&entry, name, contents);
+        }
+        entry
+    }
+
+    fn battery_entry(&self, name: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let mut with_type = vec![("type", "Battery".as_bytes())];
+        with_type.extend_from_slice(files);
+        self.power_entry(name, &with_type)
+    }
+}
+
+use mec::hardware::BatteryStatus;
+
+#[test]
+fn battery_percentage_zero_accepted() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"0\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().battery_percentage,
+        Some(0)
+    );
+}
+
+#[test]
+fn battery_percentage_hundred_accepted() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"100\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().battery_percentage,
+        Some(100)
+    );
+}
+
+#[test]
+fn battery_percentage_above_hundred_rejected() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"101\n")]);
+    assert!(matches!(
+        fixture.backend().snapshot(),
+        Err(BackendError::InvalidData(_))
+    ));
+}
+
+#[test]
+fn battery_malformed_capacity_rejected() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"high\n")]);
+    assert!(matches!(
+        fixture.backend().snapshot(),
+        Err(BackendError::InvalidData(_))
+    ));
+}
+
+#[test]
+fn battery_status_values_parse() {
+    for (text, expected) in [
+        ("Unknown\n", BatteryStatus::Unknown),
+        ("Charging\n", BatteryStatus::Charging),
+        ("Discharging\n", BatteryStatus::Discharging),
+        ("Not charging\n", BatteryStatus::NotCharging),
+        ("Full\n", BatteryStatus::Full),
+    ] {
+        let fixture = Fixture::new();
+        fixture.battery_entry("BAT0", &[("status", text.as_bytes())]);
+        assert_eq!(
+            fixture.backend().snapshot().unwrap().battery_status,
+            Some(expected),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn battery_invalid_status_rejected() {
+    for text in ["charging\n", "CHARGING\n", "Fast\n", "\n"] {
+        let fixture = Fixture::new();
+        fixture.battery_entry("BAT0", &[("status", text.as_bytes())]);
+        assert!(
+            matches!(
+                fixture.backend().snapshot(),
+                Err(BackendError::InvalidData(_))
+            ),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn battery_missing_capacity_is_none() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("status", b"Charging\n")]);
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, None);
+    assert_eq!(snapshot.battery_status, Some(BatteryStatus::Charging));
+}
+
+#[test]
+fn battery_missing_status_is_none() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, Some(77));
+    assert_eq!(snapshot.battery_status, None);
+}
+
+#[test]
+fn battery_absent_without_battery_entry() {
+    let fixture = Fixture::new();
+    fixture.power_entry("AC", &[("type", b"Mains\n"), ("online", b"1\n")]);
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, None);
+    assert_eq!(snapshot.battery_status, None);
+    assert_eq!(snapshot.ac_connected, Some(true));
+}
+
+#[test]
+fn battery_discovered_by_type_not_name() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("CELL0", &[("capacity", b"64\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().battery_percentage,
+        Some(64)
+    );
+}
+
+#[test]
+fn battery_first_sorted_entry_wins() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("ZZZ", &[("capacity", b"10\n")]);
+    fixture.battery_entry("AAA", &[("capacity", b"90\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().battery_percentage,
+        Some(90)
+    );
+}
+
+#[test]
+fn battery_non_battery_type_ignored() {
+    let fixture = Fixture::new();
+    fixture.power_entry("BAT0", &[("type", b"battery\n"), ("capacity", b"64\n")]);
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, None);
+    assert_eq!(snapshot.battery_status, None);
+}
+
+#[test]
+fn battery_online_values_aggregate() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    fixture.power_entry("AC", &[("type", b"Mains\n"), ("online", b"1\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().ac_connected,
+        Some(true)
+    );
+
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    fixture.power_entry("AC", &[("type", b"Mains\n"), ("online", b"0\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().ac_connected,
+        Some(false)
+    );
+}
+
+#[test]
+fn battery_external_supplies_use_or_semantics() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    fixture.power_entry("AC", &[("type", b"Mains\n"), ("online", b"0\n")]);
+    fixture.power_entry("ADP1", &[("type", b"Mains\n"), ("online", b"1\n")]);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().ac_connected,
+        Some(true)
+    );
+}
+
+#[test]
+fn battery_no_external_online_is_none() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    assert_eq!(fixture.backend().snapshot().unwrap().ac_connected, None);
+}
+
+#[test]
+fn battery_online_value_two_rejected() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    fixture.power_entry("AC", &[("type", b"Mains\n"), ("online", b"2\n")]);
+    assert!(matches!(
+        fixture.backend().snapshot(),
+        Err(BackendError::InvalidData(_))
+    ));
+}
+
+#[test]
+fn battery_malformed_online_rejected() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    fixture.power_entry("AC", &[("type", b"Mains\n"), ("online", b"yes\n")]);
+    assert!(matches!(
+        fixture.backend().snapshot(),
+        Err(BackendError::InvalidData(_))
+    ));
+}
+
+#[test]
+fn battery_missing_power_supply_root_is_all_none() {
+    let fixture = Fixture::new();
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, None);
+    assert_eq!(snapshot.battery_status, None);
+    assert_eq!(snapshot.ac_connected, None);
+    assert_eq!(snapshot.battery_start_threshold, None);
+    assert_eq!(snapshot.battery_end_threshold, None);
+}
+
+#[test]
+fn battery_symlinked_battery_entry_works() {
+    let fixture = Fixture::new();
+    let real = fixture._root.path().join("devices/POWER");
+    fs::create_dir_all(&real).unwrap();
+    fixture.write_in(&real, "type", b"Battery\n");
+    fixture.write_in(&real, "capacity", b"55\n");
+    fixture.write_in(&real, "status", b"Discharging\n");
+    fixture.class_symlink("power_supply", "BAT0", &real);
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, Some(55));
+    assert_eq!(snapshot.battery_status, Some(BatteryStatus::Discharging));
+}
+
+#[test]
+fn battery_symlinked_external_supply_works() {
+    let fixture = Fixture::new();
+    fixture.battery_entry("BAT0", &[("capacity", b"77\n")]);
+    let real = fixture._root.path().join("devices/ACAD");
+    fs::create_dir_all(&real).unwrap();
+    fixture.write_in(&real, "type", b"Mains\n");
+    fixture.write_in(&real, "online", b"1\n");
+    fixture.class_symlink("power_supply", "AC", &real);
+    assert_eq!(
+        fixture.backend().snapshot().unwrap().ac_connected,
+        Some(true)
+    );
+}
+
+#[test]
+fn battery_runtime_independent_of_threshold_entry() {
+    let fixture = Fixture::new();
+    let thresholds = fixture.class_dir("power_supply", "BAT0");
+    fixture.write_in(&thresholds, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&thresholds, "charge_control_end_threshold", b"80\n");
+    fixture.battery_entry("CELL0", &[("capacity", b"64\n")]);
+    let snapshot = fixture.backend().snapshot().unwrap();
+    assert_eq!(snapshot.battery_percentage, Some(64));
+    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_end_threshold, Some(80));
+}

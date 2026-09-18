@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    BackendError, Capabilities, CapabilityDetector, CapabilityDiscoveryError, DetectionError,
-    DeviceDetector, DeviceInfo, EcBackend, FanMode, FanPercent, HardwareSnapshot,
+    BackendError, BatteryStatus, Capabilities, CapabilityDetector, CapabilityDiscoveryError,
+    DetectionError, DeviceDetector, DeviceInfo, EcBackend, FanMode, FanPercent, HardwareSnapshot,
     ModeValidationError, ShiftMode, SysfsError, SysfsReader, SystemPaths, TemperatureCelsius,
 };
 
@@ -157,6 +157,118 @@ where
             .read_u8(&path)
             .map_err(|error| map_sysfs("battery_thresholds", error))
     }
+
+    /// Enumerates power-supply entries. A missing class root means no
+    /// runtime battery surface; an existing but unreadable root propagates.
+    fn power_supply_entries(&self) -> Result<Option<Vec<PathBuf>>, BackendError> {
+        match self.reader.list_entries(&self.paths.power_supply_root()) {
+            Ok(entries) => Ok(Some(entries)),
+            Err(SysfsError::NotFound(_)) => Ok(None),
+            Err(error) => Err(map_sysfs("power_supply", error)),
+        }
+    }
+
+    /// Reads an optional attribute: confirmed absence yields `None`, probe
+    /// failures propagate, present values are read through the safe reader.
+    fn read_optional_u8(
+        &self,
+        context: &'static str,
+        path: &Path,
+    ) -> Result<Option<u8>, BackendError> {
+        match self.reader.exists(path) {
+            Ok(false) => Ok(None),
+            Ok(true) => self
+                .reader
+                .read_u8(path)
+                .map(Some)
+                .map_err(|error| map_sysfs(context, error)),
+            Err(error) => Err(map_sysfs(context, error)),
+        }
+    }
+
+    /// Selects the first entry (deterministic sorted order) whose readable
+    /// `type` is exactly `Battery`. Entries without a `type` file are not
+    /// identifiable as batteries and are skipped.
+    fn select_battery(&self, entries: &[PathBuf]) -> Result<Option<PathBuf>, BackendError> {
+        for entry in entries {
+            let type_path = entry.join("type");
+            let kind = match self.reader.exists(&type_path) {
+                Ok(false) => None,
+                Ok(true) => Some(
+                    self.reader
+                        .read_string(&type_path)
+                        .map_err(|error| map_sysfs("battery_type", error))?,
+                ),
+                Err(error) => return Err(map_sysfs("battery_type", error)),
+            };
+            if kind.as_deref() == Some("Battery") {
+                return Ok(Some(entry.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_battery_percentage(&self, battery: &Path) -> Result<Option<u8>, BackendError> {
+        const FIELD: &str = "battery_percentage";
+        let percentage = self.read_optional_u8(FIELD, &battery.join("capacity"))?;
+        if let Some(value) = percentage
+            && value > 100
+        {
+            return Err(BackendError::InvalidData(format!(
+                "{FIELD} out of range: {value}"
+            )));
+        }
+        Ok(percentage)
+    }
+
+    fn read_battery_status(&self, battery: &Path) -> Result<Option<BatteryStatus>, BackendError> {
+        const FIELD: &str = "battery_status";
+        let path = battery.join("status");
+        match self.reader.exists(&path) {
+            Ok(false) => Ok(None),
+            Ok(true) => {
+                let raw = self
+                    .reader
+                    .read_string(&path)
+                    .map_err(|error| map_sysfs(FIELD, error))?;
+                parse_battery_status(&raw)
+                    .map(Some)
+                    .map_err(|()| BackendError::InvalidData(format!("invalid {FIELD}: {raw:?}")))
+            }
+            Err(error) => Err(map_sysfs(FIELD, error)),
+        }
+    }
+
+    /// Aggregates `online` across entries other than the selected battery.
+    /// Entries without the attribute are ignored; any `1` wins over `0`.
+    fn read_ac_connected(
+        &self,
+        entries: &[PathBuf],
+        battery: Option<&PathBuf>,
+    ) -> Result<Option<bool>, BackendError> {
+        const FIELD: &str = "ac_connected";
+        let mut seen = false;
+        let mut connected = false;
+        for entry in entries {
+            if Some(entry) == battery {
+                continue;
+            }
+            match self.read_optional_u8(FIELD, &entry.join("online"))? {
+                None => {}
+                Some(0) => seen = true,
+                Some(1) => {
+                    seen = true;
+                    connected = true;
+                }
+                Some(value) => {
+                    return Err(BackendError::InvalidData(format!(
+                        "{FIELD} out of range: {value}"
+                    )));
+                }
+            }
+        }
+        Ok(if seen { Some(connected) } else { None })
+    }
 }
 
 impl<R> EcBackend for MsiEcBackend<R>
@@ -238,6 +350,26 @@ where
             (None, None)
         };
 
+        // Runtime battery state is independent of threshold support: a
+        // missing class root simply yields no runtime fields.
+        let (battery_percentage, battery_status, ac_connected) =
+            match self.power_supply_entries()? {
+                None => (None, None, None),
+                Some(entries) => {
+                    let battery = self.select_battery(&entries)?;
+                    let percentage = match &battery {
+                        None => None,
+                        Some(entry) => self.read_battery_percentage(entry)?,
+                    };
+                    let status = match &battery {
+                        None => None,
+                        Some(entry) => self.read_battery_status(entry)?,
+                    };
+                    let ac = self.read_ac_connected(&entries, battery.as_ref())?;
+                    (percentage, status, ac)
+                }
+            };
+
         Ok(HardwareSnapshot {
             cpu_temperature,
             gpu_temperature,
@@ -252,7 +384,22 @@ where
             keyboard_backlight,
             battery_start_threshold,
             battery_end_threshold,
+            battery_percentage,
+            battery_status,
+            ac_connected,
         })
+    }
+}
+
+/// Accepts only the exact upstream `status` vocabulary, case-sensitively.
+fn parse_battery_status(value: &str) -> Result<BatteryStatus, ()> {
+    match value {
+        "Unknown" => Ok(BatteryStatus::Unknown),
+        "Charging" => Ok(BatteryStatus::Charging),
+        "Discharging" => Ok(BatteryStatus::Discharging),
+        "Not charging" => Ok(BatteryStatus::NotCharging),
+        "Full" => Ok(BatteryStatus::Full),
+        _ => Err(()),
     }
 }
 

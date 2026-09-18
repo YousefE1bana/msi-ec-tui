@@ -11,6 +11,15 @@ pub struct DeviceInfo {
     pub ec_firmware_version: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatteryStatus {
+    Unknown,
+    Charging,
+    Discharging,
+    NotCharging,
+    Full,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HardwareSnapshot {
     pub cpu_temperature: Option<TemperatureCelsius>,
@@ -31,4 +40,8 @@ pub struct HardwareSnapshot {
 
     pub battery_start_threshold: Option<u8>,
     pub battery_end_threshold: Option<u8>,
+
+    pub battery_percentage: Option<u8>,
+    pub battery_status: Option<BatteryStatus>,
+    pub ac_connected: Option<bool>,
 }
