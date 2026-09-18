@@ -82,7 +82,7 @@ impl Fixture {
         self.ec_file("webcam", b"on\n");
         self.ec_file("webcam_block", b"off\n");
         let battery = self.class_dir("power_supply", "BAT0");
-        self.write_in(&battery, "charge_control_start_threshold", b"50\n");
+        self.write_in(&battery, "charge_control_start_threshold", b"70\n");
         self.write_in(&battery, "charge_control_end_threshold", b"80\n");
         let backlight = self.class_dir("leds", "msiacpi::kbd_backlight");
         self.write_in(&backlight, "brightness", b"2\n");
@@ -135,7 +135,7 @@ fn full_snapshot_matches_representative_values() {
     assert_eq!(snapshot.webcam, Some(true));
     assert_eq!(snapshot.webcam_block, Some(false));
     assert_eq!(snapshot.keyboard_backlight, Some(2));
-    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_start_threshold, Some(70));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
 }
 
@@ -438,10 +438,10 @@ fn symlinked_backlight_entry_is_followed_for_values() {
 fn battery_threshold_real_directory_works() {
     let fixture = Fixture::new();
     let battery = fixture.class_dir("power_supply", "BAT0");
-    fixture.write_in(&battery, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&battery, "charge_control_start_threshold", b"70\n");
     fixture.write_in(&battery, "charge_control_end_threshold", b"80\n");
     let snapshot = fixture.backend().snapshot().unwrap();
-    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_start_threshold, Some(70));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
 }
 
@@ -450,23 +450,36 @@ fn battery_threshold_symlink_entry_works() {
     let fixture = Fixture::new();
     let real = fixture._root.path().join("devices/BAT0");
     fs::create_dir_all(&real).unwrap();
-    fixture.write_in(&real, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&real, "charge_control_start_threshold", b"70\n");
     fixture.write_in(&real, "charge_control_end_threshold", b"80\n");
     fixture.class_symlink("power_supply", "BAT0", &real);
     let snapshot = fixture.backend().snapshot().unwrap();
-    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_start_threshold, Some(70));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
 }
 
 #[test]
-fn battery_threshold_hundred_is_accepted() {
+fn battery_threshold_equal_pair_is_rejected() {
     let fixture = Fixture::new();
     let battery = fixture.class_dir("power_supply", "BAT0");
-    fixture.write_in(&battery, "charge_control_start_threshold", b"100\n");
-    fixture.write_in(&battery, "charge_control_end_threshold", b"100\n");
-    let snapshot = fixture.backend().snapshot().unwrap();
-    assert_eq!(snapshot.battery_start_threshold, Some(100));
-    assert_eq!(snapshot.battery_end_threshold, Some(100));
+    fixture.write_in(&battery, "charge_control_start_threshold", b"80\n");
+    fixture.write_in(&battery, "charge_control_end_threshold", b"80\n");
+    assert!(matches!(
+        fixture.backend().snapshot(),
+        Err(BackendError::InvalidData(_))
+    ));
+}
+
+#[test]
+fn battery_threshold_wide_gap_is_rejected() {
+    let fixture = Fixture::new();
+    let battery = fixture.class_dir("power_supply", "BAT0");
+    fixture.write_in(&battery, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&battery, "charge_control_end_threshold", b"80\n");
+    assert!(matches!(
+        fixture.backend().snapshot(),
+        Err(BackendError::InvalidData(_))
+    ));
 }
 
 #[test]
@@ -498,10 +511,10 @@ fn unrelated_ac_entry_does_not_block_battery_thresholds() {
     let fixture = Fixture::new();
     fixture.class_dir("power_supply", "AC");
     let battery = fixture.class_dir("power_supply", "BAT0");
-    fixture.write_in(&battery, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&battery, "charge_control_start_threshold", b"70\n");
     fixture.write_in(&battery, "charge_control_end_threshold", b"80\n");
     let snapshot = fixture.backend().snapshot().unwrap();
-    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_start_threshold, Some(70));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
 }
 
@@ -512,10 +525,10 @@ fn first_sorted_complete_threshold_entry_wins() {
     fixture.write_in(&first, "charge_control_start_threshold", b"10\n");
     fixture.write_in(&first, "charge_control_end_threshold", b"20\n");
     let second = fixture.class_dir("power_supply", "BAT0");
-    fixture.write_in(&second, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&second, "charge_control_start_threshold", b"70\n");
     fixture.write_in(&second, "charge_control_end_threshold", b"80\n");
     let snapshot = fixture.backend().snapshot().unwrap();
-    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_start_threshold, Some(70));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
 }
 
@@ -835,11 +848,11 @@ fn battery_symlinked_external_supply_works() {
 fn battery_runtime_independent_of_threshold_entry() {
     let fixture = Fixture::new();
     let thresholds = fixture.class_dir("power_supply", "BAT0");
-    fixture.write_in(&thresholds, "charge_control_start_threshold", b"50\n");
+    fixture.write_in(&thresholds, "charge_control_start_threshold", b"70\n");
     fixture.write_in(&thresholds, "charge_control_end_threshold", b"80\n");
     fixture.battery_entry("CELL0", &[("capacity", b"64\n")]);
     let snapshot = fixture.backend().snapshot().unwrap();
     assert_eq!(snapshot.battery_percentage, Some(64));
-    assert_eq!(snapshot.battery_start_threshold, Some(50));
+    assert_eq!(snapshot.battery_start_threshold, Some(70));
     assert_eq!(snapshot.battery_end_threshold, Some(80));
 }
