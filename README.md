@@ -7,15 +7,31 @@ the [`msi-ec`](https://github.com/BeardOverflow/msi-ec) Linux kernel module.
 
 ## Status
 
-Only PLAN-001 Task 1 (Rust project bootstrap) is implemented. Running `cargo run`
-prints exactly:
+PLAN-001 (hardware foundation) is implemented. Running `cargo run` with no
+subcommand still prints exactly:
 
 ```text
 MEC — MSI EC Control Center
 ```
 
-There is no hardware/sysfs access, CLI command handling, profile support, or TUI
-yet. See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
+Implemented in this tree:
+
+- MSI identity detection from Linux DMI
+- Dynamic `msi-ec` capability discovery (no model allowlists)
+- Conservative `READY` / `READ-ONLY` compatibility policy
+- Read-only `msi-ec` backend with validated hardware snapshots
+- `mec doctor [--sys-root PATH]` diagnostics (read-only)
+- Reusable fake sysfs fixtures under `tests/fixtures/`
+
+Explicitly NOT implemented yet:
+
+- Hardware writes of any kind
+- Profiles / transactional apply
+- `status` / monitoring CLI (PLAN-002)
+- TUI
+- Physical hardware validation
+
+See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
 [implementation plan](docs/superpowers/plans/2026-09-18-mec-v1-implementation-plan.md).
 
 ## Planned features
@@ -34,7 +50,8 @@ yet. See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
 - Primary physical test target: MSI GF series laptops
 - Other MSI laptops through capabilities exposed by the `msi-ec` kernel module
 
-The bootstrap has no hardware support or physical validation.
+No physical hardware validation has been performed; all hardware behavior is
+currently verified against fake sysfs fixtures and unit tests.
 
 ## Building
 

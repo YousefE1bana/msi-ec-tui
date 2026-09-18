@@ -109,16 +109,33 @@ where
             .list_entries(&self.paths.power_supply_root())
             .map_err(|error| map_sysfs(FIELD, error))?;
         // `list_entries` already enumerates in deterministic sorted order.
-        let entry = entries
-            .iter()
-            .find(|entry| {
-                self.reader
-                    .exists(&entry.join("charge_control_start_threshold"))
-                    && self
-                        .reader
-                        .exists(&entry.join("charge_control_end_threshold"))
-            })
-            .ok_or(BackendError::Unavailable)?;
+        // Existence probes are typed: a probe failure must surface instead
+        // of hiding the entry, and a half-present pair mirrors discovery by
+        // failing rather than pretending the entry is threshold-free.
+        let mut selected: Option<&PathBuf> = None;
+        for entry in &entries {
+            let start_present = self
+                .reader
+                .exists(&entry.join("charge_control_start_threshold"))
+                .map_err(|error| map_sysfs(FIELD, error))?;
+            let end_present = self
+                .reader
+                .exists(&entry.join("charge_control_end_threshold"))
+                .map_err(|error| map_sysfs(FIELD, error))?;
+            match (start_present, end_present) {
+                (true, true) => {
+                    selected = Some(entry);
+                    break;
+                }
+                (false, false) => {}
+                _ => {
+                    return Err(BackendError::InvalidData(format!(
+                        "{FIELD}: threshold pair is half-present"
+                    )));
+                }
+            }
+        }
+        let entry = selected.ok_or(BackendError::Unavailable)?;
         let start = self.read_threshold(entry, "charge_control_start_threshold")?;
         let end = self.read_threshold(entry, "charge_control_end_threshold")?;
         if start > 100 || end > 100 {

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
+use tempfile::tempdir;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -203,4 +204,39 @@ fn doctor_needs_no_real_hardware() {
         .success()
         .stdout(predicates::str::contains("MEC Doctor"))
         .stdout(predicates::str::contains("Mode: READ-ONLY"));
+}
+
+#[test]
+fn missing_sys_root_reports_unavailable_without_coherence_claim() {
+    mec()
+        .args(["--sys-root", "/nonexistent-mec-fixture-root", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MEC Doctor"))
+        .stdout(predicates::str::contains("Mode: READ-ONLY"))
+        .stdout(predicates::str::contains("msi-ec interface unavailable"))
+        .stdout(predicates::str::contains("[PASS] EC interface coherent").not());
+}
+
+#[test]
+fn unreadable_sys_root_reports_unreadable_without_coherence_claim() {
+    let root = tempdir().unwrap();
+    let dmi = root.path().join("sys/class/dmi/id");
+    std::fs::create_dir_all(&dmi).unwrap();
+    std::fs::write(dmi.join("sys_vendor"), b"MSI\n").unwrap();
+    std::fs::write(dmi.join("product_name"), b"Doctor Fixture\n").unwrap();
+    // Regular file where the driver directory belongs: the root cannot be
+    // enumerated, so no coherence claim may follow.
+    let ec = root.path().join("sys/devices/platform/msi-ec");
+    std::fs::create_dir_all(ec.parent().unwrap()).unwrap();
+    std::fs::write(&ec, b"not a directory\n").unwrap();
+    let sys_root = root.path().to_string_lossy().into_owned();
+    mec()
+        .args(["--sys-root", &sys_root, "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MEC Doctor"))
+        .stdout(predicates::str::contains("Mode: READ-ONLY"))
+        .stdout(predicates::str::contains("msi-ec interface unreadable"))
+        .stdout(predicates::str::contains("[PASS] EC interface coherent").not());
 }

@@ -79,7 +79,10 @@ where
 }
 
 pub trait SysfsReader {
-    fn exists(&self, path: &Path) -> bool;
+    /// Establishes whether `path` exists. A missing node is `Ok(false)`;
+    /// any failure to establish existence (permission, malformed traversal,
+    /// I/O) is an error and must never collapse to `false`.
+    fn exists(&self, path: &Path) -> Result<bool, SysfsError>;
 
     fn read_string(&self, path: &Path) -> Result<String, SysfsError>;
 
@@ -96,8 +99,8 @@ pub trait SysfsReader {
 pub struct LinuxSysfsReader;
 
 impl SysfsReader for LinuxSysfsReader {
-    fn exists(&self, path: &Path) -> bool {
-        fs::exists(path).unwrap_or(false)
+    fn exists(&self, path: &Path) -> Result<bool, SysfsError> {
+        fs::exists(path).map_err(|error| map_io_error(path, error))
     }
 
     fn read_string(&self, path: &Path) -> Result<String, SysfsError> {
@@ -165,13 +168,22 @@ mod tests {
     fn exists_true_for_existing_file() {
         let dir = tempdir().unwrap();
         let path = write_file(dir.path(), "present", b"1");
-        assert!(reader().exists(&path));
+        assert!(reader().exists(&path).unwrap());
     }
 
     #[test]
     fn exists_false_for_missing_path() {
         let dir = tempdir().unwrap();
-        assert!(!reader().exists(&dir.path().join("missing")));
+        assert!(!reader().exists(&dir.path().join("missing")).unwrap());
+    }
+
+    #[test]
+    fn exists_traversal_through_file_is_error_not_false() {
+        let dir = tempdir().unwrap();
+        let file = write_file(dir.path(), "file", b"1");
+        // Existence through a regular-file parent cannot be established;
+        // it must surface as an error rather than a silent `false`.
+        assert!(reader().exists(&file.join("child")).is_err());
     }
 
     #[test]

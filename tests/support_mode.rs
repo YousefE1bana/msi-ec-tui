@@ -354,3 +354,17 @@ fn unverified_identity_with_broken_ec_root_is_still_unverified() {
         SupportMode::ReadOnly(ReadOnlyReason::UnverifiedHardwareIdentity)
     );
 }
+
+#[test]
+fn malformed_capability_path_is_unreadable_not_ready() {
+    let fixture = Fixture::new();
+    fixture.write_msi_identity("GF63 Thin 11UC\n");
+    fixture.ensure_ec_root();
+    // `cpu` as a regular file: probing `cpu/realtime_temperature` cannot
+    // safely establish existence, so the interface must not read as ready.
+    fs::write(fixture.ec_dir().join("cpu"), b"not a directory\n").unwrap();
+    assert_eq!(
+        fixture.evaluate(),
+        SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnreadable)
+    );
+}

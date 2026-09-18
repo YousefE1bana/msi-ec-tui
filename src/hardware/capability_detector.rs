@@ -85,7 +85,9 @@ where
         })
     }
 
-    /// Presence-only probe of one `msi-ec` interface file.
+    /// Presence-only probe of one `msi-ec` interface file. Existence is
+    /// established successfully before answering; a probe failure is a
+    /// read error, never a silent absence.
     fn present(
         &self,
         capability: &'static str,
@@ -95,7 +97,9 @@ where
             .paths
             .msi_ec(relative)
             .map_err(|source| CapabilityDiscoveryError::Path { capability, source })?;
-        Ok(self.reader.exists(&path))
+        self.reader
+            .exists(&path)
+            .map_err(|source| CapabilityDiscoveryError::Read { capability, source })
     }
 
     /// Discovers one paired current/available mode interface.
@@ -116,10 +120,15 @@ where
             .paths
             .msi_ec(available)
             .map_err(|source| CapabilityDiscoveryError::Path { capability, source })?;
-        match (
-            self.reader.exists(&current_path),
-            self.reader.exists(&available_path),
-        ) {
+        let current = self
+            .reader
+            .exists(&current_path)
+            .map_err(|source| CapabilityDiscoveryError::Read { capability, source })?;
+        let available = self
+            .reader
+            .exists(&available_path)
+            .map_err(|source| CapabilityDiscoveryError::Read { capability, source })?;
+        match (current, available) {
             (false, false) => Ok(Vec::new()),
             (true, true) => {
                 let raw = self
@@ -152,7 +161,21 @@ where
         for entry in entries {
             let start = entry.join("charge_control_start_threshold");
             let end = entry.join("charge_control_end_threshold");
-            match (self.reader.exists(&start), self.reader.exists(&end)) {
+            let start_present =
+                self.reader
+                    .exists(&start)
+                    .map_err(|source| CapabilityDiscoveryError::Read {
+                        capability: CAPABILITY,
+                        source,
+                    })?;
+            let end_present =
+                self.reader
+                    .exists(&end)
+                    .map_err(|source| CapabilityDiscoveryError::Read {
+                        capability: CAPABILITY,
+                        source,
+                    })?;
+            match (start_present, end_present) {
                 (true, true) => supported = true,
                 (false, false) => {}
                 _ => {
@@ -187,12 +210,25 @@ where
         };
         let brightness = entry.join("brightness");
         let max_brightness = entry.join("max_brightness");
-        if !self.reader.exists(&brightness) {
+        let brightness_present =
+            self.reader
+                .exists(&brightness)
+                .map_err(|source| CapabilityDiscoveryError::Read {
+                    capability: CAPABILITY,
+                    source,
+                })?;
+        if !brightness_present {
             return Err(CapabilityDiscoveryError::InvalidBacklight {
                 detail: "brightness is missing",
             });
         }
-        if !self.reader.exists(&max_brightness) {
+        let max_present = self.reader.exists(&max_brightness).map_err(|source| {
+            CapabilityDiscoveryError::Read {
+                capability: CAPABILITY,
+                source,
+            }
+        })?;
+        if !max_present {
             return Err(CapabilityDiscoveryError::InvalidBacklight {
                 detail: "max_brightness is missing",
             });

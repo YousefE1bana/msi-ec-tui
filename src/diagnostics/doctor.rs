@@ -109,44 +109,56 @@ pub fn doctor(paths: SystemPaths, reader: LinuxSysfsReader) -> DoctorReport {
         report.push(Verdict::Warn, "Non-Linux environment: unsupported");
     }
 
-    match reader.list_entries(&paths.msi_ec_root()) {
-        Ok(_) => report.push(Verdict::Pass, "msi-ec interface available"),
+    let root_enumerable = match reader.list_entries(&paths.msi_ec_root()) {
+        Ok(_) => {
+            report.push(Verdict::Pass, "msi-ec interface available");
+            true
+        }
         Err(SysfsError::NotFound(_)) => {
             report.push(Verdict::Fail, "msi-ec interface unavailable");
+            false
         }
-        Err(_) => report.push(Verdict::Fail, "msi-ec interface unreadable"),
-    }
+        Err(_) => {
+            report.push(Verdict::Fail, "msi-ec interface unreadable");
+            false
+        }
+    };
 
-    match CapabilityDetector::new(paths.clone(), reader).discover() {
-        Ok(capabilities) => {
-            report.push(Verdict::Pass, "EC interface coherent");
-            push_feature(
-                &mut report,
-                !capabilities.fan_modes.is_empty(),
-                "Fan controls",
-            );
-            push_feature(
-                &mut report,
-                !capabilities.shift_modes.is_empty(),
-                "Shift controls",
-            );
-            push_feature(
-                &mut report,
-                capabilities.battery_thresholds,
-                "Battery thresholds",
-            );
-            push_feature(
-                &mut report,
-                capabilities.keyboard_backlight.is_some(),
-                "Keyboard backlight",
-            );
-            push_feature(&mut report, capabilities.cpu_temperature, "CPU temperature");
-            push_feature(&mut report, capabilities.gpu_temperature, "GPU temperature");
+    // Coherence diagnostics require an enumerable root: without one there is
+    // no interface to call coherent, so feature lines are omitted rather
+    // than fabricated. The final mode still comes from `SupportEvaluator`.
+    if root_enumerable {
+        match CapabilityDetector::new(paths.clone(), reader).discover() {
+            Ok(capabilities) => {
+                report.push(Verdict::Pass, "EC interface coherent");
+                push_feature(
+                    &mut report,
+                    !capabilities.fan_modes.is_empty(),
+                    "Fan controls",
+                );
+                push_feature(
+                    &mut report,
+                    !capabilities.shift_modes.is_empty(),
+                    "Shift controls",
+                );
+                push_feature(
+                    &mut report,
+                    capabilities.battery_thresholds,
+                    "Battery thresholds",
+                );
+                push_feature(
+                    &mut report,
+                    capabilities.keyboard_backlight.is_some(),
+                    "Keyboard backlight",
+                );
+                push_feature(&mut report, capabilities.cpu_temperature, "CPU temperature");
+                push_feature(&mut report, capabilities.gpu_temperature, "GPU temperature");
+            }
+            Err(CapabilityDiscoveryError::Read { .. }) => {
+                report.push(Verdict::Fail, "EC capabilities unreadable");
+            }
+            Err(_) => report.push(Verdict::Fail, "EC interface inconsistent"),
         }
-        Err(CapabilityDiscoveryError::Read { .. }) => {
-            report.push(Verdict::Fail, "EC capabilities unreadable");
-        }
-        Err(_) => report.push(Verdict::Fail, "EC interface inconsistent"),
     }
 
     report

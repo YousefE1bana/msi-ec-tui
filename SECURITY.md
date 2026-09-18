@@ -17,9 +17,21 @@ Only the latest release of MEC receives security fixes.
 
 ## Scope
 
-The current bootstrap only prints a banner; it does not access hardware.
-MEC is planned to interact with embedded-controller state exposed through the
-`msi-ec` kernel interface. Future security-sensitive areas include:
+The current implementation performs READ-ONLY inspection of:
+
+- DMI identity (`sys_vendor`, `product_name`, and related fields)
+- `msi-ec`/sysfs capability interfaces (presence and available-mode lists)
+- Supported telemetry/state nodes (temperatures, fan values, modes, booleans)
+- Linux class interfaces used for battery thresholds and keyboard backlight
+
+The current code has:
+
+- no hardware write implementation
+- no raw ECebug register access
+- no privileged write helper
+- no profile-apply execution
+
+Future security-sensitive areas include:
 
 - Any path that allows writing values to sysfs paths MEC has not validated as
   supported by the detected hardware.
