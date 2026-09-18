@@ -88,10 +88,10 @@ mod tests {
     use crate::app::{AppAction, AppState};
     use crate::hardware::SupportMode;
 
+    use super::super::screens::render_screen;
     use super::super::screens::support::{
         full_capabilities, healthy_snapshot, live_for, screen_text,
     };
-    use super::super::screens::{render_battery, render_screen};
 
     fn shown_help() -> String {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
@@ -212,9 +212,60 @@ mod tests {
 
     #[test]
     fn overlay_sits_above_underlying_screen() {
-        let text = shown_help();
-        assert!(text.contains("MEC Help"));
-        assert!(text.contains("Toggle help"));
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::widgets::Paragraph;
+
+        use super::{help_lines, help_overlay_area, render_help};
+        use crate::tui::theme::Theme;
+
+        // Multi-row fill: help content lines are short, so only a marker
+        // spanning the full overlay interior proves clearing rather than
+        // border/title overwriting alone.
+        fn underlay_fill() -> String {
+            vec!["UNDERLAY_MARKER ".repeat(8); 25].join("\n")
+        }
+
+        // Control: the fill alone renders visibly, so its later absence
+        // proves clearing rather than a broken marker.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                let overlay = help_overlay_area(frame.area(), help_lines().len());
+                frame.render_widget(Paragraph::new(underlay_fill()), overlay);
+            })
+            .expect("marker draws");
+        let marker_text = super::super::screens::support::buffer_text(terminal.backend().buffer());
+        assert!(marker_text.contains("UNDERLAY_MARKER"));
+
+        // Marker first, overlay afterward: the overlay region must no
+        // longer contain the marker while showing help content.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let overlay = help_overlay_area(area, help_lines().len());
+                frame.render_widget(Paragraph::new(underlay_fill()), overlay);
+                render_help(frame, area, &Theme::default());
+            })
+            .expect("layered help draws");
+        let buffer = terminal.backend().buffer();
+        let overlay = help_overlay_area(buffer.area, help_lines().len());
+        let mut region = String::new();
+        for y in overlay.y..overlay.y.saturating_add(overlay.height) {
+            for x in overlay.x..overlay.x.saturating_add(overlay.width) {
+                region.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        let full = super::super::screens::support::buffer_text(buffer);
+        assert!(full.contains("MEC Help"));
+        assert!(full.contains("Toggle help"));
+        assert!(
+            !region.contains("UNDERLAY_MARKER"),
+            "overlay must clear underlying content"
+        );
     }
 
     #[test]
@@ -261,8 +312,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
             .draw(|frame| {
-                render_battery(frame, Rect::new(0, 0, 0, 0), &live, &capabilities);
+                render_screen(frame, Rect::new(0, 0, 0, 0), &app, &live, &capabilities);
             })
-            .expect("zero-area battery draws");
+            .expect("zero-area help-visible dispatch draws");
     }
 }
