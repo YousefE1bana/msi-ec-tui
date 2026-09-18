@@ -27,7 +27,7 @@ The current implementation performs READ-ONLY inspection of:
 The current code has:
 
 - no hardware write implementation
-- no raw ECebug register access
+- no raw EC/debug register access
 - no privileged write helper
 - no profile-apply execution
 
