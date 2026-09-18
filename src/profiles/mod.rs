@@ -1,7 +1,9 @@
 //! Declarative hardware profiles: strict TOML parsing into validated data.
 
+pub mod planner;
 pub mod profile;
 
+pub use planner::{ProfilePlanner, ProfilePreview, ProfilePreviewEntry, ProfilePreviewStatus};
 pub use profile::{
     BatteryProfile, DeviceProfile, PerformanceProfile, Profile, ProfileName, ProfileNameError,
     ProfileParseError, ProfileValidationError,
