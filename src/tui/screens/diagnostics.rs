@@ -11,9 +11,10 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{Capabilities, DeviceInfo, EcBackend, SupportMode};
 
+use crate::tui::theme::Theme;
 use crate::tui::ui::{
-    read_only_reason_text, render_panel, render_screen_shell, support_mode_text, support_text,
-    telemetry_state_text,
+    capability_style, read_only_reason_text, render_panel, render_screen_shell, support_mode_style,
+    support_mode_text, support_text, telemetry_state_text, telemetry_style,
 };
 
 /// Renders the startup-metadata summary: identity, compatibility verdict,
@@ -25,7 +26,18 @@ pub fn render_diagnostics<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    let content = render_screen_shell(frame, area, "Diagnostics", live);
+    render_diagnostics_with_theme(frame, area, live, capabilities, &Theme::default());
+}
+
+/// Theme-aware diagnostics renderer behind the Task-5 API.
+pub(crate) fn render_diagnostics_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let content = render_screen_shell(frame, area, "Diagnostics", live, theme);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -34,13 +46,26 @@ pub fn render_diagnostics<B: EcBackend>(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(0)])
         .split(columns[0]);
-    render_panel(frame, left[0], " IDENTITY ", identity_lines(live.device()));
-    render_panel(frame, left[1], " TELEMETRY ", telemetry_lines(live));
+    render_panel(
+        frame,
+        left[0],
+        " IDENTITY ",
+        identity_lines(live.device()),
+        theme,
+    );
+    render_panel(
+        frame,
+        left[1],
+        " TELEMETRY ",
+        telemetry_lines(live, theme),
+        theme,
+    );
     render_panel(
         frame,
         columns[1],
         " CAPABILITIES ",
-        matrix_lines(capabilities),
+        matrix_lines(capabilities, theme),
+        theme,
     );
 }
 
@@ -67,13 +92,25 @@ fn identity_lines(device: &DeviceInfo) -> Vec<Line<'static>> {
     ]
 }
 
-fn telemetry_lines<B: EcBackend>(live: &LiveHardware<B>) -> Vec<Line<'static>> {
+fn telemetry_lines<B: EcBackend>(live: &LiveHardware<B>, theme: &Theme) -> Vec<Line<'static>> {
+    use ratatui::text::Span;
+
     let mut lines = vec![
-        Line::from(format!("Mode: {}", support_mode_text(live.mode()))),
-        Line::from(format!(
-            "Telemetry: {}",
-            telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
-        )),
+        Line::from(vec![
+            Span::raw("Mode: "),
+            Span::styled(
+                support_mode_text(live.mode()).to_owned(),
+                support_mode_style(live.mode(), theme),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("Telemetry: "),
+            Span::styled(
+                telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
+                    .to_owned(),
+                telemetry_style(live.is_degraded(), live.current_snapshot().is_some(), theme),
+            ),
+        ]),
     ];
     if let SupportMode::ReadOnly(reason) = live.mode() {
         lines.push(Line::from(format!(
@@ -82,54 +119,41 @@ fn telemetry_lines<B: EcBackend>(live: &LiveHardware<B>) -> Vec<Line<'static>> {
         )));
     }
     if let Some(error) = live.snapshot_error() {
-        lines.push(Line::from(error.to_string()));
+        lines.push(Line::styled(
+            error.to_string(),
+            ratatui::style::Style::default().fg(theme.danger),
+        ));
     }
     lines
 }
 
-fn matrix_lines(capabilities: &Capabilities) -> Vec<Line<'static>> {
+fn matrix_row(label: &'static str, supported: bool, theme: &Theme) -> Line<'static> {
+    Line::styled(
+        format!("{label}: {}", support_text(supported)),
+        capability_style(supported, theme),
+    )
+}
+
+fn matrix_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
-        Line::from(format!(
-            "CPU Temperature: {}",
-            support_text(capabilities.cpu_temperature)
-        )),
-        Line::from(format!(
-            "GPU Temperature: {}",
-            support_text(capabilities.gpu_temperature)
-        )),
-        Line::from(format!("CPU Fan: {}", support_text(capabilities.cpu_fan))),
-        Line::from(format!("GPU Fan: {}", support_text(capabilities.gpu_fan))),
-        Line::from(format!(
-            "Fan Modes: {}",
-            support_text(!capabilities.fan_modes.is_empty())
-        )),
-        Line::from(format!(
-            "Shift Modes: {}",
-            support_text(!capabilities.shift_modes.is_empty())
-        )),
-        Line::from(format!(
-            "Cooler Boost: {}",
-            support_text(capabilities.cooler_boost)
-        )),
-        Line::from(format!(
-            "Super Battery: {}",
-            support_text(capabilities.super_battery)
-        )),
-        Line::from(format!("Webcam: {}", support_text(capabilities.webcam))),
-        Line::from(format!(
-            "Webcam Block: {}",
-            support_text(capabilities.webcam_block)
-        )),
-        Line::from(format!("Fn Key: {}", support_text(capabilities.fn_key))),
-        Line::from(format!("Win Key: {}", support_text(capabilities.win_key))),
-        Line::from(format!(
-            "Keyboard Backlight: {}",
-            support_text(capabilities.keyboard_backlight.is_some())
-        )),
-        Line::from(format!(
-            "Battery Thresholds: {}",
-            support_text(capabilities.battery_thresholds)
-        )),
+        matrix_row("CPU Temperature", capabilities.cpu_temperature, theme),
+        matrix_row("GPU Temperature", capabilities.gpu_temperature, theme),
+        matrix_row("CPU Fan", capabilities.cpu_fan, theme),
+        matrix_row("GPU Fan", capabilities.gpu_fan, theme),
+        matrix_row("Fan Modes", !capabilities.fan_modes.is_empty(), theme),
+        matrix_row("Shift Modes", !capabilities.shift_modes.is_empty(), theme),
+        matrix_row("Cooler Boost", capabilities.cooler_boost, theme),
+        matrix_row("Super Battery", capabilities.super_battery, theme),
+        matrix_row("Webcam", capabilities.webcam, theme),
+        matrix_row("Webcam Block", capabilities.webcam_block, theme),
+        matrix_row("Fn Key", capabilities.fn_key, theme),
+        matrix_row("Win Key", capabilities.win_key, theme),
+        matrix_row(
+            "Keyboard Backlight",
+            capabilities.keyboard_backlight.is_some(),
+            theme,
+        ),
+        matrix_row("Battery Thresholds", capabilities.battery_thresholds, theme),
     ]
 }
 

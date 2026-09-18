@@ -11,8 +11,10 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{Capabilities, EcBackend};
 
+use crate::tui::theme::Theme;
 use crate::tui::ui::{
-    joined_modes, performance_lines, render_panel, render_screen_shell, support_text,
+    capability_style, joined_modes, performance_lines, render_panel, render_screen_shell,
+    support_text,
 };
 
 /// Renders current performance state plus available modes and feature
@@ -23,7 +25,18 @@ pub fn render_performance<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    let content = render_screen_shell(frame, area, "Performance", live);
+    render_performance_with_theme(frame, area, live, capabilities, &Theme::default());
+}
+
+/// Theme-aware performance renderer behind the Task-5 API.
+pub(crate) fn render_performance_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let content = render_screen_shell(frame, area, "Performance", live, theme);
     let panels = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(6), Constraint::Min(0)])
@@ -33,16 +46,18 @@ pub fn render_performance<B: EcBackend>(
         panels[0],
         " CURRENT ",
         performance_lines(live.current_snapshot()),
+        theme,
     );
     render_panel(
         frame,
         panels[1],
         " CAPABILITIES ",
-        capability_lines(capabilities),
+        capability_lines(capabilities, theme),
+        theme,
     );
 }
 
-fn capability_lines(capabilities: &Capabilities) -> Vec<Line<'static>> {
+fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         Line::from(format!(
             "Available Shift Modes: {}",
@@ -52,14 +67,17 @@ fn capability_lines(capabilities: &Capabilities) -> Vec<Line<'static>> {
             "Available Fan Modes: {}",
             joined_modes(capabilities.fan_modes.iter().map(|mode| mode.as_str()))
         )),
-        Line::from(format!(
-            "Cooler Boost: {}",
-            support_text(capabilities.cooler_boost)
-        )),
-        Line::from(format!(
-            "Super Battery: {}",
-            support_text(capabilities.super_battery)
-        )),
+        Line::styled(
+            format!("Cooler Boost: {}", support_text(capabilities.cooler_boost)),
+            capability_style(capabilities.cooler_boost, theme),
+        ),
+        Line::styled(
+            format!(
+                "Super Battery: {}",
+                support_text(capabilities.super_battery)
+            ),
+            capability_style(capabilities.super_battery, theme),
+        ),
     ]
 }
 

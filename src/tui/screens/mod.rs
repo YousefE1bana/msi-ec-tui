@@ -2,6 +2,8 @@
 //!
 //! Each screen renders already-sampled [`LiveHardware`] state plus injected
 //! startup [`Capabilities`]. Renderers never sample, discover, or probe.
+//! The dispatcher owns the shared navigation chrome and renders the help
+//! overlay last so it sits above the active screen.
 
 mod battery;
 mod dashboard;
@@ -20,13 +22,19 @@ pub use fans::render_fans;
 pub use performance::render_performance;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
 
 use crate::app::{AppState, LiveHardware, Screen};
 use crate::hardware::{Capabilities, EcBackend};
 
-/// Renders the screen selected by `app`, ignoring help visibility until
-/// Task 6 owns the overlay.
+use crate::tui::theme::Theme;
+
+/// Renders the screen selected by `app` with the default theme.
+///
+/// Help visibility is honored: a visible overlay renders above the screen.
 pub fn render_screen<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
@@ -34,28 +42,99 @@ pub fn render_screen<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    match app.current_screen() {
-        Screen::Dashboard => render_dashboard(frame, area, live),
-        Screen::Performance => render_performance(frame, area, live, capabilities),
-        Screen::Fans => render_fans(frame, area, live, capabilities),
-        Screen::Battery => render_battery(frame, area, live, capabilities),
-        Screen::Devices => render_devices(frame, area, live, capabilities),
-        Screen::Diagnostics => render_diagnostics(frame, area, live, capabilities),
+    render_screen_with_theme(frame, area, app, live, capabilities, &Theme::default());
+}
+
+/// Theme-aware dispatcher. `render_screen` stays source-compatible for
+/// Task-5 callers while named themes gain an injection seam later.
+pub fn render_screen_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+    render_navigation(frame, rows[0], app, theme);
+    render_active_screen(frame, rows[1], app, live, capabilities, theme);
+    if app.help_visible() {
+        super::help::render_help(frame, area, theme);
     }
+}
+
+/// Dispatches the active screen. Split from [`render_screen_with_theme`]
+/// so the chrome/overlay orchestration stays readable.
+fn render_active_screen<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    app: &AppState,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    match app.current_screen() {
+        Screen::Dashboard => {
+            dashboard::render_dashboard_with_theme(frame, area, live, theme);
+        }
+        Screen::Performance => {
+            performance::render_performance_with_theme(frame, area, live, capabilities, theme);
+        }
+        Screen::Fans => fans::render_fans_with_theme(frame, area, live, capabilities, theme),
+        Screen::Battery => {
+            battery::render_battery_with_theme(frame, area, live, capabilities, theme);
+        }
+        Screen::Devices => {
+            devices::render_devices_with_theme(frame, area, live, capabilities, theme);
+        }
+        Screen::Diagnostics => {
+            diagnostics::render_diagnostics_with_theme(frame, area, live, capabilities, theme);
+        }
+    }
+}
+
+/// Shared navigation row in canonical [`Screen::ALL`] order. The active
+/// entry uses the primary role plus bold; the rest stay muted.
+fn render_navigation(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
+    let mut spans = Vec::new();
+    for (index, screen) in Screen::ALL.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let style = if *screen == app.current_screen() {
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.muted)
+        };
+        spans.push(Span::styled(
+            format!("{} {}", index + 1, screen.title()),
+            style,
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[cfg(test)]
 mod tests {
     use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
 
     use crate::app::{AppAction, AppState, Screen};
-    use crate::hardware::SupportMode;
+    use crate::hardware::{BackendError, SupportMode};
 
-    use super::support::{full_capabilities, healthy_snapshot, live_for, screen_text};
+    use super::support::{
+        first_cell_style, full_capabilities, healthy_snapshot, live_for, screen_text,
+    };
     use super::{
         render_battery, render_devices, render_diagnostics, render_fans, render_performance,
-        render_screen,
+        render_screen, render_screen_with_theme,
     };
+    use crate::tui::theme::Theme;
 
     fn app_on(screen: Screen) -> AppState {
         let mut app = AppState::default();
@@ -100,6 +179,209 @@ mod tests {
     #[test]
     fn diagnostics_dispatch_renders_diagnostics() {
         assert!(dispatched(Screen::Diagnostics).contains("Manufacturer"));
+    }
+
+    #[test]
+    fn navigation_renders_all_six_screen_names() {
+        let text = dispatched(Screen::Dashboard);
+        for name in [
+            "Dashboard",
+            "Performance",
+            "Fans",
+            "Battery",
+            "Devices",
+            "Diagnostics",
+        ] {
+            assert!(text.contains(name), "{name:?} missing from navigation");
+        }
+    }
+
+    #[test]
+    fn navigation_renders_digits() {
+        let text = dispatched(Screen::Dashboard);
+        for digit in ["1", "2", "3", "4", "5", "6"] {
+            assert!(text.contains(digit), "{digit:?} missing from navigation");
+        }
+    }
+
+    #[test]
+    fn navigation_advertises_no_profiles() {
+        assert!(!dispatched(Screen::Dashboard).contains("Profiles"));
+    }
+
+    #[test]
+    fn navigation_follows_canonical_order() {
+        let text = dispatched(Screen::Dashboard);
+        let mut positions = Vec::new();
+        for name in [
+            "1 Dashboard",
+            "2 Performance",
+            "3 Fans",
+            "4 Battery",
+            "5 Devices",
+            "6 Diagnostics",
+        ] {
+            positions.push(text.find(name).expect("{name:?} missing"));
+        }
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn active_dashboard_entry_uses_primary_style() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let theme = Theme::default();
+        let (foreground, modifier) = first_cell_style(100, 30, "1 Dashboard", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("navigation entry present");
+        assert_eq!(foreground, theme.primary);
+        assert!(modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn goto_fans_marks_fans_entry_active() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let theme = Theme::default();
+        let (foreground, _) = first_cell_style(100, 30, "3 Fans", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("fans entry present");
+        assert_eq!(foreground, theme.primary);
+        let (dashboard_foreground, _) = first_cell_style(100, 30, "1 Dashboard", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("dashboard entry present");
+        assert_eq!(dashboard_foreground, theme.muted);
+    }
+
+    #[test]
+    fn only_one_entry_is_styled_active() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Battery);
+        let theme = Theme::default();
+        let mut active = 0;
+        for label in [
+            "1 Dashboard",
+            "2 Performance",
+            "3 Fans",
+            "4 Battery",
+            "5 Devices",
+            "6 Diagnostics",
+        ] {
+            let (foreground, _) = first_cell_style(100, 30, label, |frame| {
+                render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            })
+            .expect("entry present");
+            if foreground == theme.primary {
+                active += 1;
+            }
+        }
+        assert_eq!(active, 1);
+    }
+
+    #[test]
+    fn ready_uses_success_role() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let theme = Theme::default();
+        let (foreground, _) = first_cell_style(100, 30, "READY", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("READY present");
+        assert_eq!(foreground, theme.success);
+    }
+
+    #[test]
+    fn read_only_uses_warning_role() {
+        let (live, _) = live_for(
+            vec![Ok(healthy_snapshot())],
+            SupportMode::ReadOnly(crate::hardware::ReadOnlyReason::MsiEcUnavailable),
+            1,
+        );
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let theme = Theme::default();
+        let (foreground, _) = first_cell_style(100, 30, "READ-ONLY", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("READ-ONLY present");
+        assert_eq!(foreground, theme.warning);
+    }
+
+    #[test]
+    fn live_uses_success_role() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let theme = Theme::default();
+        let (foreground, _) = first_cell_style(100, 30, "LIVE", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("LIVE present");
+        assert_eq!(foreground, theme.success);
+    }
+
+    #[test]
+    fn waiting_uses_muted_role() {
+        let (live, _) = live_for(Vec::new(), SupportMode::Ready, 0);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let theme = Theme::default();
+        let (foreground, _) = first_cell_style(100, 30, "WAITING", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("WAITING present");
+        assert_eq!(foreground, theme.muted);
+    }
+
+    #[test]
+    fn degraded_uses_danger_role() {
+        let (live, _) = live_for(
+            vec![Ok(healthy_snapshot()), Err(BackendError::Unavailable)],
+            SupportMode::Ready,
+            2,
+        );
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let theme = Theme::default();
+        let (foreground, _) = first_cell_style(100, 30, "DEGRADED", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("DEGRADED present");
+        assert_eq!(foreground, theme.danger);
+    }
+
+    #[test]
+    fn render_screen_still_works_without_theme() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let text = screen_text(100, 30, |frame| {
+            render_screen(frame, frame.area(), &app, &live, &capabilities);
+        });
+        assert!(text.contains("CPU Fan Telemetry"));
+    }
+
+    #[test]
+    fn custom_theme_drives_active_styling() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Devices);
+        let theme = Theme {
+            primary: ratatui::style::Color::Red,
+            ..Theme::default()
+        };
+        let (foreground, _) = first_cell_style(100, 30, "5 Devices", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("devices entry present");
+        assert_eq!(foreground, ratatui::style::Color::Red);
     }
 
     #[test]

@@ -11,7 +11,10 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{BacklightCapability, Capabilities, EcBackend};
 
-use crate::tui::ui::{device_lines, render_panel, render_screen_shell, support_text};
+use crate::tui::theme::Theme;
+use crate::tui::ui::{
+    capability_style, device_lines, render_panel, render_screen_shell, support_text,
+};
 
 /// Renders current device state plus control-interface capabilities. Fn/Win
 /// keys report capability existence only: the snapshot carries no runtime
@@ -22,7 +25,18 @@ pub fn render_devices<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    let content = render_screen_shell(frame, area, "Devices", live);
+    render_devices_with_theme(frame, area, live, capabilities, &Theme::default());
+}
+
+/// Theme-aware devices renderer behind the Task-5 API.
+pub(crate) fn render_devices_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let content = render_screen_shell(frame, area, "Devices", live, theme);
     let panels = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(5), Constraint::Min(0)])
@@ -32,12 +46,14 @@ pub fn render_devices<B: EcBackend>(
         panels[0],
         " CURRENT ",
         device_lines(live.current_snapshot()),
+        theme,
     );
     render_panel(
         frame,
         panels[1],
         " CAPABILITIES ",
-        capability_lines(capabilities),
+        capability_lines(capabilities, theme),
+        theme,
     );
 }
 
@@ -48,19 +64,32 @@ fn backlight_capability_text(capability: Option<&BacklightCapability>) -> String
     }
 }
 
-fn capability_lines(capabilities: &Capabilities) -> Vec<Line<'static>> {
+fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
+    let backlight_supported = capabilities.keyboard_backlight.is_some();
     vec![
-        Line::from(format!("Webcam: {}", support_text(capabilities.webcam))),
-        Line::from(format!(
-            "Webcam Block: {}",
-            support_text(capabilities.webcam_block)
-        )),
-        Line::from(format!(
-            "Keyboard Backlight: {}",
-            backlight_capability_text(capabilities.keyboard_backlight.as_ref())
-        )),
-        Line::from(format!("Fn Key: {}", support_text(capabilities.fn_key))),
-        Line::from(format!("Win Key: {}", support_text(capabilities.win_key))),
+        Line::styled(
+            format!("Webcam: {}", support_text(capabilities.webcam)),
+            capability_style(capabilities.webcam, theme),
+        ),
+        Line::styled(
+            format!("Webcam Block: {}", support_text(capabilities.webcam_block)),
+            capability_style(capabilities.webcam_block, theme),
+        ),
+        Line::styled(
+            format!(
+                "Keyboard Backlight: {}",
+                backlight_capability_text(capabilities.keyboard_backlight.as_ref())
+            ),
+            capability_style(backlight_supported, theme),
+        ),
+        Line::styled(
+            format!("Fn Key: {}", support_text(capabilities.fn_key)),
+            capability_style(capabilities.fn_key, theme),
+        ),
+        Line::styled(
+            format!("Win Key: {}", support_text(capabilities.win_key)),
+            capability_style(capabilities.win_key, theme),
+        ),
     ]
 }
 

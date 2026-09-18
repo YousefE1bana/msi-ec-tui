@@ -11,6 +11,7 @@ use ratatui::Frame;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier};
 
 use crate::app::LiveHardware;
 use crate::hardware::{
@@ -151,8 +152,45 @@ pub(crate) fn buffer_text(buffer: &Buffer) -> String {
 /// Renders `draw` into a deterministic `width`x`height` buffer and returns
 /// its visible text.
 pub(crate) fn screen_text(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> String {
+    with_buffer(width, height, draw, buffer_text)
+}
+
+/// Style of the first cell where `needle` starts, if present. Compares
+/// buffer symbols (not bytes) so Unicode borders never skew the lookup.
+pub(crate) fn first_cell_style(
+    width: u16,
+    height: u16,
+    needle: &str,
+    draw: impl FnOnce(&mut Frame),
+) -> Option<(Color, Modifier)> {
+    with_buffer(width, height, draw, |buffer| {
+        for y in 0..buffer.area.height {
+            let mut text = String::new();
+            let mut byte_cells = Vec::new();
+            for x in 0..buffer.area.width {
+                let symbol = buffer[(x, y)].symbol();
+                for _ in 0..symbol.len() {
+                    byte_cells.push(x);
+                }
+                text.push_str(symbol);
+            }
+            if let Some(byte) = text.find(needle) {
+                let cell = &buffer[(byte_cells[byte], y)];
+                return Some((cell.fg, cell.modifier));
+            }
+        }
+        None
+    })
+}
+
+fn with_buffer<R>(
+    width: u16,
+    height: u16,
+    draw: impl FnOnce(&mut Frame),
+    inspect: impl FnOnce(&Buffer) -> R,
+) -> R {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test terminal constructs");
     terminal.draw(draw).expect("screen draws");
-    buffer_text(terminal.backend().buffer())
+    inspect(terminal.backend().buffer())
 }

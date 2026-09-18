@@ -6,7 +6,8 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::{Line, Text};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::LiveHardware;
@@ -15,6 +16,8 @@ use crate::hardware::{
     SupportMode, TemperatureCelsius,
 };
 
+use super::theme::Theme;
+
 /// Conservative fallback threshold shared by all screens: below this a
 /// screen cannot show its content honestly, so a compact message replaces
 /// it. Layout splits below never panic; only honest presentation matters.
@@ -22,7 +25,7 @@ pub(crate) const MIN_SCREEN_WIDTH: u16 = 60;
 pub(crate) const MIN_SCREEN_HEIGHT: u16 = 14;
 
 /// Truthful footer: every shortcut listed is implemented.
-const SCREEN_FOOTER: &str = "Tab Next • Shift+Tab Previous • ? Help • Q Quit";
+pub(crate) const SCREEN_FOOTER: &str = "Tab/arrows/hjkl Navigate • ? Help • Q Quit";
 
 /// "READY" or "READ-ONLY". A support verdict never implies transport
 /// connectivity, so no "connected" language lives here.
@@ -63,6 +66,34 @@ pub(crate) fn support_text(supported: bool) -> &'static str {
         "Supported"
     } else {
         "Unavailable"
+    }
+}
+
+/// Style for the support verdict: healthy states succeed, read-only warns.
+pub(crate) fn support_mode_style(mode: &SupportMode, theme: &Theme) -> Style {
+    match mode {
+        SupportMode::Ready => Style::default().fg(theme.success),
+        SupportMode::ReadOnly(_) => Style::default().fg(theme.warning),
+    }
+}
+
+/// Style for the telemetry word: failure endangers, silence mutes.
+pub(crate) fn telemetry_style(degraded: bool, has_current: bool, theme: &Theme) -> Style {
+    if degraded {
+        Style::default().fg(theme.danger)
+    } else if has_current {
+        Style::default().fg(theme.success)
+    } else {
+        Style::default().fg(theme.muted)
+    }
+}
+
+/// Style for capability existence: supported succeeds, missing mutes.
+pub(crate) fn capability_style(supported: bool, theme: &Theme) -> Style {
+    if supported {
+        Style::default().fg(theme.success)
+    } else {
+        Style::default().fg(theme.muted)
     }
 }
 
@@ -193,14 +224,23 @@ pub(crate) fn device_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'sta
     ]
 }
 
-/// Bordered panel with a title and content lines.
+/// Bordered panel with a styled title and content lines.
 pub(crate) fn render_panel(
     frame: &mut Frame,
     area: Rect,
     title: &'static str,
     lines: Vec<Line<'static>>,
+    theme: &Theme,
 ) {
-    let panel = Block::default().borders(Borders::ALL).title(title);
+    let panel = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.border))
+        .title(Line::styled(
+            title,
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = panel.inner(area);
     frame.render_widget(panel, area);
     frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -220,6 +260,7 @@ pub(crate) fn render_screen_shell<B: EcBackend>(
     area: Rect,
     title: &'static str,
     live: &LiveHardware<B>,
+    theme: &Theme,
 ) -> Rect {
     if area.width < MIN_SCREEN_WIDTH || area.height < MIN_SCREEN_HEIGHT {
         render_compact(frame, area);
@@ -227,7 +268,13 @@ pub(crate) fn render_screen_shell<B: EcBackend>(
     }
     let outer = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" MEC — {title} "));
+        .border_style(Style::default().fg(theme.border))
+        .title(Line::styled(
+            format!(" MEC — {title} "),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -240,7 +287,7 @@ pub(crate) fn render_screen_shell<B: EcBackend>(
         ])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(Text::from(screen_header_lines(live))),
+        Paragraph::new(Text::from(screen_header_lines(live, theme))),
         rows[0],
     );
     frame.render_widget(Paragraph::new(SCREEN_FOOTER), rows[2]);
@@ -249,21 +296,31 @@ pub(crate) fn render_screen_shell<B: EcBackend>(
 
 /// Status header shared by secondary screens: device, support verdict with
 /// stable reason, telemetry state with readable error detail.
-fn screen_header_lines<B: EcBackend>(live: &LiveHardware<B>) -> Vec<Line<'static>> {
-    let mut mode_line = format!("Mode: {}", support_mode_text(live.mode()));
+fn screen_header_lines<B: EcBackend>(live: &LiveHardware<B>, theme: &Theme) -> Vec<Line<'static>> {
+    let mut mode_line = vec![
+        Span::raw("Mode: "),
+        Span::styled(
+            support_mode_text(live.mode()).to_owned(),
+            support_mode_style(live.mode(), theme),
+        ),
+    ];
     if let SupportMode::ReadOnly(reason) = live.mode() {
-        mode_line.push_str(&format!(" ({})", read_only_reason_text(reason)));
+        mode_line.push(Span::raw(format!(" ({})", read_only_reason_text(reason))));
     }
     let mut header = vec![
         Line::from(format!("Device: {}", live.device().product_name)),
         Line::from(mode_line),
-        Line::from(format!(
-            "Telemetry: {}",
-            telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
-        )),
+        Line::from(vec![
+            Span::raw("Telemetry: "),
+            Span::styled(
+                telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
+                    .to_owned(),
+                telemetry_style(live.is_degraded(), live.current_snapshot().is_some(), theme),
+            ),
+        ]),
     ];
     header.push(match live.snapshot_error() {
-        Some(error) => Line::from(error.to_string()),
+        Some(error) => Line::styled(error.to_string(), Style::default().fg(theme.danger)),
         None => Line::from(""),
     });
     header

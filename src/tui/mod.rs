@@ -5,10 +5,12 @@
 //! tasks. This module never reads sysfs directly.
 
 mod event;
+mod help;
 mod input;
 mod runtime;
 pub mod screens;
 mod terminal;
+pub mod theme;
 pub mod ui;
 
 pub use event::{CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event};
@@ -16,6 +18,7 @@ pub use input::action_for_key;
 pub use runtime::{run_event_loop, run_event_loop_with_ticks};
 pub use screens::{
     render_battery, render_dashboard, render_devices, render_diagnostics, render_fans,
-    render_performance, render_screen,
+    render_performance, render_screen, render_screen_with_theme,
 };
 pub use terminal::TerminalSession;
+pub use theme::Theme;

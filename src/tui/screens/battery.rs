@@ -12,7 +12,10 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{Capabilities, EcBackend};
 
-use crate::tui::ui::{battery_lines, render_panel, render_screen_shell, support_text};
+use crate::tui::theme::Theme;
+use crate::tui::ui::{
+    battery_lines, capability_style, render_panel, render_screen_shell, support_text,
+};
 
 /// Renders current battery state plus threshold-control capability. Only
 /// threshold control carries a capability label; absent runtime values are
@@ -23,7 +26,18 @@ pub fn render_battery<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    let content = render_screen_shell(frame, area, "Battery", live);
+    render_battery_with_theme(frame, area, live, capabilities, &Theme::default());
+}
+
+/// Theme-aware battery renderer behind the Task-5 API.
+pub(crate) fn render_battery_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let content = render_screen_shell(frame, area, "Battery", live, theme);
     let panels = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(0)])
@@ -33,15 +47,20 @@ pub fn render_battery<B: EcBackend>(
         panels[0],
         " CURRENT ",
         battery_lines(live.current_snapshot()),
+        theme,
     );
     render_panel(
         frame,
         panels[1],
         " CAPABILITIES ",
-        vec![Line::from(format!(
-            "Threshold Control: {}",
-            support_text(capabilities.battery_thresholds)
-        ))],
+        vec![Line::styled(
+            format!(
+                "Threshold Control: {}",
+                support_text(capabilities.battery_thresholds)
+            ),
+            capability_style(capabilities.battery_thresholds, theme),
+        )],
+        theme,
     );
 }
 

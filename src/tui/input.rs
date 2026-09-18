@@ -23,6 +23,10 @@ pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Some(AppAction::Quit),
         KeyCode::Tab if key.modifiers.is_empty() => Some(AppAction::NextScreen),
         KeyCode::BackTab if allows_only_shift(key.modifiers) => Some(AppAction::PreviousScreen),
+        KeyCode::Right | KeyCode::Down if key.modifiers.is_empty() => Some(AppAction::NextScreen),
+        KeyCode::Left | KeyCode::Up if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
+        KeyCode::Char('l' | 'j') if key.modifiers.is_empty() => Some(AppAction::NextScreen),
+        KeyCode::Char('h' | 'k') if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
         KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::HideHelp),
         KeyCode::Char(digit @ '1'..='6') if key.modifiers.is_empty() => {
@@ -205,6 +209,123 @@ mod tests {
     fn alt_digit_does_not_jump() {
         assert_eq!(
             action_for_key(press(KeyCode::Char('1'), KeyModifiers::ALT)),
+            None
+        );
+    }
+
+    #[test]
+    fn right_advances_screen() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Right, KeyModifiers::empty())),
+            Some(AppAction::NextScreen)
+        );
+    }
+
+    #[test]
+    fn down_advances_screen() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Down, KeyModifiers::empty())),
+            Some(AppAction::NextScreen)
+        );
+    }
+
+    #[test]
+    fn left_goes_to_previous_screen() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Left, KeyModifiers::empty())),
+            Some(AppAction::PreviousScreen)
+        );
+    }
+
+    #[test]
+    fn up_goes_to_previous_screen() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Up, KeyModifiers::empty())),
+            Some(AppAction::PreviousScreen)
+        );
+    }
+
+    #[test]
+    fn vim_next_keys_advance_screen() {
+        for key in ['l', 'j'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(key), KeyModifiers::empty())),
+                Some(AppAction::NextScreen),
+                "vim key {key} must advance",
+            );
+        }
+    }
+
+    #[test]
+    fn vim_previous_keys_go_back() {
+        for key in ['h', 'k'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(key), KeyModifiers::empty())),
+                Some(AppAction::PreviousScreen),
+                "vim key {key} must go back",
+            );
+        }
+    }
+
+    #[test]
+    fn alt_vim_keys_do_nothing() {
+        for key in ['h', 'j', 'k', 'l'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(key), KeyModifiers::ALT)),
+                None,
+                "Alt+{key} must not navigate",
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_vim_keys_do_nothing() {
+        for key in ['h', 'j', 'k', 'l'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(key), KeyModifiers::CONTROL)),
+                None,
+                "Ctrl+{key} must not navigate",
+            );
+        }
+    }
+
+    #[test]
+    fn shifted_vim_keys_do_nothing() {
+        for key in ['H', 'J', 'K', 'L'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(key), KeyModifiers::empty())),
+                None,
+                "shifted {key} must not navigate",
+            );
+        }
+    }
+
+    #[test]
+    fn arrow_release_events_do_nothing() {
+        for code in [KeyCode::Right, KeyCode::Down, KeyCode::Left, KeyCode::Up] {
+            assert_eq!(
+                action_for_key(release(code, KeyModifiers::empty())),
+                None,
+                "{code:?} release must be ignored",
+            );
+        }
+    }
+
+    #[test]
+    fn vim_release_events_do_nothing() {
+        for key in ['h', 'j', 'k', 'l'] {
+            assert_eq!(
+                action_for_key(release(KeyCode::Char(key), KeyModifiers::empty())),
+                None,
+                "{key} release must be ignored",
+            );
+        }
+    }
+
+    #[test]
+    fn enter_remains_unmapped() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Enter, KeyModifiers::empty())),
             None
         );
     }

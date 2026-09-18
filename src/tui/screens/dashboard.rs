@@ -5,16 +5,18 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::{Line, Text};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::LiveHardware;
 use crate::hardware::{EcBackend, SupportMode};
 
+use crate::tui::theme::Theme;
 use crate::tui::ui::{
-    MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH, battery_lines, device_lines, performance_lines,
-    read_only_reason_text, render_compact, render_panel, support_mode_text, telemetry_state_text,
-    thermals_lines,
+    MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH, SCREEN_FOOTER, battery_lines, device_lines,
+    performance_lines, read_only_reason_text, render_compact, render_panel, support_mode_style,
+    support_mode_text, telemetry_state_text, telemetry_style, thermals_lines,
 };
 
 /// Conservative fallback threshold: below this the dashboard cannot show
@@ -22,12 +24,23 @@ use crate::tui::ui::{
 const MIN_DASHBOARD_WIDTH: u16 = MIN_SCREEN_WIDTH;
 const MIN_DASHBOARD_HEIGHT: u16 = MIN_SCREEN_HEIGHT;
 
-/// Renders the read-only dashboard into `area`.
+/// Renders the read-only dashboard into `area` with the default theme.
 ///
 /// Reads only already-sampled [`LiveHardware`] state and performs zero
 /// backend calls. Absent values render `N/A`; a failed latest sample hides
 /// older history values instead of presenting them as current.
 pub fn render_dashboard<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardware<B>) {
+    render_dashboard_with_theme(frame, area, live, &Theme::default());
+}
+
+/// Theme-aware dashboard renderer. [`render_dashboard`] stays
+/// source-compatible while future themes gain an injection seam.
+pub(crate) fn render_dashboard_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    theme: &Theme,
+) {
     if area.width < MIN_DASHBOARD_WIDTH || area.height < MIN_DASHBOARD_HEIGHT {
         render_compact(frame, area);
         return;
@@ -35,7 +48,13 @@ pub fn render_dashboard<B: EcBackend>(frame: &mut Frame, area: Rect, live: &Live
 
     let outer = Block::default()
         .borders(Borders::ALL)
-        .title(" MEC — MSI EC Control Center ");
+        .border_style(Style::default().fg(theme.border))
+        .title(Line::styled(
+            " MEC — MSI EC Control Center ",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
@@ -47,13 +66,18 @@ pub fn render_dashboard<B: EcBackend>(frame: &mut Frame, area: Rect, live: &Live
             Constraint::Length(1),
         ])
         .split(inner);
-    render_header(frame, rows[0], live);
-    render_panels(frame, rows[1], live);
+    render_header(frame, rows[0], live, theme);
+    render_panels(frame, rows[1], live, theme);
 
-    frame.render_widget(Paragraph::new("1 Dashboard • ? Help • Q Quit"), rows[2]);
+    frame.render_widget(Paragraph::new(SCREEN_FOOTER), rows[2]);
 }
 
-fn render_panels<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardware<B>) {
+fn render_panels<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    theme: &Theme,
+) {
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -67,32 +91,57 @@ fn render_panels<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardwar
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(columns[1]);
     let snapshot = live.current_snapshot();
-    render_panel(frame, left[0], " THERMALS ", thermals_lines(snapshot));
-    render_panel(frame, left[1], " BATTERY ", battery_lines(snapshot));
+    render_panel(
+        frame,
+        left[0],
+        " THERMALS ",
+        thermals_lines(snapshot),
+        theme,
+    );
+    render_panel(frame, left[1], " BATTERY ", battery_lines(snapshot), theme);
     render_panel(
         frame,
         right[0],
         " PERFORMANCE ",
         performance_lines(snapshot),
+        theme,
     );
-    render_panel(frame, right[1], " DEVICE ", device_lines(snapshot));
+    render_panel(frame, right[1], " DEVICE ", device_lines(snapshot), theme);
 }
 
-fn render_header<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardware<B>) {
-    let mut mode_line = format!("Mode: {}", support_mode_text(live.mode()));
+fn render_header<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    theme: &Theme,
+) {
+    let mut mode_line = vec![
+        Span::raw("Mode: "),
+        Span::styled(
+            support_mode_text(live.mode()).to_owned(),
+            support_mode_style(live.mode(), theme),
+        ),
+    ];
     if let SupportMode::ReadOnly(reason) = live.mode() {
-        mode_line.push_str(&format!(" ({})", read_only_reason_text(reason)));
+        mode_line.push(Span::raw(format!(" ({})", read_only_reason_text(reason))));
     }
     let mut lines = vec![
         Line::from(format!("Device: {}", live.device().product_name)),
         Line::from(mode_line),
-        Line::from(format!(
-            "Telemetry: {}",
-            telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
-        )),
+        Line::from(vec![
+            Span::raw("Telemetry: "),
+            Span::styled(
+                telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some())
+                    .to_owned(),
+                telemetry_style(live.is_degraded(), live.current_snapshot().is_some(), theme),
+            ),
+        ]),
     ];
     if let Some(error) = live.snapshot_error() {
-        lines.push(Line::from(error.to_string()));
+        lines.push(Line::styled(
+            error.to_string(),
+            Style::default().fg(theme.danger),
+        ));
     }
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }

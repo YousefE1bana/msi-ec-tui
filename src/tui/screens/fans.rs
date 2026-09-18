@@ -10,9 +10,10 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{Capabilities, EcBackend, HardwareSnapshot};
 
+use crate::tui::theme::Theme;
 use crate::tui::ui::{
-    fan_mode_text, fan_text, joined_modes, on_off_text, render_panel, render_screen_shell,
-    support_text,
+    capability_style, fan_mode_text, fan_text, joined_modes, on_off_text, render_panel,
+    render_screen_shell, support_text,
 };
 
 /// Renders current fan telemetry plus fan capability metadata. Fan readings
@@ -23,7 +24,18 @@ pub fn render_fans<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    let content = render_screen_shell(frame, area, "Fans", live);
+    render_fans_with_theme(frame, area, live, capabilities, &Theme::default());
+}
+
+/// Theme-aware fans renderer behind the Task-5 API.
+pub(crate) fn render_fans_with_theme<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) {
+    let content = render_screen_shell(frame, area, "Fans", live, theme);
     let panels = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(6), Constraint::Min(0)])
@@ -33,12 +45,14 @@ pub fn render_fans<B: EcBackend>(
         panels[0],
         " CURRENT ",
         current_lines(live.current_snapshot()),
+        theme,
     );
     render_panel(
         frame,
         panels[1],
         " CAPABILITIES ",
-        capability_lines(capabilities),
+        capability_lines(capabilities, theme),
+        theme,
     );
 }
 
@@ -55,24 +69,24 @@ fn current_lines(snapshot: Option<&HardwareSnapshot>) -> Vec<Line<'static>> {
     ]
 }
 
-fn capability_lines(capabilities: &Capabilities) -> Vec<Line<'static>> {
+fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
-        Line::from(format!(
-            "CPU Fan Telemetry: {}",
-            support_text(capabilities.cpu_fan)
-        )),
-        Line::from(format!(
-            "GPU Fan Telemetry: {}",
-            support_text(capabilities.gpu_fan)
-        )),
+        Line::styled(
+            format!("CPU Fan Telemetry: {}", support_text(capabilities.cpu_fan)),
+            capability_style(capabilities.cpu_fan, theme),
+        ),
+        Line::styled(
+            format!("GPU Fan Telemetry: {}", support_text(capabilities.gpu_fan)),
+            capability_style(capabilities.gpu_fan, theme),
+        ),
         Line::from(format!(
             "Available Fan Modes: {}",
             joined_modes(capabilities.fan_modes.iter().map(|mode| mode.as_str()))
         )),
-        Line::from(format!(
-            "Cooler Boost: {}",
-            support_text(capabilities.cooler_boost)
-        )),
+        Line::styled(
+            format!("Cooler Boost: {}", support_text(capabilities.cooler_boost)),
+            capability_style(capabilities.cooler_boost, theme),
+        ),
     ]
 }
 
