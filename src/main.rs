@@ -1,9 +1,22 @@
 use std::io::IsTerminal;
 
 use clap::Parser;
-use mec::cli::{Cli, Command};
+use mec::cli::{BatteryCommand, Cli, Command, FanCommand};
 use mec::diagnostics::doctor;
-use mec::hardware::{LinuxSysfsReader, SystemPaths};
+use mec::hardware::{HardwareCommand, LinuxSysfsReader, SystemPaths};
+
+/// Runs one parsed control through the composed safe pipeline. Prints the
+/// success line only after verified execution; failures surface the typed
+/// error on stderr with a non-zero exit. No privilege elevation, no retry.
+fn run_hardware_command(paths: SystemPaths, command: HardwareCommand, success: &str) {
+    match mec::safety::execute_hardware_command(paths, &command) {
+        Ok(()) => println!("{success}"),
+        Err(error) => {
+            eprintln!("MEC control failed: {error}");
+            std::process::exit(1);
+        }
+    }
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -63,5 +76,76 @@ fn main() {
                 }
             }
         }
+        Some(Command::Fan { command }) => match command {
+            FanCommand::Mode { mode } => {
+                let message = format!("MEC control applied: fan mode = {mode}");
+                run_hardware_command(
+                    SystemPaths::new(cli.sys_root),
+                    HardwareCommand::SetFanMode(mode),
+                    &message,
+                );
+            }
+        },
+        Some(Command::Shift { mode }) => {
+            let message = format!("MEC control applied: shift mode = {mode}");
+            run_hardware_command(
+                SystemPaths::new(cli.sys_root),
+                HardwareCommand::SetShiftMode(mode),
+                &message,
+            );
+        }
+        Some(Command::CoolerBoost { state }) => {
+            let message = format!("MEC control applied: cooler boost = {}", state.as_str());
+            run_hardware_command(
+                SystemPaths::new(cli.sys_root),
+                HardwareCommand::SetCoolerBoost(state.as_bool()),
+                &message,
+            );
+        }
+        Some(Command::SuperBattery { state }) => {
+            let message = format!("MEC control applied: super battery = {}", state.as_str());
+            run_hardware_command(
+                SystemPaths::new(cli.sys_root),
+                HardwareCommand::SetSuperBattery(state.as_bool()),
+                &message,
+            );
+        }
+        Some(Command::Webcam { state }) => {
+            let message = format!("MEC control applied: webcam = {}", state.as_str());
+            run_hardware_command(
+                SystemPaths::new(cli.sys_root),
+                HardwareCommand::SetWebcam(state.as_bool()),
+                &message,
+            );
+        }
+        Some(Command::WebcamBlock { state }) => {
+            let message = format!("MEC control applied: webcam block = {}", state.as_str());
+            run_hardware_command(
+                SystemPaths::new(cli.sys_root),
+                HardwareCommand::SetWebcamBlock(state.as_bool()),
+                &message,
+            );
+        }
+        Some(Command::KeyboardBacklight { level }) => {
+            let message = format!("MEC control applied: keyboard backlight = {level}");
+            run_hardware_command(
+                SystemPaths::new(cli.sys_root),
+                HardwareCommand::SetKeyboardBacklight(level),
+                &message,
+            );
+        }
+        Some(Command::Battery { command }) => match command {
+            BatteryCommand::Limit { threshold } => {
+                let message = format!(
+                    "MEC control applied: battery limit = {}%",
+                    threshold.end_percent()
+                );
+                run_hardware_command(
+                    SystemPaths::new(cli.sys_root),
+                    HardwareCommand::SetBatteryThreshold(threshold),
+                    &message,
+                );
+            }
+        },
     }
 }
