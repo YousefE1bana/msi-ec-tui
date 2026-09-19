@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::app::{AppState, LiveHardware};
+use crate::app::{AppState, LiveHardware, ProfileSelection};
 use crate::hardware::{
     Capabilities, CapabilityDetector, CapabilityDiscoveryError, EcBackend, LinuxSysfsReader,
     MsiEcBackend, SupportEvaluator, SupportMode, SysfsReader, SystemPaths,
@@ -55,6 +55,7 @@ pub struct TuiApp<B> {
     live: LiveHardware<B>,
     capabilities: Capabilities,
     profile_catalog: ProfileCatalog,
+    profile_selection: ProfileSelection,
 }
 
 impl<B> TuiApp<B>
@@ -90,6 +91,36 @@ where
     /// discovered once before terminal takeover. Ticks never reread it.
     pub fn profile_catalog(&self) -> &ProfileCatalog {
         &self.profile_catalog
+    }
+
+    /// Selected profile row on the Profiles screen.
+    pub fn profile_selection(&self) -> &ProfileSelection {
+        &self.profile_selection
+    }
+
+    /// Selectable profile rows: five built-ins plus custom entries in
+    /// catalog order.
+    pub fn profile_row_count(&self) -> usize {
+        super::screens::profiles::profile_row_count(&self.profile_catalog)
+    }
+
+    /// Contextual action dispatch: `MoveUp`/`MoveDown` drive profile rows
+    /// on the Profiles screen and fall back to screen navigation
+    /// elsewhere. All other actions apply to shared state directly.
+    pub fn handle_action(&mut self, action: crate::app::AppAction) {
+        match action {
+            crate::app::AppAction::MoveUp
+                if self.state.current_screen() == crate::app::Screen::Profiles =>
+            {
+                self.profile_selection.move_up(self.profile_row_count());
+            }
+            crate::app::AppAction::MoveDown
+                if self.state.current_screen() == crate::app::Screen::Profiles =>
+            {
+                self.profile_selection.move_down(self.profile_row_count());
+            }
+            _ => self.state.apply(action),
+        }
     }
 
     /// Samples once; failures degrade instead of terminating.
@@ -160,6 +191,7 @@ where
         live: LiveHardware::new(device, mode, backend, SnapshotHistory::default()),
         capabilities,
         profile_catalog,
+        profile_selection: ProfileSelection::default(),
     })
 }
 
@@ -208,7 +240,7 @@ where
 {
     match events.next_event(timeout)? {
         TuiEvent::Action(action) => {
-            app.state_mut().apply(action);
+            app.handle_action(action);
             if !app.state().should_quit() {
                 draw(app)?;
             }
@@ -258,6 +290,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.live(),
                     app.capabilities(),
                     app.profile_catalog(),
+                    app.profile_selection(),
                 );
             })
             .map(|_| ())
@@ -275,7 +308,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use crate::app::{AppAction, AppState, LiveHardware, Screen};
+    use crate::app::{AppAction, AppState, LiveHardware, ProfileSelection, Screen};
     use crate::hardware::{
         BackendError, Capabilities, DeviceInfo, EcBackend, HardwareSnapshot, ReadOnlyReason,
         SupportMode, SystemPaths, TemperatureCelsius,
@@ -592,6 +625,7 @@ mod tests {
             ),
             capabilities: Capabilities::default(),
             profile_catalog: crate::tui::ProfileCatalog::empty(),
+            profile_selection: ProfileSelection::default(),
         }
     }
 
@@ -906,5 +940,101 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("runtime boom"));
         assert!(text.contains("restore boom"));
+    }
+
+    // ---- Task 3: contextual profile selection dispatch ----
+
+    fn selection_app_on_profiles() -> TuiApp<LoopBackend> {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        assert_eq!(app.state().current_screen(), Screen::Profiles);
+        app
+    }
+
+    #[test]
+    fn initial_selection_is_first_builtin() {
+        let app = loop_app(vec![Ok(temperature(60))], Rc::new(RefCell::new(Vec::new())));
+        assert_eq!(app.profile_selection().index(), 0);
+        assert!(app.profile_row_count() >= 5);
+    }
+
+    #[test]
+    fn move_down_on_profiles_advances_selection_not_screen() {
+        let mut app = selection_app_on_profiles();
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.state().current_screen(), Screen::Profiles);
+        assert_eq!(app.profile_selection().index(), 1);
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.profile_selection().index(), 2);
+    }
+
+    #[test]
+    fn move_up_on_profiles_wraps_to_last_row() {
+        let mut app = selection_app_on_profiles();
+        let count = app.profile_row_count();
+        app.handle_action(AppAction::MoveUp);
+        assert_eq!(app.state().current_screen(), Screen::Profiles);
+        assert_eq!(app.profile_selection().index(), count - 1);
+    }
+
+    #[test]
+    fn move_down_traverses_into_custom_rows() {
+        let (dir, store) = catalog_store();
+        write_profile(
+            &store,
+            "work.toml",
+            b"name = \"App Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        );
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        app.profile_catalog = crate::tui::ProfileCatalog::from_store(&store);
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        assert_eq!(app.profile_row_count(), 6);
+        for _ in 0..5 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        assert_eq!(app.profile_selection().index(), 5);
+        let _ = dir;
+    }
+
+    #[test]
+    fn invalid_custom_remains_selectable_through_dispatch() {
+        let (dir, store) = catalog_store();
+        write_profile(&store, "bad.toml", b"name = [unclosed\n");
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        app.profile_catalog = crate::tui::ProfileCatalog::from_store(&store);
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        for _ in 0..5 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        assert_eq!(app.profile_selection().index(), 5);
+        assert!(!app.profile_catalog().customs()[0].is_valid());
+        let _ = dir;
+    }
+
+    #[test]
+    fn move_keys_fall_back_to_screen_navigation_off_profiles() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+        app.handle_action(AppAction::MoveUp);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        app.handle_action(AppAction::MoveUp);
+        assert_eq!(app.state().current_screen(), Screen::Diagnostics);
+    }
+
+    #[test]
+    fn digit_navigation_still_jumps_directly() {
+        let mut app = selection_app_on_profiles();
+        app.handle_action(AppAction::GoTo(Screen::Fans));
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        assert_eq!(app.state().current_screen(), Screen::Profiles);
+        // Selection survives screen excursions.
+        assert_eq!(app.profile_selection().index(), 0);
     }
 }

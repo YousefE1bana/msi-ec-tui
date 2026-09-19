@@ -23,10 +23,14 @@ pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Some(AppAction::Quit),
         KeyCode::Tab if key.modifiers.is_empty() => Some(AppAction::NextScreen),
         KeyCode::BackTab if allows_only_shift(key.modifiers) => Some(AppAction::PreviousScreen),
-        KeyCode::Right | KeyCode::Down if key.modifiers.is_empty() => Some(AppAction::NextScreen),
-        KeyCode::Left | KeyCode::Up if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
-        KeyCode::Char('l' | 'j') if key.modifiers.is_empty() => Some(AppAction::NextScreen),
-        KeyCode::Char('h' | 'k') if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
+        KeyCode::Right if key.modifiers.is_empty() => Some(AppAction::NextScreen),
+        KeyCode::Down if key.modifiers.is_empty() => Some(AppAction::MoveDown),
+        KeyCode::Left if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
+        KeyCode::Up if key.modifiers.is_empty() => Some(AppAction::MoveUp),
+        KeyCode::Char('l') if key.modifiers.is_empty() => Some(AppAction::NextScreen),
+        KeyCode::Char('j') if key.modifiers.is_empty() => Some(AppAction::MoveDown),
+        KeyCode::Char('h') if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
+        KeyCode::Char('k') if key.modifiers.is_empty() => Some(AppAction::MoveUp),
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
         KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::HideHelp),
         KeyCode::Char(digit @ '1'..='7') if key.modifiers.is_empty() => {
@@ -276,10 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn down_advances_screen() {
+    fn down_moves_down() {
         assert_eq!(
             action_for_key(press(KeyCode::Down, KeyModifiers::empty())),
-            Some(AppAction::NextScreen)
+            Some(AppAction::MoveDown)
         );
     }
 
@@ -292,33 +296,35 @@ mod tests {
     }
 
     #[test]
-    fn up_goes_to_previous_screen() {
+    fn up_moves_up() {
         assert_eq!(
             action_for_key(press(KeyCode::Up, KeyModifiers::empty())),
+            Some(AppAction::MoveUp)
+        );
+    }
+
+    #[test]
+    fn vim_horizontal_keys_navigate_screens() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Char('l'), KeyModifiers::empty())),
+            Some(AppAction::NextScreen)
+        );
+        assert_eq!(
+            action_for_key(press(KeyCode::Char('h'), KeyModifiers::empty())),
             Some(AppAction::PreviousScreen)
         );
     }
 
     #[test]
-    fn vim_next_keys_advance_screen() {
-        for key in ['l', 'j'] {
-            assert_eq!(
-                action_for_key(press(KeyCode::Char(key), KeyModifiers::empty())),
-                Some(AppAction::NextScreen),
-                "vim key {key} must advance",
-            );
-        }
-    }
-
-    #[test]
-    fn vim_previous_keys_go_back() {
-        for key in ['h', 'k'] {
-            assert_eq!(
-                action_for_key(press(KeyCode::Char(key), KeyModifiers::empty())),
-                Some(AppAction::PreviousScreen),
-                "vim key {key} must go back",
-            );
-        }
+    fn vim_vertical_keys_move_rows() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Char('j'), KeyModifiers::empty())),
+            Some(AppAction::MoveDown)
+        );
+        assert_eq!(
+            action_for_key(press(KeyCode::Char('k'), KeyModifiers::empty())),
+            Some(AppAction::MoveUp)
+        );
     }
 
     #[test]

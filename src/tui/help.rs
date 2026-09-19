@@ -107,6 +107,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         })
     }
@@ -123,6 +124,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         })
     }
@@ -228,6 +230,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         });
         assert!(!text.contains("MEC Help"));
@@ -305,6 +308,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         });
         assert!(!text.is_empty());
@@ -330,6 +334,7 @@ mod tests {
                     &live,
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
                 );
             })
             .expect("minimal help draws");
@@ -356,6 +361,7 @@ mod tests {
                     &live,
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
                 );
             })
             .expect("zero-area help-visible dispatch draws");

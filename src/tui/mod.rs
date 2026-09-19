@@ -5,6 +5,7 @@
 //! tasks. This module never reads sysfs directly.
 
 mod app;
+mod controls;
 mod event;
 mod help;
 mod input;

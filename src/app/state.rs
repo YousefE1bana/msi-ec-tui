@@ -93,7 +93,9 @@ impl AppState {
         self.should_quit
     }
 
-    /// Applies one terminal-independent action.
+    /// Applies one terminal-independent action. `MoveUp`/`MoveDown` keep
+    /// legacy screen-navigation fallback semantics here; row-driven
+    /// screens are dispatched contextually above this layer.
     pub fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.should_quit = true,
@@ -101,6 +103,8 @@ impl AppState {
             AppAction::PreviousScreen => {
                 self.current_screen = self.current_screen.previous();
             }
+            AppAction::MoveUp => self.current_screen = self.current_screen.previous(),
+            AppAction::MoveDown => self.current_screen = self.current_screen.next(),
             AppAction::GoTo(screen) => self.current_screen = screen,
             AppAction::ToggleHelp => self.help_visible = !self.help_visible,
             AppAction::ShowHelp => self.help_visible = true,
@@ -231,6 +235,20 @@ mod tests {
     }
 
     #[test]
+    fn move_up_falls_back_to_previous_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveUp);
+        assert_eq!(state.current_screen(), Screen::Diagnostics);
+    }
+
+    #[test]
+    fn move_down_falls_back_to_next_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveDown);
+        assert_eq!(state.current_screen(), Screen::Performance);
+    }
+
+    #[test]
     fn navigation_does_not_mutate_help_visibility() {
         let mut state = AppState::default();
         state.apply(AppAction::ShowHelp);
@@ -246,6 +264,8 @@ mod tests {
         for action in [
             AppAction::NextScreen,
             AppAction::PreviousScreen,
+            AppAction::MoveUp,
+            AppAction::MoveDown,
             AppAction::GoTo(Screen::Fans),
             AppAction::ToggleHelp,
             AppAction::ShowHelp,

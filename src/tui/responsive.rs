@@ -49,6 +49,7 @@ pub(crate) fn layout_tier(area: Rect) -> LayoutTier {
 
 /// Renders the selected screen's key values as plain truncatable lines.
 /// Current snapshots only; capabilities follow where space permits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_compact_screen<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
@@ -56,10 +57,18 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
+    selection: &crate::app::ProfileSelection,
     theme: &Theme,
 ) {
     let mut lines = compact_header(app, live, theme);
-    lines.extend(compact_body(app, live, capabilities, catalog, theme));
+    lines.extend(compact_body(
+        app,
+        live,
+        capabilities,
+        catalog,
+        selection,
+        theme,
+    ));
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -112,6 +121,7 @@ fn compact_body<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
+    selection: &crate::app::ProfileSelection,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let snapshot = live.current_snapshot();
@@ -149,8 +159,14 @@ fn compact_body<B: EcBackend>(
             lines
         }
         Screen::Profiles => {
-            let mut lines = profiles_screen::catalog_lines(capabilities, theme);
-            lines.extend(profiles_screen::custom_lines(catalog));
+            let selected = selection.index();
+            let mut lines = profiles_screen::catalog_lines(capabilities, selected, theme);
+            lines.extend(profiles_screen::custom_lines(
+                catalog,
+                crate::profiles::BuiltinPreset::all().len(),
+                selected,
+                theme,
+            ));
             lines
         }
         Screen::Diagnostics => {
@@ -209,6 +225,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         })
     }
@@ -293,7 +310,15 @@ mod tests {
         let capabilities = full_capabilities();
         let app = app_on(Screen::Profiles);
         let text = screen_text(50, 16, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities, &catalog);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &catalog,
+                &crate::app::ProfileSelection::default(),
+            );
         });
         assert!(text.contains("Compact Work"));
         assert!(text.contains("Valid"));
@@ -350,6 +375,7 @@ mod tests {
                     &live,
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
                 );
             })
             .expect("zero-area dispatch draws");

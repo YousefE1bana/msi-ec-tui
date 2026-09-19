@@ -14,6 +14,12 @@ pub enum AppAction {
     NextScreen,
     /// Move to the previous screen in canonical order.
     PreviousScreen,
+    /// Move to the previous row on row-driven screens; falls back to
+    /// previous-screen navigation elsewhere.
+    MoveUp,
+    /// Move to the next row on row-driven screens; falls back to
+    /// next-screen navigation elsewhere.
+    MoveDown,
     /// Jump directly to a screen.
     GoTo(Screen),
     /// Invert help overlay visibility.

@@ -40,6 +40,7 @@ use crate::tui::ui::render_compact;
 /// Renders the screen selected by `app` with the default theme.
 ///
 /// Help visibility is honored: a visible overlay renders above the screen.
+#[allow(clippy::too_many_arguments)]
 pub fn render_screen<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
@@ -47,6 +48,7 @@ pub fn render_screen<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
+    selection: &crate::app::ProfileSelection,
 ) {
     render_screen_with_theme(
         frame,
@@ -55,12 +57,14 @@ pub fn render_screen<B: EcBackend>(
         live,
         capabilities,
         catalog,
+        selection,
         &Theme::default(),
     );
 }
 
 /// Theme-aware dispatcher. `render_screen` stays source-compatible for
 /// Task-5 callers while named themes gain an injection seam later.
+#[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_theme<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
@@ -68,6 +72,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
+    selection: &crate::app::ProfileSelection,
     theme: &Theme,
 ) {
     let rows = Layout::default()
@@ -77,10 +82,28 @@ pub fn render_screen_with_theme<B: EcBackend>(
     render_navigation(frame, rows[0], app, theme);
     match layout_tier(area) {
         LayoutTier::Full => {
-            render_active_screen(frame, rows[1], app, live, capabilities, catalog, theme);
+            render_active_screen(
+                frame,
+                rows[1],
+                app,
+                live,
+                capabilities,
+                catalog,
+                selection,
+                theme,
+            );
         }
         LayoutTier::Compact => {
-            render_compact_screen(frame, rows[1], app, live, capabilities, catalog, theme);
+            render_compact_screen(
+                frame,
+                rows[1],
+                app,
+                live,
+                capabilities,
+                catalog,
+                selection,
+                theme,
+            );
         }
         LayoutTier::Tiny => render_compact(frame, rows[1]),
     }
@@ -91,6 +114,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
 
 /// Dispatches the active screen. Split from [`render_screen_with_theme`]
 /// so the chrome/overlay orchestration stays readable.
+#[allow(clippy::too_many_arguments)]
 fn render_active_screen<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
@@ -98,6 +122,7 @@ fn render_active_screen<B: EcBackend>(
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
+    selection: &crate::app::ProfileSelection,
     theme: &Theme,
 ) {
     match app.current_screen() {
@@ -115,7 +140,15 @@ fn render_active_screen<B: EcBackend>(
             devices::render_devices_with_theme(frame, area, live, capabilities, theme);
         }
         Screen::Profiles => {
-            profiles::render_profiles_with_theme(frame, area, live, capabilities, catalog, theme);
+            profiles::render_profiles_with_theme(
+                frame,
+                area,
+                live,
+                capabilities,
+                catalog,
+                selection,
+                theme,
+            );
         }
         Screen::Diagnostics => {
             diagnostics::render_diagnostics_with_theme(frame, area, live, capabilities, theme);
@@ -234,6 +267,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         })
     }
@@ -271,8 +305,8 @@ mod tests {
     #[test]
     fn profiles_dispatch_renders_profiles() {
         let text = dispatched(Screen::Profiles);
-        assert!(text.contains("BUILT-IN PROFILES"));
-        assert!(text.contains("CUSTOM PROFILES"));
+        assert!(text.contains("PROFILE LIST"));
+        assert!(text.contains("DETAILS / PREVIEW"));
         assert!(text.contains("(none)"));
         assert!(text.contains("6 Profiles"));
     }
@@ -294,7 +328,15 @@ mod tests {
         let capabilities = full_capabilities();
         let app = app_on(Screen::Profiles);
         let text = screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities, &catalog);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &catalog,
+                &crate::app::ProfileSelection::default(),
+            );
         });
         assert!(text.contains("Dispatch Work"));
         assert!(text.contains("Valid"));
@@ -356,6 +398,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -378,6 +421,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -391,6 +435,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -412,6 +457,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -444,6 +490,7 @@ mod tests {
                     &live,
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
                     &theme,
                 );
             })
@@ -469,6 +516,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -494,6 +542,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -515,6 +564,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -536,6 +586,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -561,6 +612,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -581,6 +633,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         });
         assert!(text.contains("CPU Fan Telemetry"));
@@ -603,6 +656,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
                 &theme,
             );
         })
@@ -625,6 +679,7 @@ mod tests {
                     &live,
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
                 );
             });
         }
@@ -645,6 +700,7 @@ mod tests {
                     &live,
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
                 );
             });
             assert!(text.contains("Terminal too small"), "{screen:?}");
@@ -671,6 +727,7 @@ mod tests {
                         &live,
                         &capabilities,
                         &crate::tui::ProfileCatalog::empty(),
+                        &crate::app::ProfileSelection::default(),
                     );
                 })
                 .expect("zero-area screen draws");
@@ -700,6 +757,7 @@ mod tests {
                 &live,
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
             );
         });
         let _ = screen_text(100, 30, |frame| {
