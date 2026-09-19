@@ -4,8 +4,12 @@
 
 mod args;
 pub mod monitor;
+pub mod profile;
 mod signal;
 pub mod status;
 
-pub use args::{BatteryCommand, BatteryLimitParseError, Cli, Command, FanCommand, OnOff};
+pub use args::{
+    BatteryCommand, BatteryLimitParseError, Cli, Command, FanCommand, OnOff, ProfileCommand,
+};
+pub use profile::{ProfileCliError, ProfileSource, ResolvedProfile};
 pub use status::StatusReport;

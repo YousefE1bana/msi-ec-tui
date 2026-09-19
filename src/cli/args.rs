@@ -80,6 +80,11 @@ pub enum Command {
         #[command(subcommand)]
         command: BatteryCommand,
     },
+    /// Manage declarative hardware profiles.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
 }
 
 /// `mec fan` subcommands.
@@ -101,6 +106,25 @@ pub enum BatteryCommand {
         /// Charge limit end percent (10-100); start derives as end - 10.
         #[arg(value_parser = parse_battery_limit, value_name = "END_PERCENT")]
         threshold: BatteryThreshold,
+    },
+}
+
+/// `mec profile` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ProfileCommand {
+    /// List built-in presets and custom profiles.
+    List,
+    /// Show a resolved profile without writing hardware.
+    Show {
+        /// Built-in slug or custom profile slug.
+        #[arg(value_name = "PROFILE")]
+        profile: String,
+    },
+    /// Apply a resolved profile through the safe transaction pipeline.
+    Apply {
+        /// Built-in slug or custom profile slug.
+        #[arg(value_name = "PROFILE")]
+        profile: String,
     },
 }
 

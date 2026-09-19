@@ -1,7 +1,7 @@
 use std::io::IsTerminal;
 
 use clap::Parser;
-use mec::cli::{BatteryCommand, Cli, Command, FanCommand};
+use mec::cli::{BatteryCommand, Cli, Command, FanCommand, ProfileCommand};
 use mec::diagnostics::doctor;
 use mec::hardware::{HardwareCommand, LinuxSysfsReader, SystemPaths};
 
@@ -145,6 +145,118 @@ fn main() {
                     HardwareCommand::SetBatteryThreshold(threshold),
                     &message,
                 );
+            }
+        },
+        Some(Command::Profile { command }) => match command {
+            ProfileCommand::List => match mec::profiles::ProfileStore::user_default() {
+                Ok(store) => match store.list() {
+                    Ok(slugs) => {
+                        print!("{}", mec::cli::profile::render_list_text(&slugs));
+                    }
+                    Err(error) => {
+                        eprintln!("MEC profile failed: {error}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(error) => {
+                    eprintln!("MEC profile failed: {error}");
+                    std::process::exit(1);
+                }
+            },
+            ProfileCommand::Show { profile } => {
+                if let Ok(preset) = mec::profiles::BuiltinPreset::from_slug(&profile) {
+                    match mec::cli::profile::discover_capabilities(SystemPaths::new(cli.sys_root)) {
+                        Ok(capabilities) => {
+                            match mec::cli::profile::resolve_builtin(&capabilities, preset) {
+                                Ok(resolved) => print!(
+                                    "{}",
+                                    mec::cli::profile::render_show_text(
+                                        preset.slug(),
+                                        mec::cli::ProfileSource::Builtin,
+                                        &resolved
+                                    )
+                                ),
+                                Err(error) => {
+                                    eprintln!("MEC profile failed: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("MEC profile failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    match mec::profiles::ProfileStore::user_default() {
+                        Ok(store) => match mec::cli::profile::resolve_custom(&store, &profile) {
+                            Ok((slug, resolved)) => print!(
+                                "{}",
+                                mec::cli::profile::render_show_text(
+                                    slug.as_str(),
+                                    mec::cli::ProfileSource::Custom,
+                                    &resolved
+                                )
+                            ),
+                            Err(error) => {
+                                eprintln!("MEC profile failed: {error}");
+                                std::process::exit(1);
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("MEC profile failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+            ProfileCommand::Apply { profile } => {
+                let resolved = if let Ok(preset) = mec::profiles::BuiltinPreset::from_slug(&profile)
+                {
+                    match mec::cli::profile::discover_capabilities(SystemPaths::new(
+                        cli.sys_root.clone(),
+                    )) {
+                        Ok(capabilities) => {
+                            match mec::cli::profile::resolve_builtin(&capabilities, preset) {
+                                Ok(resolved) => resolved,
+                                Err(error) => {
+                                    eprintln!("MEC profile failed: {error}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("MEC profile failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    match mec::profiles::ProfileStore::user_default() {
+                        Ok(store) => match mec::cli::profile::resolve_custom(&store, &profile) {
+                            Ok((_, resolved)) => resolved,
+                            Err(error) => {
+                                eprintln!("MEC profile failed: {error}");
+                                std::process::exit(1);
+                            }
+                        },
+                        Err(error) => {
+                            eprintln!("MEC profile failed: {error}");
+                            std::process::exit(1);
+                        }
+                    }
+                };
+                match mec::safety::apply_profile(SystemPaths::new(cli.sys_root), &resolved) {
+                    Ok(report) => {
+                        println!(
+                            "{}",
+                            mec::cli::profile::render_apply_success(&resolved, &report)
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("MEC profile failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
     }
