@@ -183,7 +183,35 @@ pub(crate) fn first_cell_style(
     })
 }
 
-fn with_buffer<R>(
+/// Foreground and background of the first cell where `needle` starts, if
+/// present. Proves themes actually paint rendered cells, not just structs.
+pub(crate) fn first_cell_colors(
+    width: u16,
+    height: u16,
+    needle: &str,
+    draw: impl FnOnce(&mut Frame),
+) -> Option<(Color, Color)> {
+    with_buffer(width, height, draw, |buffer| {
+        for y in 0..buffer.area.height {
+            let mut text = String::new();
+            let mut byte_cells = Vec::new();
+            for x in 0..buffer.area.width {
+                let symbol = buffer[(x, y)].symbol();
+                for _ in 0..symbol.len() {
+                    byte_cells.push(x);
+                }
+                text.push_str(symbol);
+            }
+            if let Some(byte) = text.find(needle) {
+                let cell = &buffer[(byte_cells[byte], y)];
+                return Some((cell.fg, cell.bg));
+            }
+        }
+        None
+    })
+}
+
+pub(crate) fn with_buffer<R>(
     width: u16,
     height: u16,
     draw: impl FnOnce(&mut Frame),

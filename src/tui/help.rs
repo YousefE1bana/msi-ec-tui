@@ -23,6 +23,7 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(theme.base_style())
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
             format!(" {HELP_TITLE} "),
@@ -34,6 +35,7 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(block, overlay);
     let section = Style::default()
         .fg(theme.secondary)
+        .bg(theme.background)
         .add_modifier(Modifier::BOLD);
     let styled: Vec<Line<'static>> = lines
         .into_iter()
@@ -45,7 +47,10 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
             }
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(styled)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(styled)).style(theme.base_style()),
+        inner,
+    );
 }
 
 /// Centers the overlay with saturating geometry so tiny and zero areas

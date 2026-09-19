@@ -5,7 +5,7 @@
 //! interactive session boots [`ThemeName::MsiDark`] until config
 //! persistence lands; that choice lives in TUI preparation, not here.
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
 
 /// Stable identity for the three approved named themes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,6 +107,17 @@ impl Theme {
                 border: Color::Gray,
             },
         }
+    }
+
+    /// Base surface style for the full TUI frame and overlay interiors.
+    ///
+    /// Pure semantic helper: foreground resolves ordinary unstyled text to
+    /// `theme.foreground` while background paints the surface. Semantic
+    /// foreground roles (primary/success/warning/...) override the
+    /// foreground on top of this and inherit the background from the
+    /// surrounding widget style. No I/O, no branching on screens.
+    pub fn base_style(&self) -> Style {
+        Style::default().fg(self.foreground).bg(self.background)
     }
 }
 
@@ -216,5 +227,18 @@ mod tests {
         let theme = Theme::for_name(ThemeName::MsiDark);
         assert_eq!(theme.primary, Color::Red);
         assert_eq!(theme.background, Color::Black);
+    }
+
+    #[test]
+    fn base_style_carries_foreground_and_background() {
+        use super::ThemeName;
+        use ratatui::style::Color;
+        for name in ThemeName::all() {
+            let theme = Theme::for_name(name);
+            let style = theme.base_style();
+            assert_eq!(style.fg, Some(theme.foreground), "{name:?}");
+            assert_eq!(style.bg, Some(theme.background), "{name:?}");
+        }
+        assert_eq!(Theme::default().base_style().bg, Some(Color::Reset));
     }
 }

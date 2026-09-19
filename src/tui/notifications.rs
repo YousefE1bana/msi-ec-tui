@@ -116,6 +116,7 @@ pub(crate) fn render_notifications(
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(theme.base_style())
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
             " Notifications ".to_owned(),
@@ -126,7 +127,10 @@ pub(crate) fn render_notifications(
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
     let text: Vec<Line<'static>> = rows.into_iter().map(Line::from).collect();
-    frame.render_widget(Paragraph::new(Text::from(text)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(text)).style(theme.base_style()),
+        inner,
+    );
 }
 
 #[cfg(test)]

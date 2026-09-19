@@ -46,7 +46,7 @@ pub(crate) fn render_dashboard_with_theme<B: EcBackend>(
     theme: &Theme,
 ) {
     if area.width < MIN_DASHBOARD_WIDTH || area.height < MIN_DASHBOARD_HEIGHT {
-        render_compact(frame, area);
+        render_compact(frame, area, theme);
         return;
     }
 
@@ -73,7 +73,10 @@ pub(crate) fn render_dashboard_with_theme<B: EcBackend>(
     render_header(frame, rows[0], live, theme);
     render_panels(frame, rows[1], live, theme);
 
-    frame.render_widget(Paragraph::new(SCREEN_FOOTER), rows[2]);
+    frame.render_widget(
+        Paragraph::new(SCREEN_FOOTER).style(theme.base_style()),
+        rows[2],
+    );
 }
 
 fn render_panels<B: EcBackend>(
@@ -151,7 +154,10 @@ fn render_header<B: EcBackend>(
             Style::default().fg(theme.danger),
         ));
     }
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(theme.base_style()),
+        area,
+    );
 }
 
 #[cfg(test)]

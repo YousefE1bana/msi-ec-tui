@@ -71,7 +71,10 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
         controls,
         theme,
     ));
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(theme.base_style()),
+        area,
+    );
 }
 
 fn compact_header<B: EcBackend>(

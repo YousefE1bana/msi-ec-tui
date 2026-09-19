@@ -27,7 +27,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::app::{AppState, LiveHardware, Screen};
 use crate::hardware::{Capabilities, EcBackend};
@@ -73,8 +73,8 @@ pub fn render_screen<B: EcBackend>(
 /// Theme-aware dispatcher.
 ///
 /// Layering is deterministic: active/compact screen at the bottom, then the
-/// result notice, then the modal confirmation, then the command palette,
-/// then the notification history, then help on top. Tiny skips overlays
+/// result notice, then the command palette, then the notification history,
+/// then the modal confirmation, then help on top. Tiny skips overlays
 /// and stays a safe fallback.
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_theme<B: EcBackend>(
@@ -91,6 +91,12 @@ pub fn render_screen_with_theme<B: EcBackend>(
     notifications_open: bool,
     theme: &Theme,
 ) {
+    // Base surface: paint the full frame area with the theme background
+    // before navigation/screens so MSI Dark stays dark, Light stays light,
+    // and Terminal stays Reset. Zero-area safe via the empty guard.
+    if !area.is_empty() {
+        frame.render_widget(Block::default().style(theme.base_style()), area);
+    }
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -124,7 +130,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 theme,
             );
         }
-        LayoutTier::Tiny => render_compact(frame, rows[1]),
+        LayoutTier::Tiny => render_compact(frame, rows[1], theme),
     }
     if !matches!(tier, LayoutTier::Tiny) {
         render_overlays(
@@ -198,9 +204,10 @@ fn render_active_screen<B: EcBackend>(
     }
 }
 
-/// Renders notice, confirmation, palette, then notification history
-/// above the screen, matching input precedence. Help renders last and
-/// stays on top. Zero-area safe via saturating overlay geometry.
+/// Renders notice, palette, notification history, then the modal
+/// confirmation above the screen, matching input precedence (pending owns
+/// input above utility overlays). Help renders last and stays on top.
+/// Zero-area safe via saturating overlay geometry.
 #[allow(clippy::too_many_arguments)]
 fn render_overlays<B: EcBackend>(
     frame: &mut Frame,
@@ -216,6 +223,12 @@ fn render_overlays<B: EcBackend>(
     if let Some(notice) = controls.notice() {
         crate::tui::confirmation::render_notice(frame, area, notice, theme);
     }
+    if palette.is_open() {
+        crate::tui::palette::render_palette(frame, area, palette, theme);
+    }
+    if notifications_open {
+        crate::tui::notifications::render_notifications(frame, area, notifications, theme);
+    }
     if let Some(pending) = controls.pending() {
         crate::tui::confirmation::render_confirmation(
             frame,
@@ -226,12 +239,6 @@ fn render_overlays<B: EcBackend>(
             capabilities,
             theme,
         );
-    }
-    if palette.is_open() {
-        crate::tui::palette::render_palette(frame, area, palette, theme);
-    }
-    if notifications_open {
-        crate::tui::notifications::render_notifications(frame, area, notifications, theme);
     }
 }
 
@@ -257,7 +264,7 @@ fn render_navigation(frame: &mut Frame, area: Rect, app: &AppState, theme: &Them
     } else {
         narrow_navigation_line(app, theme)
     };
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(line).style(theme.base_style()), area);
 }
 
 /// Abbreviated navigation labels for medium terminals.
@@ -1637,5 +1644,494 @@ mod tests {
                 );
             })
             .expect("zero-area themed dispatch draws");
+    }
+
+    // ---- Review correction: confirmation renders above utility overlays ----
+
+    fn pending_command_controls(
+        live: &crate::app::LiveHardware<super::support::CountingBackend>,
+        capabilities: &crate::hardware::Capabilities,
+    ) -> crate::tui::editing::ControlState {
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            Screen::Fans,
+            live.current_snapshot(),
+            capabilities,
+            live.mode(),
+        ));
+        assert!(controls.confirm(live.mode(), capabilities));
+        controls
+    }
+
+    fn layered_text(
+        app: &AppState,
+        live: &crate::app::LiveHardware<super::support::CountingBackend>,
+        capabilities: &crate::hardware::Capabilities,
+        controls: &crate::tui::editing::ControlState,
+        palette: &crate::tui::palette::CommandPalette,
+        notifications: &crate::tui::notifications::NotificationCenter,
+        notifications_open: bool,
+    ) -> String {
+        screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                app,
+                live,
+                capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                controls,
+                palette,
+                notifications,
+                notifications_open,
+            );
+        })
+    }
+
+    #[test]
+    fn render_pending_above_palette_shows_confirmation_topmost() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let controls = pending_command_controls(&live, &capabilities);
+        let mut palette = crate::tui::palette::CommandPalette::default();
+        palette.open();
+        let center = crate::tui::notifications::NotificationCenter::new();
+        let text = layered_text(
+            &app,
+            &live,
+            &capabilities,
+            &controls,
+            &palette,
+            &center,
+            false,
+        );
+        // Confirmation painted last over the shared center region: its
+        // title and inner request line survive instead of being covered
+        // by palette rows.
+        assert!(text.contains("Confirm Hardware Change"));
+        assert!(text.contains("Requested: Fan Mode:"));
+    }
+
+    #[test]
+    fn render_pending_above_notifications_shows_confirmation_topmost() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let controls = pending_command_controls(&live, &capabilities);
+        let palette = crate::tui::palette::CommandPalette::default();
+        let mut center = crate::tui::notifications::NotificationCenter::new();
+        center.push(crate::tui::confirmation::Notice::success(
+            "Applied Fan Mode: silent".to_owned(),
+        ));
+        let text = layered_text(
+            &app,
+            &live,
+            &capabilities,
+            &controls,
+            &palette,
+            &center,
+            true,
+        );
+        assert!(text.contains("Confirm Hardware Change"));
+        assert!(text.contains("Requested: Fan Mode:"));
+    }
+
+    #[test]
+    fn render_pending_notifications_palette_with_help_shows_help_topmost() {
+        use crate::app::AppAction;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let mut app = app_on(Screen::Fans);
+        app.apply(AppAction::ShowHelp);
+        let controls = pending_command_controls(&live, &capabilities);
+        let mut palette = crate::tui::palette::CommandPalette::default();
+        palette.open();
+        let mut center = crate::tui::notifications::NotificationCenter::new();
+        center.push(crate::tui::confirmation::Notice::success(
+            "Applied Fan Mode: silent".to_owned(),
+        ));
+        let text = layered_text(
+            &app,
+            &live,
+            &capabilities,
+            &controls,
+            &palette,
+            &center,
+            true,
+        );
+        assert!(text.contains("MEC Help"));
+        assert!(text.contains("Toggle help"));
+    }
+
+    // ---- Review correction: themes paint actual rendered surfaces ----
+
+    #[allow(clippy::too_many_arguments)]
+    fn layered_themed_colors(
+        needle: &str,
+        app: &AppState,
+        live: &crate::app::LiveHardware<super::support::CountingBackend>,
+        capabilities: &crate::hardware::Capabilities,
+        controls: &crate::tui::editing::ControlState,
+        palette: &crate::tui::palette::CommandPalette,
+        notifications: &crate::tui::notifications::NotificationCenter,
+        notifications_open: bool,
+        theme: &Theme,
+    ) -> Option<(ratatui::style::Color, ratatui::style::Color)> {
+        use super::support::first_cell_colors;
+        first_cell_colors(100, 30, needle, |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                app,
+                live,
+                capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                controls,
+                palette,
+                notifications,
+                notifications_open,
+                theme,
+            );
+        })
+    }
+
+    fn empty_cell_bg(
+        width: u16,
+        height: u16,
+        x: u16,
+        y: u16,
+        theme: &Theme,
+    ) -> ratatui::style::Color {
+        use super::support::with_buffer;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        with_buffer(
+            width,
+            height,
+            |frame| {
+                render_screen_with_theme(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
+                    theme,
+                );
+            },
+            |buffer| buffer[(x, y)].bg,
+        )
+    }
+
+    #[test]
+    fn msi_dark_paints_body_text_and_base_surface() {
+        use crate::tui::theme::ThemeName;
+        use ratatui::style::Color;
+        let dark = Theme::for_name(ThemeName::MsiDark);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (fg, bg) = layered_themed_colors(
+            "Device:",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &dark,
+        )
+        .expect("body text present");
+        assert_eq!(fg, Color::White);
+        assert_eq!(bg, Color::Black);
+        // Tiny fallback leaves most cells untouched: base fill owns them.
+        assert_eq!(empty_cell_bg(20, 8, 19, 7, &dark), Color::Black);
+    }
+
+    #[test]
+    fn light_paints_body_text_and_base_surface() {
+        use crate::tui::theme::ThemeName;
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (fg, bg) = layered_themed_colors(
+            "Device:",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("body text present");
+        assert_eq!(fg, Color::Black);
+        assert_eq!(bg, Color::White);
+        assert_eq!(empty_cell_bg(20, 8, 19, 7, &light), Color::White);
+    }
+
+    #[test]
+    fn terminal_keeps_reset_base_surface() {
+        use ratatui::style::Color;
+        let terminal = Theme::default();
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (fg, bg) = layered_themed_colors(
+            "Device:",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &terminal,
+        )
+        .expect("body text present");
+        assert_eq!(fg, Color::Reset);
+        assert_eq!(bg, Color::Reset);
+        assert_eq!(empty_cell_bg(20, 8, 19, 7, &terminal), Color::Reset);
+    }
+
+    #[test]
+    fn light_overlays_keep_light_interiors() {
+        use crate::app::AppAction;
+        use crate::tui::theme::ThemeName;
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+
+        // Help interior.
+        let mut help_app = app_on(Screen::Dashboard);
+        help_app.apply(AppAction::ShowHelp);
+        let (_, bg) = layered_themed_colors(
+            "Toggle help",
+            &help_app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("help body present");
+        assert_eq!(bg, Color::White);
+
+        // Palette interior.
+        let app = app_on(Screen::Dashboard);
+        let mut palette = crate::tui::palette::CommandPalette::default();
+        palette.open();
+        let (_, bg) = layered_themed_colors(
+            "Clear Notifications",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &palette,
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("palette row present");
+        assert_eq!(bg, Color::White);
+
+        // Notifications interior.
+        let mut center = crate::tui::notifications::NotificationCenter::new();
+        center.push(crate::tui::confirmation::Notice::success(
+            "Applied Fan Mode: silent".to_owned(),
+        ));
+        let (_, bg) = layered_themed_colors(
+            "Applied Fan Mode",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &center,
+            true,
+            &light,
+        )
+        .expect("notification row present");
+        assert_eq!(bg, Color::White);
+
+        // Confirmation interior.
+        let controls = pending_command_controls(&live, &capabilities);
+        let (_, bg) = layered_themed_colors(
+            "Requested:",
+            &app,
+            &live,
+            &capabilities,
+            &controls,
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("confirmation body present");
+        assert_eq!(bg, Color::White);
+
+        // Result notice interior.
+        let mut notice_controls = crate::tui::editing::ControlState::default();
+        notice_controls.set_notice(crate::tui::confirmation::Notice::success(
+            "Applied Fan Mode: silent".to_owned(),
+        ));
+        let (_, bg) = layered_themed_colors(
+            "Applied Fan Mode",
+            &app,
+            &live,
+            &capabilities,
+            &notice_controls,
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("notice present");
+        assert_eq!(bg, Color::White);
+    }
+
+    #[test]
+    fn msi_dark_overlay_interior_stays_dark() {
+        use crate::app::AppAction;
+        use crate::tui::theme::ThemeName;
+        use ratatui::style::Color;
+        let dark = Theme::for_name(ThemeName::MsiDark);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let mut palette = crate::tui::palette::CommandPalette::default();
+        palette.open();
+        let (_, bg) = layered_themed_colors(
+            "Clear Notifications",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &palette,
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &dark,
+        )
+        .expect("palette row present");
+        assert_eq!(bg, Color::Black);
+        let mut help_app = app_on(Screen::Dashboard);
+        help_app.apply(AppAction::ShowHelp);
+        let (_, bg) = layered_themed_colors(
+            "Toggle help",
+            &help_app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &dark,
+        )
+        .expect("help body present");
+        assert_eq!(bg, Color::Black);
+    }
+
+    #[test]
+    fn palette_theme_destination_visibly_repaints_next_frame() {
+        use crate::tui::palette::PaletteCommand;
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        // The palette row maps to the Light identity; rendering the next
+        // frame with that theme flips the same body cell Black-on-White.
+        let destination = PaletteCommand::ThemeLight.theme().expect("theme row");
+        assert_eq!(destination, ThemeName::Light);
+        assert_eq!(destination.display_name(), "Light");
+        let before = Theme::for_name(ThemeName::MsiDark);
+        let after = Theme::for_name(destination);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (_, bg_before) = layered_themed_colors(
+            "Device:",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &before,
+        )
+        .expect("body present");
+        let (_, bg_after) = layered_themed_colors(
+            "Device:",
+            &app,
+            &live,
+            &capabilities,
+            &crate::tui::editing::ControlState::default(),
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &after,
+        )
+        .expect("body present");
+        assert_eq!(bg_before, Color::Black);
+        assert_eq!(bg_after, Color::White);
+    }
+
+    #[test]
+    fn result_notice_roles_survive_light_surface() {
+        use crate::tui::theme::ThemeName;
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut ok_controls = crate::tui::editing::ControlState::default();
+        ok_controls.set_notice(crate::tui::confirmation::Notice::success(
+            "Applied Fan Mode: silent".to_owned(),
+        ));
+        let (fg, bg) = layered_themed_colors(
+            "Applied Fan Mode",
+            &app,
+            &live,
+            &capabilities,
+            &ok_controls,
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("notice present");
+        assert_eq!(fg, Color::Green);
+        assert_eq!(bg, Color::White);
+        let mut err_controls = crate::tui::editing::ControlState::default();
+        err_controls.set_notice(crate::tui::confirmation::Notice::failure(
+            "Action failed: gone".to_owned(),
+        ));
+        let (fg, _) = layered_themed_colors(
+            "Action failed",
+            &app,
+            &live,
+            &capabilities,
+            &err_controls,
+            &crate::tui::palette::CommandPalette::default(),
+            &crate::tui::notifications::NotificationCenter::new(),
+            false,
+            &light,
+        )
+        .expect("failure notice present");
+        assert_eq!(fg, Color::Red);
     }
 }

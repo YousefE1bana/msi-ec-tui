@@ -177,7 +177,8 @@ where
     ///    closes may cancel the now-visible confirmation or editor.
     /// 2. Pending confirmation -> `Activate` executes exactly once,
     ///    `Cancel` discards, everything else (including `ToggleHelp`)
-    ///    ignored.
+    ///    ignored. Pending owns input even over test-constructed
+    ///    notification/palette overlap states.
     /// 3. Notifications overlay -> `Cancel` or `TogglePalette` closes it,
     ///    everything else ignored. No mutation, no navigation.
     /// 4. Command palette -> row moves, `Activate` runs the selected
@@ -212,6 +213,19 @@ where
             }
             return;
         }
+        // Modal confirmation owns input above notifications and palette:
+        // a hardware/profile confirmation must never sit beneath a
+        // lower-priority utility overlay, even in test-constructed overlap.
+        if self.controls.has_pending() {
+            match action {
+                A::Activate => self.execute_pending(),
+                A::Cancel => {
+                    self.controls.cancel();
+                }
+                _ => {}
+            }
+            return;
+        }
         // Notifications overlay owns input while visible: only closing
         // actions apply. P closes it deterministically (never the palette).
         if self.notifications_open {
@@ -230,17 +244,6 @@ where
                 A::MoveDown => self.palette.move_down(),
                 A::Activate => self.activate_palette(),
                 A::Cancel | A::TogglePalette => self.palette.close(),
-                _ => {}
-            }
-            return;
-        }
-        // Modal confirmation blocks navigation and new edits.
-        if self.controls.has_pending() {
-            match action {
-                A::Activate => self.execute_pending(),
-                A::Cancel => {
-                    self.controls.cancel();
-                }
                 _ => {}
             }
             return;
@@ -2230,21 +2233,119 @@ mod tests {
     }
 
     #[test]
-    fn notifications_overlay_above_pending_defers_to_cancel_order() {
+    fn pending_owns_cancel_above_notifications_overlay() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        // Test-constructed overlap: overlay beneath a confirmation.
+        app.notifications_open = true;
+        // Pending owns Cancel: first Esc discards the confirmation and
+        // keeps the notification overlay open.
+        app.handle_action(AppAction::Cancel);
+        assert!(app.controls().pending().is_none());
+        assert!(app.notifications_open);
+        assert_eq!(app.executor.command_calls(), 0);
+        // Second Esc closes the now-topmost notifications overlay.
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.notifications_open);
+        assert_eq!(app.executor.command_calls(), 0);
+    }
+
+    #[test]
+    fn pending_command_above_palette_activate_executes_pending() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        // Normal input blocks opening the palette above pending, so
+        // construct the stale overlap directly.
+        app.palette.open();
+        let screen_before = app.state().current_screen();
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert!(app.controls().pending().is_none());
+        // The palette command did not run: no navigation, palette untouched.
+        assert_eq!(app.state().current_screen(), screen_before);
+        assert!(app.palette().is_open());
+        assert_eq!(app.notifications().len(), 1);
+    }
+
+    #[test]
+    fn pending_profile_above_palette_activate_executes_pending() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.palette.open();
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.profile_calls(), 1);
+        assert_eq!(app.executor.command_calls(), 0);
+        assert!(app.controls().pending().is_none());
+        assert!(app.palette().is_open());
+        assert_eq!(app.notifications().len(), 1);
+    }
+
+    #[test]
+    fn pending_above_notifications_activate_executes_pending() {
         let mut app = healthy_control_app(Screen::Fans);
         app.handle_action(AppAction::Activate);
         app.handle_action(AppAction::Activate);
         assert!(app.controls().pending().is_some());
         app.notifications_open = true;
         app.handle_action(AppAction::Activate);
-        assert!(app.controls().pending().is_some());
-        assert_eq!(app.executor.command_calls(), 0);
-        app.handle_action(AppAction::Cancel);
-        assert!(!app.notifications_open);
-        assert!(app.controls().pending().is_some());
-        app.handle_action(AppAction::Cancel);
+        assert_eq!(app.executor.command_calls(), 1);
         assert!(app.controls().pending().is_none());
+        assert!(app.notifications_open);
+    }
+
+    #[test]
+    fn pending_above_notifications_and_palette_owns_input() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.notifications_open = true;
+        app.palette.open();
+        let selected_before = app.palette().selected_index();
+        // Navigation/row moves never reach lower overlays while pending.
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.palette().selected_index(), selected_before);
+        assert!(app.controls().pending().is_some());
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        assert!(app.controls().pending().is_none());
+        assert!(app.notifications_open);
+        assert!(app.palette().is_open());
+    }
+
+    #[test]
+    fn help_above_pending_notifications_palette_activate_executes_nothing() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.notifications_open = true;
+        app.palette.open();
+        // Pending blocks Help via normal input, so construct the full
+        // overlap directly: Help on top of everything.
+        app.state_mut().apply(AppAction::ShowHelp);
+        assert!(app.state().help_visible());
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert!(app.state().help_visible());
+        assert!(app.notifications_open);
+        assert!(app.palette().is_open());
         assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        // First Esc closes Help only; lower layers stay intact.
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.state().help_visible());
+        assert!(app.controls().pending().is_some());
+        assert!(app.notifications_open);
+        assert!(app.palette().is_open());
     }
 
     // ---- Review correction: Help owns input while visible ----

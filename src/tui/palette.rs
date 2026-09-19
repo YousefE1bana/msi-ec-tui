@@ -211,6 +211,7 @@ pub(crate) fn render_palette(
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(theme.base_style())
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
             " Command Palette ".to_owned(),
@@ -220,7 +221,10 @@ pub(crate) fn render_palette(
         ));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
-    frame.render_widget(Paragraph::new(Text::from(rows)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(rows)).style(theme.base_style()),
+        inner,
+    );
 }
 
 #[cfg(test)]

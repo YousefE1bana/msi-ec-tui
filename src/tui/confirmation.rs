@@ -217,6 +217,7 @@ pub(crate) fn render_confirmation(
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(theme.base_style())
         .border_style(Style::default().fg(theme.warning))
         .title(Line::styled(
             confirmation_title(pending).to_owned(),
@@ -227,7 +228,10 @@ pub(crate) fn render_confirmation(
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
     let text: Vec<Line<'static>> = lines.into_iter().map(Line::from).collect();
-    frame.render_widget(Paragraph::new(Text::from(text)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(text)).style(theme.base_style()),
+        inner,
+    );
 }
 
 /// Renders the post-attempt banner. Success uses the success role, failure
@@ -245,6 +249,7 @@ pub(crate) fn render_notice(frame: &mut Frame, area: Rect, notice: &Notice, them
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(theme.base_style())
         .border_style(style)
         .title(" Result ");
     let inner = block.inner(overlay);
@@ -253,7 +258,8 @@ pub(crate) fn render_notice(frame: &mut Frame, area: Rect, notice: &Notice, them
         Paragraph::new(Text::from(vec![Line::styled(
             notice.message().to_owned(),
             style,
-        )])),
+        )]))
+        .style(theme.base_style()),
         inner,
     );
 }
