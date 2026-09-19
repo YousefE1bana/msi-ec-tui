@@ -39,4 +39,6 @@ pub enum AppAction {
     ShowHelp,
     /// Hide the help overlay.
     HideHelp,
+    /// Toggle the non-mutating command palette overlay.
+    TogglePalette,
 }

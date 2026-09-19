@@ -34,6 +34,8 @@ pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
         KeyCode::Enter if key.modifiers.is_empty() => Some(AppAction::Activate),
         KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::Cancel),
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
+        KeyCode::Char('p') if key.modifiers.is_empty() => Some(AppAction::TogglePalette),
+        KeyCode::Char('P') if allows_only_shift(key.modifiers) => Some(AppAction::TogglePalette),
         KeyCode::Char(digit @ '1'..='7') if key.modifiers.is_empty() => {
             Some(AppAction::GoTo(screen_for_digit(digit)))
         }
@@ -185,8 +187,8 @@ mod tests {
     }
 
     #[test]
-    fn palette_key_stays_reserved_unmapped() {
-        // P is reserved for the future Command Palette, never Profiles.
+    fn palette_keys_toggle_palette() {
+        // Bare p and bare/shifted P open the palette; never Profiles.
         for (code, modifiers) in [
             (KeyCode::Char('p'), KeyModifiers::empty()),
             (KeyCode::Char('P'), KeyModifiers::empty()),
@@ -197,8 +199,38 @@ mod tests {
         ] {
             assert_eq!(
                 action_for_key(press(code, modifiers)),
+                Some(AppAction::TogglePalette),
+                "{code:?} must toggle the palette",
+            );
+        }
+    }
+
+    #[test]
+    fn alt_ctrl_palette_keys_do_nothing() {
+        for modifiers in [KeyModifiers::ALT, KeyModifiers::CONTROL] {
+            for code in [KeyCode::Char('p'), KeyCode::Char('P')] {
+                assert_eq!(
+                    action_for_key(press(code, modifiers)),
+                    None,
+                    "{code:?} with {modifiers:?} must not open the palette",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn palette_release_events_do_nothing() {
+        for (code, modifiers) in [
+            (KeyCode::Char('p'), KeyModifiers::empty()),
+            (
+                KeyCode::Char('P'),
+                KeyModifiers::empty().union(KeyModifiers::SHIFT),
+            ),
+        ] {
+            assert_eq!(
+                action_for_key(release(code, modifiers)),
                 None,
-                "{code:?} must remain unmapped",
+                "{code:?} release must be ignored",
             );
         }
     }

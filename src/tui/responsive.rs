@@ -256,6 +256,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         })
     }
@@ -349,6 +352,9 @@ mod tests {
                 &catalog,
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("Compact Work"));
@@ -426,6 +432,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                 );
             })
             .expect("zero-area dispatch draws");

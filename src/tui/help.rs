@@ -67,8 +67,7 @@ fn help_lines() -> Vec<&'static str> {
         "↓ / j  Next row, else next screen",
         "← / h  Previous value while editing, else previous screen",
         "→ / l  Next value while editing, else next screen",
-        "Tab  Next screen",
-        "Shift+Tab  Previous screen",
+        "Tab / Shift+Tab  Next / previous screen",
         "1 Dashboard",
         "2 Performance",
         "3 Fans",
@@ -76,15 +75,15 @@ fn help_lines() -> Vec<&'static str> {
         "5 Devices",
         "6 Profiles",
         "7 Diagnostics",
-        "Editing and confirmation",
         "Enter  Edit / Accept draft / Confirm once",
         "Esc  Cancel edit or confirmation",
         "One confirm executes at most once",
+        "Palette",
+        "P  Command Palette",
         "General",
         "?  Toggle help",
         "Esc  Close help",
-        "Q / q  Quit",
-        "Ctrl+C  Quit",
+        "Q / q / Ctrl+C  Quit",
     ]
 }
 
@@ -113,6 +112,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         })
     }
@@ -131,6 +133,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         })
     }
@@ -212,8 +217,12 @@ mod tests {
     }
 
     #[test]
-    fn overlay_advertises_no_command_palette() {
-        assert!(!shown_help().contains("Command Palette"));
+    fn overlay_advertises_palette_with_p() {
+        let text = shown_help();
+        assert!(text.contains("Command Palette"));
+        assert!(text.contains("Palette"));
+        // P opens the palette; it is no longer an unmapped reservation.
+        assert!(text.contains("P  Command Palette"));
     }
 
     #[test]
@@ -223,9 +232,7 @@ mod tests {
         assert!(text.contains("Esc"));
         assert!(text.contains("Confirm once"));
         assert!(text.contains("at most once"));
-        assert!(!text.contains("Command Palette"));
-        // P stays reserved and unadvertised.
-        assert!(!text.contains("\nP "));
+        assert!(!text.contains("Applied "));
     }
 
     #[test]
@@ -250,6 +257,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(!text.contains("MEC Help"));
@@ -329,6 +339,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(!text.is_empty());
@@ -356,6 +369,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                 );
             })
             .expect("minimal help draws");
@@ -384,6 +400,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                 );
             })
             .expect("zero-area help-visible dispatch draws");

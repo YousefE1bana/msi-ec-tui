@@ -20,6 +20,8 @@ use crate::profiles::ProfilePlanner;
 use super::confirmation::{PendingMutation, ProfilePending, ProfileSource};
 use super::editing::{ControlState, is_interactive_screen};
 use super::executor::{SafeTuiExecutor, TuiMutationExecutor};
+use super::notifications::NotificationCenter;
+use super::palette::{CommandPalette, PaletteCommand};
 use super::profile_catalog::ProfileCatalog;
 use super::{CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen};
 
@@ -62,6 +64,9 @@ pub struct TuiApp<B, E = SafeTuiExecutor> {
     profile_selection: ProfileSelection,
     controls: ControlState,
     executor: E,
+    palette: CommandPalette,
+    notifications: NotificationCenter,
+    notifications_open: bool,
 }
 
 impl<B, E> TuiApp<B, E>
@@ -126,6 +131,21 @@ where
         &self.executor
     }
 
+    /// Non-mutating command palette state.
+    pub fn palette(&self) -> &CommandPalette {
+        &self.palette
+    }
+
+    /// Bounded notification history (newest useful result last).
+    pub fn notifications(&self) -> &NotificationCenter {
+        &self.notifications
+    }
+
+    /// Whether the read-only notification history overlay is visible.
+    pub fn notifications_open(&self) -> bool {
+        self.notifications_open
+    }
+
     /// Selectable profile rows: five built-ins plus custom entries in
     /// catalog order.
     pub fn profile_row_count(&self) -> usize {
@@ -144,8 +164,13 @@ where
     /// 2. Pending confirmation -> `Activate` executes exactly once,
     ///    `Cancel` discards, everything else (including `ToggleHelp`)
     ///    ignored.
-    /// 3. Editor open -> edit/accept/cancel.
-    /// 4. Normal screen interaction.
+    /// 3. Notifications overlay -> `Cancel` or `TogglePalette` closes it,
+    ///    everything else ignored. No mutation, no navigation.
+    /// 4. Command palette -> row moves, `Activate` runs the selected
+    ///    non-mutating command, `Cancel`/`TogglePalette` closes it,
+    ///    everything else ignored.
+    /// 5. Editor open -> edit/accept/cancel.
+    /// 6. Normal screen interaction.
     ///
     /// Browsing (no editor, no pending):
     /// - `MoveUp`/`MoveDown` drive profile rows on Profiles, control rows
@@ -169,6 +194,28 @@ where
         if self.state.help_visible() {
             match action {
                 A::ToggleHelp | A::Cancel | A::Quit => self.state.apply(action),
+                _ => {}
+            }
+            return;
+        }
+        // Notifications overlay owns input while visible: only closing
+        // actions apply. P closes it deterministically (never the palette).
+        if self.notifications_open {
+            match action {
+                A::Cancel | A::TogglePalette => self.notifications_open = false,
+                _ => {}
+            }
+            return;
+        }
+        // Command palette owns input while visible: row moves, activation
+        // of one non-mutating command, or close. Hidden control/profile
+        // state underneath can never consume actions.
+        if self.palette.is_open() {
+            match action {
+                A::MoveUp => self.palette.move_up(),
+                A::MoveDown => self.palette.move_down(),
+                A::Activate => self.activate_palette(),
+                A::Cancel | A::TogglePalette => self.palette.close(),
                 _ => {}
             }
             return;
@@ -226,6 +273,14 @@ where
                 );
             }
             A::Activate => {}
+            // The palette opens only from normal browsing: no help (gated
+            // above), no pending (gated above), no editor. Otherwise P does
+            // nothing so it can never bypass mutation modal state.
+            A::TogglePalette => {
+                if !self.controls.is_editing() {
+                    self.palette.open();
+                }
+            }
             A::Cancel => {
                 if !self.controls.cancel() {
                     self.state.apply(action);
@@ -240,6 +295,39 @@ where
                 self.controls.on_screen_change();
             }
             _ => self.state.apply(action),
+        }
+    }
+
+    /// Runs the selected palette command. All commands are non-mutating:
+    /// screen jumps mirror digit navigation, Notifications opens the
+    /// read-only history overlay, Clear empties history (and the banner),
+    /// Help opens Help, Quit requests quit. Zero executor calls.
+    fn activate_palette(&mut self) {
+        match self.palette.selected() {
+            PaletteCommand::Notifications => {
+                self.palette.close();
+                self.notifications_open = true;
+            }
+            PaletteCommand::ClearNotifications => {
+                self.notifications.clear();
+                self.controls.clear_notice();
+                self.palette.close();
+            }
+            PaletteCommand::Help => {
+                self.palette.close();
+                self.state.apply(crate::app::AppAction::ShowHelp);
+            }
+            PaletteCommand::Quit => {
+                self.palette.close();
+                self.state.apply(crate::app::AppAction::Quit);
+            }
+            command => {
+                if let Some(screen) = command.screen() {
+                    self.palette.close();
+                    self.state.apply(crate::app::AppAction::GoTo(screen));
+                    self.controls.on_screen_change();
+                }
+            }
         }
     }
 
@@ -301,40 +389,32 @@ where
             PendingMutation::Command(command) => {
                 let result = self.executor.execute_command(&command);
                 self.live.refresh();
-                match result {
-                    Ok(()) => {
-                        self.controls
-                            .set_notice(super::confirmation::Notice::success(format!(
-                                "Applied {}",
-                                crate::tui::controls::command_text(&command)
-                            )));
-                    }
+                let notice = match result {
+                    Ok(()) => super::confirmation::Notice::success(format!(
+                        "Applied {}",
+                        crate::tui::controls::command_text(&command)
+                    )),
                     Err(error) => {
-                        self.controls
-                            .set_notice(super::confirmation::Notice::failure(format!(
-                                "Action failed: {error}"
-                            )));
+                        super::confirmation::Notice::failure(format!("Action failed: {error}"))
                     }
-                }
+                };
+                self.notifications.push(notice.clone());
+                self.controls.set_notice(notice);
             }
             PendingMutation::Profile(request) => {
                 let result = self.executor.apply_profile(request.profile());
                 self.live.refresh();
-                match result {
-                    Ok(summary) => {
-                        self.controls
-                            .set_notice(super::confirmation::Notice::success(format!(
-                                "Applied profile {} ({} changed, {} unchanged)",
-                                summary.name, summary.applied, summary.unchanged
-                            )));
-                    }
+                let notice = match result {
+                    Ok(summary) => super::confirmation::Notice::success(format!(
+                        "Applied profile {} ({} changed, {} unchanged)",
+                        summary.name, summary.applied, summary.unchanged
+                    )),
                     Err(error) => {
-                        self.controls
-                            .set_notice(super::confirmation::Notice::failure(format!(
-                                "Action failed: {error}"
-                            )));
+                        super::confirmation::Notice::failure(format!("Action failed: {error}"))
                     }
-                }
+                };
+                self.notifications.push(notice.clone());
+                self.controls.set_notice(notice);
             }
         }
     }
@@ -412,6 +492,9 @@ where
         profile_selection: ProfileSelection::default(),
         controls: ControlState::default(),
         executor,
+        palette: CommandPalette::default(),
+        notifications: NotificationCenter::new(),
+        notifications_open: false,
     })
 }
 
@@ -514,6 +597,9 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.profile_catalog(),
                     app.profile_selection(),
                     app.controls(),
+                    app.palette(),
+                    app.notifications(),
+                    app.notifications_open(),
                 );
             })
             .map(|_| ())
@@ -851,6 +937,9 @@ mod tests {
             profile_selection: ProfileSelection::default(),
             controls: crate::tui::editing::ControlState::default(),
             executor: crate::tui::executor::FakeTuiExecutor::new(),
+            palette: crate::tui::palette::CommandPalette::default(),
+            notifications: crate::tui::notifications::NotificationCenter::new(),
+            notifications_open: false,
         }
     }
 
@@ -1804,6 +1893,322 @@ mod tests {
         app.handle_action(AppAction::Cancel);
         app.handle_action(AppAction::GoTo(Screen::Battery));
         assert_eq!(app.state().current_screen(), Screen::Battery);
+    }
+    // ---- Task 6: command palette + notifications ----
+
+    #[test]
+    fn p_opens_palette_from_browsing() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        assert!(app.palette().is_open());
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert!(app.notifications().is_empty());
+    }
+
+    #[test]
+    fn palette_cannot_open_above_help() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::ShowHelp);
+        app.handle_action(AppAction::TogglePalette);
+        assert!(!app.palette().is_open());
+        assert!(app.state().help_visible());
+    }
+
+    #[test]
+    fn palette_cannot_open_above_pending() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.handle_action(AppAction::TogglePalette);
+        assert!(!app.palette().is_open());
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.command_calls(), 0);
+    }
+
+    #[test]
+    fn palette_cannot_open_while_editing() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        app.handle_action(AppAction::TogglePalette);
+        assert!(!app.palette().is_open());
+        assert!(app.controls().is_editing());
+    }
+
+    #[test]
+    fn palette_rows_wrap_deterministically() {
+        use crate::tui::palette::PaletteCommand;
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..PaletteCommand::ALL.len() {
+            app.handle_action(AppAction::MoveDown);
+        }
+        assert_eq!(app.palette().selected_index(), 0);
+        app.handle_action(AppAction::MoveUp);
+        assert_eq!(app.palette().selected(), PaletteCommand::Quit);
+        app.handle_action(AppAction::MoveUp);
+        assert_eq!(app.palette().selected(), PaletteCommand::Help);
+    }
+
+    #[test]
+    fn palette_screen_rows_navigate_exactly() {
+        let cases = [
+            (0, Screen::Dashboard),
+            (1, Screen::Performance),
+            (2, Screen::Fans),
+            (3, Screen::Battery),
+            (4, Screen::Devices),
+            (5, Screen::Profiles),
+            (6, Screen::Diagnostics),
+        ];
+        for (steps, screen) in cases {
+            let mut app = healthy_control_app(Screen::Dashboard);
+            app.handle_action(AppAction::TogglePalette);
+            for _ in 0..steps {
+                app.handle_action(AppAction::MoveDown);
+            }
+            app.handle_action(AppAction::Activate);
+            assert_eq!(app.state().current_screen(), screen);
+            assert!(!app.palette().is_open());
+            assert!(!app.controls().is_editing());
+            assert!(app.controls().pending().is_none());
+            assert_eq!(app.executor.command_calls(), 0);
+            assert_eq!(app.executor.profile_calls(), 0);
+        }
+    }
+
+    #[test]
+    fn palette_notifications_opens_overlay() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..7 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert!(!app.palette().is_open());
+        assert!(app.notifications_open());
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+    }
+
+    #[test]
+    fn palette_clear_empties_history_and_banner() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.notifications().len(), 1);
+        assert!(app.notice().is_some());
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..8 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert!(!app.palette().is_open());
+        assert!(app.notifications().is_empty());
+        assert!(app.notice().is_none());
+    }
+
+    #[test]
+    fn palette_help_opens_help() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..9 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert!(!app.palette().is_open());
+        assert!(app.state().help_visible());
+    }
+
+    #[test]
+    fn palette_quit_requests_quit() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..10 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert!(!app.palette().is_open());
+        assert!(app.state().should_quit());
+    }
+
+    #[test]
+    fn esc_and_p_close_palette() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.palette().is_open());
+        app.handle_action(AppAction::TogglePalette);
+        assert!(app.palette().is_open());
+        app.handle_action(AppAction::TogglePalette);
+        assert!(!app.palette().is_open());
+    }
+
+    #[test]
+    fn palette_blocks_hidden_state_changes() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::TogglePalette);
+        app.handle_action(AppAction::GoTo(Screen::Battery));
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        assert!(app.palette().is_open());
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.palette().selected_index(), 1);
+        assert_eq!(app.controls().selected_index(Screen::Fans), 0);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+    }
+
+    #[test]
+    fn command_success_adds_one_notification_mirroring_banner() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.notifications().len(), 0);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("one notification");
+        assert!(latest.message().contains("Applied Fan Mode:"));
+        assert_eq!(
+            latest.message(),
+            app.notice().expect("banner mirrors latest").message()
+        );
+    }
+
+    #[test]
+    fn command_failure_adds_one_notification() {
+        use crate::hardware::{CommandValidationError, FanMode};
+        use crate::safety::CommandExecutionError;
+        use crate::tui::executor::FakeTuiExecutor;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.executor = FakeTuiExecutor::with_command_error(CommandExecutionError::Validation(
+            CommandValidationError::FanModeNotAdvertised(FanMode::try_from("silent").unwrap()),
+        ));
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Fans));
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("one notification");
+        assert!(latest.message().contains("Action failed:"));
+        assert!(latest.message().contains("fan mode not advertised"));
+    }
+
+    #[test]
+    fn profile_success_adds_one_notification() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.notifications().len(), 0);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.profile_calls(), 1);
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("one notification");
+        assert!(latest.message().contains("Applied profile"));
+    }
+
+    #[test]
+    fn profile_failure_adds_one_notification() {
+        use crate::hardware::CommandValidationError;
+        use crate::safety::ProfileApplyError;
+        use crate::tui::executor::FakeTuiExecutor;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.executor =
+            FakeTuiExecutor::with_profile_error(ProfileApplyError::PreviewRejected(vec![
+                CommandValidationError::ReadOnly,
+            ]));
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.profile_calls(), 1);
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("one notification");
+        assert!(latest.message().contains("Action failed:"));
+    }
+
+    #[test]
+    fn open_cancel_adds_zero_notifications() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.notifications().is_empty());
+        app.handle_action(AppAction::Cancel);
+        assert!(app.notifications().is_empty());
+        let mut profiles = healthy_control_app(Screen::Profiles);
+        profiles.handle_action(AppAction::Activate);
+        assert!(profiles.notifications().is_empty());
+        profiles.handle_action(AppAction::Cancel);
+        assert!(profiles.notifications().is_empty());
+    }
+
+    #[test]
+    fn notifications_overlay_gates_input_deterministically() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..7 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert!(app.notifications_open());
+        app.handle_action(AppAction::GoTo(Screen::Fans));
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        assert!(app.notifications_open());
+        assert_eq!(app.executor.command_calls(), 0);
+        app.handle_action(AppAction::TogglePalette);
+        assert!(!app.notifications_open());
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..7 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.notifications_open());
+    }
+
+    #[test]
+    fn notifications_overlay_above_pending_defers_to_cancel_order() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.notifications_open = true;
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.command_calls(), 0);
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.notifications_open);
+        assert!(app.controls().pending().is_some());
+        app.handle_action(AppAction::Cancel);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
     }
 
     // ---- Review correction: Help owns input while visible ----

@@ -12,6 +12,8 @@ mod event;
 pub mod executor;
 mod help;
 mod input;
+mod notifications;
+mod palette;
 mod profile_catalog;
 mod responsive;
 mod runtime;

@@ -98,6 +98,8 @@ impl AppState {
     /// screens are dispatched contextually above this layer. `MoveLeft` /
     /// `MoveRight` fall back to screen navigation; `Activate` is a no-op
     /// here and `Cancel` hides help so legacy state tests stay meaningful.
+    /// `TogglePalette` is a no-op here: the palette overlay owns it above
+    /// this layer.
     pub fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.should_quit = true,
@@ -115,6 +117,7 @@ impl AppState {
             AppAction::ToggleHelp => self.help_visible = !self.help_visible,
             AppAction::ShowHelp => self.help_visible = true,
             AppAction::HideHelp => self.help_visible = false,
+            AppAction::TogglePalette => {}
         }
     }
 }
@@ -285,6 +288,15 @@ mod tests {
     }
 
     #[test]
+    fn toggle_palette_is_noop_for_state() {
+        let mut state = AppState::default();
+        state.apply(AppAction::TogglePalette);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+        assert!(!state.help_visible());
+        assert!(!state.should_quit());
+    }
+
+    #[test]
     fn navigation_does_not_mutate_help_visibility() {
         let mut state = AppState::default();
         state.apply(AppAction::ShowHelp);
@@ -310,6 +322,7 @@ mod tests {
             AppAction::ToggleHelp,
             AppAction::ShowHelp,
             AppAction::HideHelp,
+            AppAction::TogglePalette,
         ] {
             let mut state = AppState::default();
             state.apply(action);

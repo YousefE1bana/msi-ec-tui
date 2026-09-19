@@ -50,6 +50,9 @@ pub fn render_screen<B: EcBackend>(
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
     controls: &crate::tui::editing::ControlState,
+    palette: &crate::tui::palette::CommandPalette,
+    notifications: &crate::tui::notifications::NotificationCenter,
+    notifications_open: bool,
 ) {
     render_screen_with_theme(
         frame,
@@ -60,16 +63,19 @@ pub fn render_screen<B: EcBackend>(
         catalog,
         selection,
         controls,
+        palette,
+        notifications,
+        notifications_open,
         &Theme::default(),
     );
 }
 
-/// Theme-aware dispatcher. `render_screen` stays source-compatible for
-/// Task-5 callers while named themes gain an injection seam later.
+/// Theme-aware dispatcher.
 ///
 /// Layering is deterministic: active/compact screen at the bottom, then the
-/// result notice, then the modal confirmation, then help on top. Tiny skips
-/// confirmation/notice overlays and stays a safe fallback.
+/// result notice, then the modal confirmation, then the command palette,
+/// then the notification history, then help on top. Tiny skips overlays
+/// and stays a safe fallback.
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_theme<B: EcBackend>(
     frame: &mut Frame,
@@ -80,6 +86,9 @@ pub fn render_screen_with_theme<B: EcBackend>(
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
     controls: &crate::tui::editing::ControlState,
+    palette: &crate::tui::palette::CommandPalette,
+    notifications: &crate::tui::notifications::NotificationCenter,
+    notifications_open: bool,
     theme: &Theme,
 ) {
     let rows = Layout::default()
@@ -87,7 +96,8 @@ pub fn render_screen_with_theme<B: EcBackend>(
         .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(area);
     render_navigation(frame, rows[0], app, theme);
-    match layout_tier(area) {
+    let tier = layout_tier(area);
+    match tier {
         LayoutTier::Full => {
             render_active_screen(
                 frame,
@@ -100,7 +110,6 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 controls,
                 theme,
             );
-            render_overlays(frame, area, live, capabilities, controls, theme);
         }
         LayoutTier::Compact => {
             render_compact_screen(
@@ -114,9 +123,21 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 controls,
                 theme,
             );
-            render_overlays(frame, area, live, capabilities, controls, theme);
         }
         LayoutTier::Tiny => render_compact(frame, rows[1]),
+    }
+    if !matches!(tier, LayoutTier::Tiny) {
+        render_overlays(
+            frame,
+            area,
+            live,
+            capabilities,
+            controls,
+            palette,
+            notifications,
+            notifications_open,
+            theme,
+        );
     }
     if app.help_visible() {
         super::help::render_help(frame, area, theme);
@@ -177,15 +198,19 @@ fn render_active_screen<B: EcBackend>(
     }
 }
 
-/// Renders notice then confirmation above the screen. Confirmation sits
-/// above notice; help renders last and stays on top. Zero-area safe via
-/// saturating overlay geometry.
+/// Renders notice, confirmation, palette, then notification history
+/// above the screen, matching input precedence. Help renders last and
+/// stays on top. Zero-area safe via saturating overlay geometry.
+#[allow(clippy::too_many_arguments)]
 fn render_overlays<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     controls: &crate::tui::editing::ControlState,
+    palette: &crate::tui::palette::CommandPalette,
+    notifications: &crate::tui::notifications::NotificationCenter,
+    notifications_open: bool,
     theme: &Theme,
 ) {
     if let Some(notice) = controls.notice() {
@@ -201,6 +226,12 @@ fn render_overlays<B: EcBackend>(
             capabilities,
             theme,
         );
+    }
+    if palette.is_open() {
+        crate::tui::palette::render_palette(frame, area, palette, theme);
+    }
+    if notifications_open {
+        crate::tui::notifications::render_notifications(frame, area, notifications, theme);
     }
 }
 
@@ -317,6 +348,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         })
     }
@@ -386,6 +420,9 @@ mod tests {
                 &catalog,
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("Dispatch Work"));
@@ -450,6 +487,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -474,6 +514,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -489,6 +532,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -512,6 +558,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -546,6 +595,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                     &theme,
                 );
             })
@@ -573,6 +625,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -600,6 +655,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -623,6 +681,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -646,6 +707,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -673,6 +737,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -695,6 +762,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("CPU Fan Telemetry"));
@@ -719,6 +789,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
                 &theme,
             );
         })
@@ -743,6 +816,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                 );
             });
         }
@@ -765,6 +841,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                 );
             });
             assert!(text.contains("Terminal too small"), "{screen:?}");
@@ -793,6 +872,9 @@ mod tests {
                         &crate::tui::ProfileCatalog::empty(),
                         &crate::app::ProfileSelection::default(),
                         &crate::tui::editing::ControlState::default(),
+                        &crate::tui::palette::CommandPalette::default(),
+                        &crate::tui::notifications::NotificationCenter::new(),
+                        false,
                     );
                 })
                 .expect("zero-area screen draws");
@@ -827,6 +909,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("Fans"));
@@ -867,6 +952,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("Profiles"));
@@ -903,6 +991,9 @@ mod tests {
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
                     &controls,
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
                 );
             })
             .expect("zero-area confirmation draws");
@@ -931,6 +1022,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(!text.is_empty());
@@ -961,6 +1055,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         // Help renders last and stays on top; confirmation still exists below.
@@ -985,6 +1082,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("Applied Fan Mode: silent"));
@@ -1009,6 +1109,9 @@ mod tests {
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
                 &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
             );
         });
         assert!(text.contains("Action failed: gone"));
@@ -1067,5 +1170,149 @@ mod tests {
         let _ = screen_text(100, 30, |frame| {
             render_diagnostics(frame, frame.area(), &live, &capabilities);
         });
+    }
+
+    fn overlay_text(
+        screen: Screen,
+        width: u16,
+        height: u16,
+        palette: &crate::tui::palette::CommandPalette,
+        notifications: &crate::tui::notifications::NotificationCenter,
+        notifications_open: bool,
+    ) -> String {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(screen);
+        screen_text(width, height, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                palette,
+                notifications,
+                notifications_open,
+            );
+        })
+    }
+
+    fn open_palette() -> crate::tui::palette::CommandPalette {
+        let mut palette = crate::tui::palette::CommandPalette::default();
+        palette.open();
+        palette
+    }
+
+    fn center_with_entries() -> crate::tui::notifications::NotificationCenter {
+        use crate::tui::confirmation::Notice;
+        let mut center = crate::tui::notifications::NotificationCenter::new();
+        center.push(Notice::success("Applied Fan Mode: silent".to_owned()));
+        center.push(Notice::failure("Action failed: gone".to_owned()));
+        center
+    }
+
+    #[test]
+    fn palette_overlay_sits_above_screen() {
+        let palette = open_palette();
+        let center = crate::tui::notifications::NotificationCenter::new();
+        let text = overlay_text(Screen::Dashboard, 100, 30, &palette, &center, false);
+        assert!(text.contains("Command Palette"));
+        assert!(text.contains("THERMALS"));
+        assert!(text.contains("> Dashboard"));
+        assert!(text.contains("Clear Notifications"));
+    }
+
+    #[test]
+    fn notifications_overlay_lists_entries_above_screen() {
+        let palette = crate::tui::palette::CommandPalette::default();
+        let center = center_with_entries();
+        let text = overlay_text(Screen::Dashboard, 100, 30, &palette, &center, true);
+        assert!(text.contains("Notifications"));
+        assert!(text.contains("Applied Fan Mode: silent"));
+        assert!(text.contains("Action failed: gone"));
+        assert!(text.contains("THERMALS"));
+    }
+
+    #[test]
+    fn notifications_overlay_empty_state_is_honest() {
+        let palette = crate::tui::palette::CommandPalette::default();
+        let center = crate::tui::notifications::NotificationCenter::new();
+        let text = overlay_text(Screen::Dashboard, 100, 30, &palette, &center, true);
+        assert!(text.contains("No notifications yet"));
+    }
+
+    #[test]
+    fn compact_palette_overlay_remains_useful() {
+        let palette = open_palette();
+        let center = crate::tui::notifications::NotificationCenter::new();
+        let text = overlay_text(Screen::Dashboard, 50, 16, &palette, &center, false);
+        assert!(text.contains("Command Palette"));
+    }
+
+    #[test]
+    fn zero_area_palette_and_notifications_do_not_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let palette = open_palette();
+        let center = center_with_entries();
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_screen(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
+                    &palette,
+                    &center,
+                    true,
+                );
+            })
+            .expect("zero-area overlays draw");
+    }
+
+    #[test]
+    fn tiny_mode_with_overlays_remains_safe() {
+        let palette = open_palette();
+        let center = center_with_entries();
+        let text = overlay_text(Screen::Dashboard, 20, 8, &palette, &center, true);
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn help_overlay_takes_precedence_over_palette_and_notifications() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let mut app = app_on(Screen::Dashboard);
+        app.apply(AppAction::ShowHelp);
+        let palette = open_palette();
+        let center = center_with_entries();
+        let text = screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &palette,
+                &center,
+                true,
+            );
+        });
+        assert!(text.contains("MEC Help"));
     }
 }
