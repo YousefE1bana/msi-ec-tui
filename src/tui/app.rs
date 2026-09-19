@@ -16,6 +16,7 @@ use crate::hardware::{
 };
 use crate::monitoring::{PollInterval, SnapshotHistory};
 
+use super::profile_catalog::ProfileCatalog;
 use super::{CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen};
 
 /// Failures that prevent the read-only TUI from running.
@@ -46,13 +47,14 @@ pub enum TuiError {
     },
 }
 
-/// Interactive application state: navigation, live telemetry, and the
-/// startup capability set. Owns no terminal or filesystem handles beyond
-/// the backend itself.
+/// Interactive application state: navigation, live telemetry, the startup
+/// capability set, and the prepared read-only profile catalog. Owns no
+/// terminal or filesystem handles beyond the backend itself.
 pub struct TuiApp<B> {
     state: AppState,
     live: LiveHardware<B>,
     capabilities: Capabilities,
+    profile_catalog: ProfileCatalog,
 }
 
 impl<B> TuiApp<B>
@@ -84,6 +86,12 @@ where
         &self.capabilities
     }
 
+    /// Prepared read-only profile catalog: built-ins plus custom files
+    /// discovered once before terminal takeover. Ticks never reread it.
+    pub fn profile_catalog(&self) -> &ProfileCatalog {
+        &self.profile_catalog
+    }
+
     /// Samples once; failures degrade instead of terminating.
     pub fn refresh(&mut self) {
         self.live.refresh();
@@ -97,7 +105,40 @@ where
 /// A failed capability discovery under READ-ONLY falls back to a
 /// conservative empty set so monitoring can still launch degraded. The
 /// same failure under READY is contradictory and aborts startup.
+///
+/// Custom profiles come from the platform default store; any store,
+/// listing, or load failure degrades to a nonfatal catalog state instead
+/// of aborting startup, and built-ins always remain visible.
 pub fn prepare_tui<R>(paths: SystemPaths, reader: R) -> Result<TuiApp<MsiEcBackend<R>>, TuiError>
+where
+    R: SysfsReader + Clone,
+{
+    let profile_catalog = match crate::profiles::ProfileStore::user_default() {
+        Ok(store) => ProfileCatalog::from_store(&store),
+        Err(_) => ProfileCatalog::unavailable(),
+    };
+    prepare_tui_with_catalog(paths, reader, profile_catalog)
+}
+
+/// Injectable preparation path for tests: identical hardware composition
+/// with a caller-supplied read-only catalog, so tests never touch the
+/// developer's real `~/.config/mec/profiles/`.
+pub fn prepare_tui_with_profile_store<R>(
+    paths: SystemPaths,
+    reader: R,
+    store: crate::profiles::ProfileStore,
+) -> Result<TuiApp<MsiEcBackend<R>>, TuiError>
+where
+    R: SysfsReader + Clone,
+{
+    prepare_tui_with_catalog(paths, reader, ProfileCatalog::from_store(&store))
+}
+
+fn prepare_tui_with_catalog<R>(
+    paths: SystemPaths,
+    reader: R,
+    profile_catalog: ProfileCatalog,
+) -> Result<TuiApp<MsiEcBackend<R>>, TuiError>
 where
     R: SysfsReader + Clone,
 {
@@ -118,6 +159,7 @@ where
         state: AppState::default(),
         live: LiveHardware::new(device, mode, backend, SnapshotHistory::default()),
         capabilities,
+        profile_catalog,
     })
 }
 
@@ -215,6 +257,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.state(),
                     app.live(),
                     app.capabilities(),
+                    app.profile_catalog(),
                 );
             })
             .map(|_| ())
@@ -239,7 +282,10 @@ mod tests {
     };
     use crate::monitoring::{PollInterval, SnapshotHistory};
 
-    use super::{TuiApp, prepare_tui, resolve_outcome, run_tui_loop, should_launch_tui};
+    use super::{
+        TuiApp, prepare_tui, prepare_tui_with_profile_store, resolve_outcome, run_tui_loop,
+        should_launch_tui,
+    };
     use crate::tui::{EventSource, TuiEvent};
 
     const TIMEOUT: Duration = Duration::from_millis(10);
@@ -358,6 +404,96 @@ mod tests {
         assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.0");
     }
 
+    #[test]
+    fn injected_empty_store_preparation_succeeds() {
+        let (_dir, store) = catalog_store();
+        let app = prepare_tui_with_profile_store(
+            fixture_root("gf63"),
+            crate::hardware::LinuxSysfsReader,
+            store,
+        )
+        .expect("empty store must not abort startup");
+        assert!(app.profile_catalog().customs().is_empty());
+        assert!(app.profile_catalog().customs_available());
+        assert_eq!(app.live().mode(), &SupportMode::Ready);
+        assert_eq!(app.live().current_snapshot(), None);
+    }
+
+    #[test]
+    fn injected_valid_customs_appear_in_catalog() {
+        let (_dir, store) = catalog_store();
+        write_profile(
+            &store,
+            "work.toml",
+            b"name = \"Startup Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        );
+        let app = prepare_tui_with_profile_store(
+            fixture_root("gf63"),
+            crate::hardware::LinuxSysfsReader,
+            store,
+        )
+        .expect("valid customs must not abort startup");
+        assert_eq!(app.profile_catalog().customs().len(), 1);
+        let entry = &app.profile_catalog().customs()[0];
+        assert!(entry.is_valid());
+        assert_eq!(entry.name().unwrap().as_str(), "Startup Work");
+        assert_eq!(entry.profile().unwrap().name().as_str(), "Startup Work");
+    }
+
+    #[test]
+    fn malformed_custom_does_not_abort_startup() {
+        let (_dir, store) = catalog_store();
+        write_profile(&store, "bad.toml", b"name = [unclosed\n");
+        write_profile(
+            &store,
+            "work.toml",
+            b"name = \"Startup Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        );
+        let app = prepare_tui_with_profile_store(
+            fixture_root("gf63"),
+            crate::hardware::LinuxSysfsReader,
+            store,
+        )
+        .expect("malformed custom must not abort startup");
+        assert_eq!(app.profile_catalog().customs().len(), 2);
+        assert!(!app.profile_catalog().customs()[0].is_valid());
+        assert!(app.profile_catalog().customs()[1].is_valid());
+    }
+
+    #[test]
+    fn missing_custom_directory_does_not_abort_startup() {
+        let dir = tempfile::tempdir().expect("missing-dir TempDir constructs");
+        let store = crate::profiles::ProfileStore::new(dir.path().join("profiles"));
+        let app = prepare_tui_with_profile_store(
+            fixture_root("gf63"),
+            crate::hardware::LinuxSysfsReader,
+            store,
+        )
+        .expect("missing directory must not abort startup");
+        assert!(app.profile_catalog().customs().is_empty());
+        assert!(app.profile_catalog().customs_available());
+        assert!(!dir.path().join("profiles").exists());
+    }
+
+    #[test]
+    fn list_level_failure_does_not_abort_startup() {
+        // A regular file where the directory should be fails listing
+        // deterministically without chmod games.
+        let dir = tempfile::tempdir().expect("unreadable TempDir constructs");
+        let profiles = dir.path().join("profiles");
+        std::fs::write(&profiles, b"not a directory\n").expect("blocker writes");
+        let store = crate::profiles::ProfileStore::new(&profiles);
+        let app = prepare_tui_with_profile_store(
+            fixture_root("gf63"),
+            crate::hardware::LinuxSysfsReader,
+            store,
+        )
+        .expect("list failure must not abort startup");
+        assert!(!app.profile_catalog().customs_available());
+        assert!(app.profile_catalog().customs().is_empty());
+        assert_eq!(app.live().mode(), &SupportMode::Ready);
+    }
+
     struct LoopBackend {
         script: RefCell<VecDeque<Result<HardwareSnapshot, BackendError>>>,
         log: Rc<RefCell<Vec<&'static str>>>,
@@ -455,7 +591,19 @@ mod tests {
                 SnapshotHistory::default(),
             ),
             capabilities: Capabilities::default(),
+            profile_catalog: crate::tui::ProfileCatalog::empty(),
         }
+    }
+
+    fn catalog_store() -> (tempfile::TempDir, crate::profiles::ProfileStore) {
+        let dir = tempfile::tempdir().expect("catalog TempDir constructs");
+        let store = crate::profiles::ProfileStore::new(dir.path().join("profiles"));
+        (dir, store)
+    }
+
+    fn write_profile(store: &crate::profiles::ProfileStore, name: &str, contents: &[u8]) {
+        std::fs::create_dir_all(store.directory()).expect("catalog dir constructs");
+        std::fs::write(store.directory().join(name), contents).expect("profile writes");
     }
 
     fn run_loop(

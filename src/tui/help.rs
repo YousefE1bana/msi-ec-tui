@@ -100,7 +100,14 @@ mod tests {
         let mut app = AppState::default();
         app.apply(AppAction::ShowHelp);
         screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         })
     }
 
@@ -109,7 +116,14 @@ mod tests {
         let capabilities = full_capabilities();
         let app = AppState::default();
         screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         })
     }
 
@@ -207,7 +221,14 @@ mod tests {
         app.apply(AppAction::ShowHelp);
         app.apply(AppAction::HideHelp);
         let text = screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         });
         assert!(!text.contains("MEC Help"));
     }
@@ -277,7 +298,14 @@ mod tests {
         let mut app = AppState::default();
         app.apply(AppAction::ShowHelp);
         let text = screen_text(20, 8, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         });
         assert!(!text.is_empty());
     }
@@ -295,7 +323,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
             .draw(|frame| {
-                render_screen(frame, frame.area(), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                );
             })
             .expect("minimal help draws");
     }
@@ -314,7 +349,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
             .draw(|frame| {
-                render_screen(frame, Rect::new(0, 0, 0, 0), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                );
             })
             .expect("zero-area help-visible dispatch draws");
     }

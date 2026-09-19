@@ -13,6 +13,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::{AppState, LiveHardware, Screen};
 use crate::hardware::{Capabilities, EcBackend};
 
+use super::profile_catalog::ProfileCatalog;
 use super::screens::{
     battery as battery_screen, devices as devices_screen, diagnostics as diagnostics_screen,
     fans as fans_screen, performance as performance_screen, profiles as profiles_screen,
@@ -54,10 +55,11 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
     app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    catalog: &ProfileCatalog,
     theme: &Theme,
 ) {
     let mut lines = compact_header(app, live, theme);
-    lines.extend(compact_body(app, live, capabilities, theme));
+    lines.extend(compact_body(app, live, capabilities, catalog, theme));
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
@@ -109,6 +111,7 @@ fn compact_body<B: EcBackend>(
     app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    catalog: &ProfileCatalog,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let snapshot = live.current_snapshot();
@@ -145,7 +148,11 @@ fn compact_body<B: EcBackend>(
             lines.extend(devices_screen::capability_lines(capabilities, theme));
             lines
         }
-        Screen::Profiles => profiles_screen::catalog_lines(capabilities, theme),
+        Screen::Profiles => {
+            let mut lines = profiles_screen::catalog_lines(capabilities, theme);
+            lines.extend(profiles_screen::custom_lines(catalog));
+            lines
+        }
         Screen::Diagnostics => {
             let mut lines = diagnostics_screen::identity_lines(live.device());
             lines.extend(diagnostics_screen::telemetry_lines(live, theme));
@@ -195,7 +202,14 @@ mod tests {
         let capabilities = full_capabilities();
         let app = app_on(screen);
         screen_text(width, height, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         })
     }
 
@@ -262,6 +276,30 @@ mod tests {
     }
 
     #[test]
+    fn compact_profiles_lists_prepared_customs() {
+        use crate::profiles::ProfileStore;
+        use crate::tui::ProfileCatalog;
+
+        let dir = tempfile::tempdir().expect("compact TempDir constructs");
+        let store = ProfileStore::new(dir.path().join("profiles"));
+        std::fs::create_dir_all(store.directory()).expect("compact dir constructs");
+        std::fs::write(
+            store.directory().join("work.toml"),
+            b"name = \"Compact Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        )
+        .expect("compact profile writes");
+        let catalog = ProfileCatalog::from_store(&store);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Profiles);
+        let text = screen_text(50, 16, |frame| {
+            render_screen(frame, frame.area(), &app, &live, &capabilities, &catalog);
+        });
+        assert!(text.contains("Compact Work"));
+        assert!(text.contains("Valid"));
+    }
+
+    #[test]
     fn compact_dashboard_stays_useful() {
         let text = rendered(Screen::Dashboard, 50, 16);
         assert!(text.contains("MEC"));
@@ -305,7 +343,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
             .draw(|frame| {
-                render_screen(frame, Rect::new(0, 0, 0, 0), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                );
             })
             .expect("zero-area dispatch draws");
     }

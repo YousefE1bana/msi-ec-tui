@@ -32,6 +32,7 @@ use ratatui::widgets::Paragraph;
 use crate::app::{AppState, LiveHardware, Screen};
 use crate::hardware::{Capabilities, EcBackend};
 
+use crate::tui::profile_catalog::ProfileCatalog;
 use crate::tui::responsive::{LayoutTier, layout_tier, render_compact_screen};
 use crate::tui::theme::Theme;
 use crate::tui::ui::render_compact;
@@ -45,8 +46,17 @@ pub fn render_screen<B: EcBackend>(
     app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    catalog: &ProfileCatalog,
 ) {
-    render_screen_with_theme(frame, area, app, live, capabilities, &Theme::default());
+    render_screen_with_theme(
+        frame,
+        area,
+        app,
+        live,
+        capabilities,
+        catalog,
+        &Theme::default(),
+    );
 }
 
 /// Theme-aware dispatcher. `render_screen` stays source-compatible for
@@ -57,6 +67,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
     app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    catalog: &ProfileCatalog,
     theme: &Theme,
 ) {
     let rows = Layout::default()
@@ -65,9 +76,11 @@ pub fn render_screen_with_theme<B: EcBackend>(
         .split(area);
     render_navigation(frame, rows[0], app, theme);
     match layout_tier(area) {
-        LayoutTier::Full => render_active_screen(frame, rows[1], app, live, capabilities, theme),
+        LayoutTier::Full => {
+            render_active_screen(frame, rows[1], app, live, capabilities, catalog, theme);
+        }
         LayoutTier::Compact => {
-            render_compact_screen(frame, rows[1], app, live, capabilities, theme);
+            render_compact_screen(frame, rows[1], app, live, capabilities, catalog, theme);
         }
         LayoutTier::Tiny => render_compact(frame, rows[1]),
     }
@@ -84,6 +97,7 @@ fn render_active_screen<B: EcBackend>(
     app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    catalog: &ProfileCatalog,
     theme: &Theme,
 ) {
     match app.current_screen() {
@@ -101,7 +115,7 @@ fn render_active_screen<B: EcBackend>(
             devices::render_devices_with_theme(frame, area, live, capabilities, theme);
         }
         Screen::Profiles => {
-            profiles::render_profiles_with_theme(frame, area, live, capabilities, theme);
+            profiles::render_profiles_with_theme(frame, area, live, capabilities, catalog, theme);
         }
         Screen::Diagnostics => {
             diagnostics::render_diagnostics_with_theme(frame, area, live, capabilities, theme);
@@ -213,7 +227,14 @@ mod tests {
         let capabilities = full_capabilities();
         let app = app_on(screen);
         screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         })
     }
 
@@ -251,7 +272,32 @@ mod tests {
     fn profiles_dispatch_renders_profiles() {
         let text = dispatched(Screen::Profiles);
         assert!(text.contains("BUILT-IN PROFILES"));
+        assert!(text.contains("CUSTOM PROFILES"));
+        assert!(text.contains("(none)"));
         assert!(text.contains("6 Profiles"));
+    }
+
+    #[test]
+    fn profiles_dispatch_renders_prepared_customs() {
+        use crate::profiles::ProfileStore;
+
+        let dir = tempfile::tempdir().expect("dispatch TempDir constructs");
+        let store = ProfileStore::new(dir.path().join("profiles"));
+        std::fs::create_dir_all(store.directory()).expect("dispatch dir constructs");
+        std::fs::write(
+            store.directory().join("work.toml"),
+            b"name = \"Dispatch Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        )
+        .expect("dispatch profile writes");
+        let catalog = crate::tui::ProfileCatalog::from_store(&store);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Profiles);
+        let text = screen_text(100, 30, |frame| {
+            render_screen(frame, frame.area(), &app, &live, &capabilities, &catalog);
+        });
+        assert!(text.contains("Dispatch Work"));
+        assert!(text.contains("Valid"));
     }
 
     #[test]
@@ -303,7 +349,15 @@ mod tests {
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
         let (foreground, modifier) = first_cell_style(100, 30, "1 Dashboard", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("navigation entry present");
         assert_eq!(foreground, theme.primary);
@@ -317,12 +371,28 @@ mod tests {
         let app = app_on(Screen::Fans);
         let theme = Theme::default();
         let (foreground, _) = first_cell_style(100, 30, "3 Fans", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("fans entry present");
         assert_eq!(foreground, theme.primary);
         let (dashboard_foreground, _) = first_cell_style(100, 30, "1 Dashboard", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("dashboard entry present");
         assert_eq!(dashboard_foreground, theme.muted);
@@ -335,7 +405,15 @@ mod tests {
         let app = app_on(Screen::Profiles);
         let theme = Theme::default();
         let (foreground, modifier) = first_cell_style(100, 30, "6 Profiles", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("profiles entry present");
         assert_eq!(foreground, theme.primary);
@@ -359,7 +437,15 @@ mod tests {
             "7 Diagnostics",
         ] {
             let (foreground, _) = first_cell_style(100, 30, label, |frame| {
-                render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+                render_screen_with_theme(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &theme,
+                );
             })
             .expect("entry present");
             if foreground == theme.primary {
@@ -376,7 +462,15 @@ mod tests {
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
         let (foreground, _) = first_cell_style(100, 30, "READY", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("READY present");
         assert_eq!(foreground, theme.success);
@@ -393,7 +487,15 @@ mod tests {
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
         let (foreground, _) = first_cell_style(100, 30, "READ-ONLY", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("READ-ONLY present");
         assert_eq!(foreground, theme.warning);
@@ -406,7 +508,15 @@ mod tests {
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
         let (foreground, _) = first_cell_style(100, 30, "LIVE", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("LIVE present");
         assert_eq!(foreground, theme.success);
@@ -419,7 +529,15 @@ mod tests {
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
         let (foreground, _) = first_cell_style(100, 30, "WAITING", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("WAITING present");
         assert_eq!(foreground, theme.muted);
@@ -436,7 +554,15 @@ mod tests {
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
         let (foreground, _) = first_cell_style(100, 30, "DEGRADED", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("DEGRADED present");
         assert_eq!(foreground, theme.danger);
@@ -448,7 +574,14 @@ mod tests {
         let capabilities = full_capabilities();
         let app = app_on(Screen::Fans);
         let text = screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         });
         assert!(text.contains("CPU Fan Telemetry"));
     }
@@ -463,7 +596,15 @@ mod tests {
             ..Theme::default()
         };
         let (foreground, _) = first_cell_style(100, 30, "5 Devices", |frame| {
-            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &theme,
+            );
         })
         .expect("devices entry present");
         assert_eq!(foreground, ratatui::style::Color::Red);
@@ -477,7 +618,14 @@ mod tests {
         for screen in Screen::ALL {
             let app = app_on(screen);
             let _ = screen_text(100, 30, |frame| {
-                render_screen(frame, frame.area(), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                );
             });
         }
         assert_eq!(calls.get(), 1);
@@ -490,7 +638,14 @@ mod tests {
         for screen in Screen::ALL {
             let app = app_on(screen);
             let text = screen_text(20, 8, |frame| {
-                render_screen(frame, frame.area(), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                );
             });
             assert!(text.contains("Terminal too small"), "{screen:?}");
         }
@@ -509,7 +664,14 @@ mod tests {
             let mut terminal = Terminal::new(backend).expect("test terminal constructs");
             terminal
                 .draw(|frame| {
-                    render_screen(frame, Rect::new(0, 0, 0, 0), &app, &live, &capabilities);
+                    render_screen(
+                        frame,
+                        Rect::new(0, 0, 0, 0),
+                        &app,
+                        &live,
+                        &capabilities,
+                        &crate::tui::ProfileCatalog::empty(),
+                    );
                 })
                 .expect("zero-area screen draws");
         }
@@ -532,7 +694,13 @@ mod tests {
             render_devices(frame, frame.area(), &live, &capabilities);
         });
         let _ = screen_text(100, 30, |frame| {
-            render_profiles(frame, frame.area(), &live, &capabilities);
+            render_profiles(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+            );
         });
         let _ = screen_text(100, 30, |frame| {
             render_diagnostics(frame, frame.area(), &live, &capabilities);
