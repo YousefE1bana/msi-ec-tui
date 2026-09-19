@@ -1,0 +1,81 @@
+# Builds multi-arch release archives and validates checksums.
+#
+# Builds artifacts only: this workflow never creates a GitHub Release,
+# even when triggered by a version tag. Publishing stays a deliberate
+# later step.
+
+name: Release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    name: archive (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      # actions/checkout v4 (major-version pinned upstream action).
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Show pinned toolchain
+        run: rustup show
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        # sudo apt on the disposable runner installs distro build tools
+        # only; packaging scripts themselves never use sudo.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build release archive
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          chmod +x scripts/build-release-archive.sh
+          ./scripts/build-release-archive.sh ${{ matrix.target }} dist
+      # actions/upload-artifact v4 (major-version pinned upstream action).
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/mec-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  checksums:
+    name: checksums
+    runs-on: ubuntu-latest
+    needs: archive
+    steps:
+      # actions/checkout v4 (major-version pinned upstream action).
+      - name: Check out repository
+        uses: actions/checkout@v4
+      # actions/download-artifact v4 (major-version pinned upstream action).
+      - name: Download archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Generate and verify SHA256SUMS
+        run: |
+          chmod +x scripts/generate-checksums.sh
+          ./scripts/generate-checksums.sh dist \
+            mec-x86_64-unknown-linux-gnu.tar.gz \
+            mec-aarch64-unknown-linux-gnu.tar.gz
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mec-release-archives
+          path: dist
+          if-no-files-found: error
