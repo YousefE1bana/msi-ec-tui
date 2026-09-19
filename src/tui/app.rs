@@ -1,4 +1,4 @@
-//! Interactive read-only TUI orchestration: startup, loop, and shutdown.
+//! Interactive TUI orchestration: startup, loop, and shutdown.
 //!
 //! [`TuiApp`] owns navigation state, live telemetry, and startup
 //! capabilities. [`prepare_tui`] composes the hardware layer once before
@@ -134,6 +134,19 @@ where
 
     /// Contextual action dispatch with confirmed execution.
     ///
+    /// Modal input precedence matches visual layering (topmost owns input):
+    /// 1. Help visible -> close Help first (`ToggleHelp`/`Cancel` close,
+    ///    `Quit` still quits, everything else ignored). Hidden editor and
+    ///    pending state underneath are preserved untouched, so a hidden
+    ///    mutation UI can never consume `Activate` while Help is on top.
+    ///    The first `Esc` closes Help only; a second `Esc` after Help
+    ///    closes may cancel the now-visible confirmation or editor.
+    /// 2. Pending confirmation -> `Activate` executes exactly once,
+    ///    `Cancel` discards, everything else (including `ToggleHelp`)
+    ///    ignored.
+    /// 3. Editor open -> edit/accept/cancel.
+    /// 4. Normal screen interaction.
+    ///
     /// Browsing (no editor, no pending):
     /// - `MoveUp`/`MoveDown` drive profile rows on Profiles, control rows
     ///   on interactive screens, else screen navigation. While editing they
@@ -145,15 +158,21 @@ where
     ///   applicable. Opening creates zero executor calls.
     /// - `Cancel` discards editor then pending, else hides help.
     ///
-    /// Modal confirmation (pending exists): navigation and new edits are
-    /// blocked; only `Activate` (execute exactly once) or `Cancel`
-    /// (discard, zero calls) apply. After any attempt that reaches the
-    /// executor, live state refreshes once before redraw, on success or
-    /// error. Opening, cancelling, or READ-ONLY rejections never refresh
-    /// and never call the executor. The stored preview is presentation
-    /// only; execution re-evaluates fresh through the safe APIs.
+    /// After any attempt that reaches the executor, live state refreshes
+    /// once before redraw, on success or error. Opening, cancelling, or
+    /// READ-ONLY rejections never refresh and never call the executor. The
+    /// stored preview is presentation only; execution re-evaluates fresh
+    /// through the safe APIs.
     pub fn handle_action(&mut self, action: crate::app::AppAction) {
         use crate::app::AppAction as A;
+        // Help is the topmost overlay: it owns input while visible.
+        if self.state.help_visible() {
+            match action {
+                A::ToggleHelp | A::Cancel | A::Quit => self.state.apply(action),
+                _ => {}
+            }
+            return;
+        }
         // Modal confirmation blocks navigation and new edits.
         if self.controls.has_pending() {
             match action {
@@ -1785,5 +1804,194 @@ mod tests {
         app.handle_action(AppAction::Cancel);
         app.handle_action(AppAction::GoTo(Screen::Battery));
         assert_eq!(app.state().current_screen(), Screen::Battery);
+    }
+
+    // ---- Review correction: Help owns input while visible ----
+
+    fn help_visible_control_app(
+        screen: Screen,
+    ) -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
+        let mut app = healthy_control_app(screen);
+        app.handle_action(AppAction::ShowHelp);
+        assert!(app.state().help_visible());
+        app
+    }
+
+    #[test]
+    fn help_visible_activate_starts_nothing_and_calls_nothing() {
+        let mut app = help_visible_control_app(Screen::Fans);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        assert!(app.state().help_visible());
+    }
+
+    #[test]
+    fn help_above_editor_activate_preserves_editor_and_calls_nothing() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        let draft_before = app.controls().editor().unwrap().draft().clone();
+        app.handle_action(AppAction::ShowHelp);
+        assert!(app.state().help_visible());
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        assert_eq!(app.controls().editor().unwrap().draft(), &draft_before);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn help_above_editor_adjust_keys_leave_draft_unchanged() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        let draft_before = app.controls().editor().unwrap().draft().clone();
+        app.handle_action(AppAction::ShowHelp);
+        app.handle_action(AppAction::MoveLeft);
+        app.handle_action(AppAction::MoveRight);
+        assert!(app.controls().is_editing());
+        assert_eq!(app.controls().editor().unwrap().draft(), &draft_before);
+        assert_eq!(app.executor.command_calls(), 0);
+    }
+
+    #[test]
+    fn help_above_pending_command_activate_executes_nothing() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        // Pending blocks Help via normal input, so construct the overlap
+        // directly: Help on top of an existing confirmation.
+        app.state_mut().apply(AppAction::ShowHelp);
+        assert!(app.state().help_visible());
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn help_above_pending_profile_activate_executes_nothing() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        // Pending blocks Help via normal input, so construct the overlap
+        // directly: Help on top of an existing confirmation.
+        app.state_mut().apply(AppAction::ShowHelp);
+        assert!(app.state().help_visible());
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn first_esc_closes_help_but_keeps_pending_then_second_esc_cancels() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        // Pending blocks Help via normal input, so construct the overlap
+        // directly: Help on top of an existing confirmation.
+        app.state_mut().apply(AppAction::ShowHelp);
+        assert!(app.state().help_visible());
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.state().help_visible());
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.command_calls(), 0);
+        app.handle_action(AppAction::Cancel);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+    }
+
+    #[test]
+    fn first_esc_closes_help_but_keeps_editor_then_second_esc_cancels() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        app.handle_action(AppAction::ShowHelp);
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.state().help_visible());
+        assert!(app.controls().is_editing());
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.controls().is_editing());
+        assert_eq!(app.executor.command_calls(), 0);
+    }
+
+    #[test]
+    fn help_visible_blocks_digit_navigation() {
+        let mut app = help_visible_control_app(Screen::Dashboard);
+        for screen in [
+            Screen::Performance,
+            Screen::Fans,
+            Screen::Battery,
+            Screen::Devices,
+            Screen::Profiles,
+            Screen::Diagnostics,
+            Screen::Dashboard,
+        ] {
+            app.handle_action(AppAction::GoTo(screen));
+            assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        }
+        assert!(app.state().help_visible());
+    }
+
+    #[test]
+    fn help_visible_blocks_tab_navigation() {
+        let mut app = help_visible_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::NextScreen);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        app.handle_action(AppAction::PreviousScreen);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        assert!(app.state().help_visible());
+    }
+
+    #[test]
+    fn help_visible_blocks_row_and_candidate_moves() {
+        let mut app = healthy_control_app(Screen::Performance);
+        let selected_before = app.controls().selected_index(Screen::Performance);
+        app.handle_action(AppAction::ShowHelp);
+        app.handle_action(AppAction::MoveUp);
+        app.handle_action(AppAction::MoveDown);
+        app.handle_action(AppAction::MoveLeft);
+        app.handle_action(AppAction::MoveRight);
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+        assert_eq!(
+            app.controls().selected_index(Screen::Performance),
+            selected_before
+        );
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+        // Profile selection is frozen too.
+        let mut profiles = healthy_control_app(Screen::Profiles);
+        let profile_before = profiles.profile_selection().index();
+        profiles.handle_action(AppAction::ShowHelp);
+        profiles.handle_action(AppAction::MoveUp);
+        profiles.handle_action(AppAction::MoveDown);
+        assert_eq!(profiles.profile_selection().index(), profile_before);
+    }
+
+    #[test]
+    fn toggle_help_closes_help() {
+        let mut app = help_visible_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::ToggleHelp);
+        assert!(!app.state().help_visible());
+    }
+
+    #[test]
+    fn quit_still_requests_quit_while_help_visible() {
+        let mut app = help_visible_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::Quit);
+        assert!(app.state().should_quit());
     }
 }
