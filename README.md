@@ -223,6 +223,9 @@ Notes:
 - rollback failures are surfaced with typed errors; rollback is
   best-effort application-level compensation, not an atomic
   kernel-level transaction
+- profile transactions for the same hardware root are serialized with a
+  Linux advisory lock held for the full apply/rollback lifetime, so two
+  concurrent `mec profile apply` processes cannot interleave
 
 ### Privilege model
 

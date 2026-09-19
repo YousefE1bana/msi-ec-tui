@@ -2,13 +2,22 @@
 //!
 //! [`ProfileTransactionExecutor::apply`] accepts a [`Profile`] — never a
 //! stored preview or plan — and prepares everything fresh inside the call:
-//! fresh support evaluation, fresh capability discovery, a fresh
-//! [`ProfilePlanner::preview`], a fresh [`HardwareSnapshot`], and a fresh
+//! a per-root Linux advisory lock, fresh support evaluation, fresh
+//! capability discovery, a fresh [`ProfilePlanner::preview`], a fresh
+//! [`HardwareSnapshot`], and a fresh
 //! [`ProfileTransactionPlanner::plan`]. Only then does it execute forward
 //! steps, each through [`HardwareCommandExecutor::execute`], rolling back
 //! on failure. No stale preview or plan can authorize execution.
+//!
+//! Profile transactions for the same [`SystemPaths`] root are serialized
+//! with a Linux advisory lock (`flock LOCK_EX` on the root directory
+//! inode) held for the full apply/rollback lifetime, so two concurrent
+//! `mec profile apply` processes cannot interleave preparation, forward
+//! writes, and rollback.
 
 use std::fmt;
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
 
 use thiserror::Error;
 
@@ -53,6 +62,13 @@ where
     /// execution with best-effort reverse rollback. See the module
     /// documentation for the exact sequence.
     pub fn apply(&self, profile: &Profile) -> Result<ProfileApplyReport, ProfileApplyError> {
+        // Serialize profile transactions per root first: the guard stays
+        // alive until apply returns, covering preparation, forward
+        // execution, rollback, and result construction. A second
+        // transaction for the same root blocks here instead of
+        // interleaving. Lock failure fails closed before any write.
+        let _lock = ProfileTransactionLock::acquire(&self.paths)
+            .map_err(ProfileApplyError::TransactionLock)?;
         // Fresh support evaluation on every call; never a stored verdict.
         let mode = SupportEvaluator::new(self.paths.clone(), self.reader.clone()).evaluate();
         // Fresh capability discovery for READY; read-only short-circuits
@@ -173,6 +189,9 @@ pub struct ProfileApplyReport {
 /// replace it.
 #[derive(Debug, Error)]
 pub enum ProfileApplyError {
+    /// The per-root transaction lock could not be acquired; nothing ran.
+    #[error("profile apply failed: transaction lock unavailable: {0}")]
+    TransactionLock(#[from] ProfileTransactionLockError),
     /// Fresh capability discovery failed before any preview.
     #[error("profile apply failed during capability discovery: {0}")]
     CapabilityDiscovery(#[from] CapabilityDiscoveryError),
@@ -192,6 +211,59 @@ pub enum ProfileApplyError {
     /// A forward command failed; see the failure for rollback detail.
     #[error("profile apply failed: {0}")]
     Execution(Box<ProfileApplyFailure>),
+}
+
+/// Why the per-root transaction lock could not be acquired. No paths in
+/// messages; the OS error is preserved as a typed source only.
+#[derive(Debug, Error)]
+pub enum ProfileTransactionLockError {
+    /// The root directory does not exist.
+    #[error("profile transaction lock target not found")]
+    NotFound,
+    /// The current process may not open the root directory.
+    #[error("profile transaction lock access denied")]
+    AccessDenied,
+    /// Any other open/flock failure, with the OS error as typed source.
+    #[error("profile transaction lock failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// RAII Linux advisory lock over the [`SystemPaths`] root directory
+/// inode, held for one complete profile transaction. No lock file is
+/// created, no directory contents are modified, and no I/O uses the held
+/// handle: `flock` releases automatically when the guard drops at the end
+/// of `apply`.
+struct ProfileTransactionLock {
+    _file: std::fs::File,
+}
+
+impl ProfileTransactionLock {
+    /// Opens the root read-only and acquires blocking `LOCK_EX`, shared
+    /// by every path resolving to the same directory inode. Retries on
+    /// EINTR; never uses `LOCK_NB`, so a second transaction waits instead
+    /// of interleaving.
+    fn acquire(paths: &SystemPaths) -> Result<Self, ProfileTransactionLockError> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(paths.root())
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::NotFound => ProfileTransactionLockError::NotFound,
+                std::io::ErrorKind::PermissionDenied => ProfileTransactionLockError::AccessDenied,
+                _ => ProfileTransactionLockError::Io(error),
+            })?;
+        loop {
+            // Minimal unsafe: one flock call on our own open fd.
+            let acquired = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if acquired == 0 {
+                return Ok(Self { _file: file });
+            }
+            let os = std::io::Error::last_os_error();
+            if os.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(ProfileTransactionLockError::Io(os));
+        }
+    }
 }
 
 /// A failed forward step: the exact command, its exact error, what had
@@ -364,6 +436,8 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
 
     use tempfile::{TempDir, tempdir};
 
@@ -1759,5 +1833,218 @@ mod tests {
             ProfileApplyError::Snapshot(crate::hardware::BackendError::Unavailable).to_string(),
             "profile apply failed reading current state: hardware backend is unavailable"
         );
+    }
+
+    /// Non-blocking probe used only to observe lock state deterministically:
+    /// production acquisition always blocks with LOCK_EX.
+    fn try_lock_nb(paths: &SystemPaths) -> std::io::Result<std::fs::File> {
+        use std::os::unix::io::AsRawFd;
+
+        let file = std::fs::OpenOptions::new().read(true).open(paths.root())?;
+        let held = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if held == 0 {
+            Ok(file)
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[test]
+    fn lock_acquires_and_releases_with_guard_drop() {
+        let dir = tempdir().unwrap();
+        let paths = SystemPaths::new(dir.path());
+        {
+            let _guard = ProfileTransactionLock::acquire(&paths).expect("first acquire");
+            // Held: a non-blocking attempt must refuse.
+            let refused = try_lock_nb(&paths).expect_err("lock must be held");
+            assert_eq!(refused.raw_os_error(), Some(libc::EWOULDBLOCK));
+        }
+        // Dropped: acquisition proceeds again.
+        assert!(ProfileTransactionLock::acquire(&paths).is_ok());
+        assert!(try_lock_nb(&paths).is_ok());
+    }
+
+    #[test]
+    fn blocking_acquisition_waits_for_release() {
+        let dir = tempdir().unwrap();
+        let paths = SystemPaths::new(dir.path());
+        let guard = ProfileTransactionLock::acquire(&paths).expect("first acquire");
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // Deterministic proof of blocked state before waiting.
+                let refused = try_lock_nb(&paths).expect_err("lock must be held");
+                assert_eq!(refused.raw_os_error(), Some(libc::EWOULDBLOCK));
+                blocked_tx.send(()).expect("signal blocked");
+                let _second = ProfileTransactionLock::acquire(&paths).expect("second acquire");
+                done_tx.send(()).expect("signal acquired");
+            });
+            blocked_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("second thread must reach the blocked acquire");
+            drop(guard);
+            done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("second acquire must proceed after release");
+        });
+    }
+
+    #[test]
+    fn separate_roots_do_not_serialize_each_other() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        let _held =
+            ProfileTransactionLock::acquire(&SystemPaths::new(first.path())).expect("first root");
+        // Independent inode: both blocking and non-blocking acquire succeed.
+        {
+            let _other = ProfileTransactionLock::acquire(&SystemPaths::new(second.path()))
+                .expect("second root must not wait on the first");
+        }
+        assert!(try_lock_nb(&SystemPaths::new(second.path())).is_ok());
+    }
+
+    #[test]
+    fn lock_failure_fails_closed_with_zero_writes() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("no-such-root");
+        let paths = SystemPaths::new(&missing);
+        let boundary = RecordingBoundary::succeeding();
+        let transaction =
+            ProfileTransactionExecutor::new(paths, LinuxSysfsReader, boundary.clone());
+        let profile =
+            Profile::parse_toml("name = \"A\"\n\n[performance]\ncooler_boost = true\n").unwrap();
+        let error = transaction
+            .apply(&profile)
+            .expect_err("missing root must fail the lock");
+        assert!(
+            matches!(error, ProfileApplyError::TransactionLock(_)),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(boundary.calls(), 0);
+        assert!(!missing.exists(), "lock failure must create nothing");
+    }
+
+    /// Thread-safe recording transport for the cross-thread rollback test.
+    /// Parks inside a chosen rollback call until the test releases it.
+    #[derive(Clone)]
+    struct SharedBoundary {
+        recorded: Arc<Mutex<Vec<HardwareCommand>>>,
+        scripted: Arc<Mutex<VecDeque<Result<(), WriteBoundaryError>>>>,
+        pause_on_call: usize,
+        paused_tx: mpsc::SyncSender<()>,
+        release_rx: Arc<Mutex<mpsc::Receiver<()>>>,
+    }
+
+    impl HardwareWriteBoundary for SharedBoundary {
+        fn execute(&self, command: &HardwareCommand) -> Result<(), WriteBoundaryError> {
+            let pause = {
+                let mut recorded = self.recorded.lock().unwrap();
+                recorded.push(command.clone());
+                recorded.len() == self.pause_on_call
+            };
+            if pause {
+                self.paused_tx.send(()).expect("signal rollback pause");
+                self.release_rx
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("wait for rollback release");
+            }
+            self.scripted.lock().unwrap().pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    #[test]
+    fn second_transaction_waits_through_rollback() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.ec_file("cooler_boost", b"off\n");
+        fixture.enable_fan_modes("auto", &["auto", "silent"]);
+        // Transaction A: fan applies, cooler fails may-have-mutated, then
+        // the cooler rollback (3rd boundary call) parks until released.
+        let (paused_tx, paused_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::channel();
+        let boundary_a = SharedBoundary {
+            recorded: Arc::new(Mutex::new(Vec::new())),
+            scripted: Arc::new(Mutex::new(
+                vec![
+                    Ok(()),
+                    Err(WriteBoundaryError::WriteFailed("boom".to_owned())),
+                    Ok(()),
+                    Ok(()),
+                ]
+                .into(),
+            )),
+            pause_on_call: 3,
+            paused_tx,
+            release_rx: Arc::new(Mutex::new(release_rx)),
+        };
+        let recorded_b = Arc::new(Mutex::new(Vec::new()));
+        let boundary_b = SharedBoundary {
+            recorded: Arc::clone(&recorded_b),
+            scripted: Arc::new(Mutex::new(VecDeque::new())),
+            pause_on_call: usize::MAX,
+            paused_tx: mpsc::sync_channel(0).0,
+            release_rx: Arc::new(Mutex::new(mpsc::channel().1)),
+        };
+        let profile_a = Profile::parse_toml(concat!(
+            "name = \"Pair\"\n",
+            "\n",
+            "[performance]\n",
+            "cooler_boost = true\n",
+            "fan_mode = \"silent\"\n",
+        ))
+        .unwrap();
+        let profile_b =
+            Profile::parse_toml("name = \"Solo\"\n\n[performance]\ncooler_boost = true\n").unwrap();
+        std::thread::scope(|scope| {
+            let transaction_a = ProfileTransactionExecutor::new(
+                fixture.paths.clone(),
+                LinuxSysfsReader,
+                boundary_a,
+            );
+            scope.spawn(move || {
+                let error = transaction_a
+                    .apply(&profile_a)
+                    .expect_err("A must fail on the fan write");
+                assert!(matches!(error, ProfileApplyError::Execution(_)));
+            });
+            // A is parked inside its rollback; B must not cross its boundary
+            // while A holds the root lock. The timeout below only bounds the
+            // test: B cannot proceed until A is released.
+            paused_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("A must reach its parked rollback");
+            let transaction_b = ProfileTransactionExecutor::new(
+                fixture.paths.clone(),
+                LinuxSysfsReader,
+                boundary_b,
+            );
+            let (reached_tx, reached_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            scope.spawn(move || {
+                let report = transaction_b.apply(&profile_b).expect("B must succeed");
+                assert_eq!(report.applied(), &[HardwareCommand::SetCoolerBoost(true)]);
+                reached_tx.send(()).expect("signal B boundary use");
+                done_tx.send(()).expect("signal B done");
+            });
+            assert!(
+                reached_rx.recv_timeout(Duration::from_secs(2)).is_err(),
+                "B must not reach its boundary while A rolls back"
+            );
+            assert!(
+                recorded_b.lock().unwrap().is_empty(),
+                "no B hardware command may be recorded during A's rollback"
+            );
+            release_tx.send(()).expect("release A's rollback");
+            done_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("B must proceed after A releases the lock");
+            assert_eq!(
+                *recorded_b.lock().unwrap(),
+                vec![HardwareCommand::SetCoolerBoost(true)]
+            );
+        });
     }
 }
