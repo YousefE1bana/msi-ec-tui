@@ -15,7 +15,7 @@ use crate::hardware::{Capabilities, EcBackend};
 
 use super::screens::{
     battery as battery_screen, devices as devices_screen, diagnostics as diagnostics_screen,
-    fans as fans_screen, performance as performance_screen,
+    fans as fans_screen, performance as performance_screen, profiles as profiles_screen,
 };
 use super::theme::Theme;
 use super::ui::{
@@ -145,6 +145,7 @@ fn compact_body<B: EcBackend>(
             lines.extend(devices_screen::capability_lines(capabilities, theme));
             lines
         }
+        Screen::Profiles => profiles_screen::catalog_lines(capabilities, theme),
         Screen::Diagnostics => {
             let mut lines = diagnostics_screen::identity_lines(live.device());
             lines.extend(diagnostics_screen::telemetry_lines(live, theme));
@@ -214,7 +215,8 @@ mod tests {
             "3 Fans",
             "4 Battery",
             "5 Devices",
-            "6 Diagnostics",
+            "6 Profiles",
+            "7 Diagnostics",
         ] {
             assert!(text.contains(label), "{label:?} missing");
         }
@@ -223,21 +225,40 @@ mod tests {
     #[test]
     fn medium_terminal_navigation_stays_meaningful() {
         let text = rendered(Screen::Dashboard, 72, 20);
-        assert!(text.contains("1 Dashboard"));
-        assert!(text.contains("6 Diagnostics"));
+        assert!(text.contains("1 Dash"));
+        assert!(text.contains("6 Prof"));
+        assert!(text.contains("7 Diag"));
     }
 
     #[test]
     fn medium_terminal_uses_abbreviated_navigation() {
-        let text = rendered(Screen::Dashboard, 50, 16);
+        let text = rendered(Screen::Dashboard, 56, 16);
         let nav: Vec<&str> = text.lines().collect();
-        assert_eq!(nav[0], "1 Dash  2 Perf  3 Fans  4 Batt  5 Dev  6 Diag");
+        assert_eq!(
+            nav[0],
+            "1 Dash  2 Perf  3 Fans  4 Batt  5 Dev  6 Prof  7 Diag"
+        );
     }
 
     #[test]
     fn narrow_terminal_shows_current_screen_context() {
         let text = rendered(Screen::Fans, 40, 10);
-        assert!(text.contains("3/6 Fans"));
+        assert!(text.contains("3/7 Fans"));
+    }
+
+    #[test]
+    fn narrow_profiles_shows_current_screen_context() {
+        let text = rendered(Screen::Profiles, 40, 10);
+        assert!(text.contains("6/7 Profiles"));
+    }
+
+    #[test]
+    fn compact_profiles_lists_catalog() {
+        let text = rendered(Screen::Profiles, 50, 16);
+        assert!(text.contains("MEC"));
+        assert!(text.contains("Profiles"));
+        assert!(text.contains("Gaming"));
+        assert!(text.contains("battery-saver"));
     }
 
     #[test]

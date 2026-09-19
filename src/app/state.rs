@@ -20,18 +20,21 @@ pub enum Screen {
     Battery,
     /// Webcam, backlight, function keys.
     Devices,
+    /// Capability-aware built-in profile catalog (read-only).
+    Profiles,
     /// Compatibility and diagnostics report.
     Diagnostics,
 }
 
 impl Screen {
-    /// Canonical PLAN-003 navigation order.
-    pub const ALL: [Screen; 6] = [
+    /// Canonical PLAN-006 navigation order.
+    pub const ALL: [Screen; 7] = [
         Screen::Dashboard,
         Screen::Performance,
         Screen::Fans,
         Screen::Battery,
         Screen::Devices,
+        Screen::Profiles,
         Screen::Diagnostics,
     ];
 
@@ -43,6 +46,7 @@ impl Screen {
             Screen::Fans => "Fans",
             Screen::Battery => "Battery",
             Screen::Devices => "Devices",
+            Screen::Profiles => "Profiles",
             Screen::Diagnostics => "Diagnostics",
         }
     }
@@ -124,6 +128,7 @@ mod tests {
                 Screen::Fans,
                 Screen::Battery,
                 Screen::Devices,
+                Screen::Profiles,
                 Screen::Diagnostics,
             ]
         );
@@ -136,6 +141,7 @@ mod tests {
         assert_eq!(Screen::Fans.title(), "Fans");
         assert_eq!(Screen::Battery.title(), "Battery");
         assert_eq!(Screen::Devices.title(), "Devices");
+        assert_eq!(Screen::Profiles.title(), "Profiles");
         assert_eq!(Screen::Diagnostics.title(), "Diagnostics");
     }
 
@@ -145,14 +151,16 @@ mod tests {
         assert_eq!(Screen::Performance.next(), Screen::Fans);
         assert_eq!(Screen::Fans.next(), Screen::Battery);
         assert_eq!(Screen::Battery.next(), Screen::Devices);
-        assert_eq!(Screen::Devices.next(), Screen::Diagnostics);
+        assert_eq!(Screen::Devices.next(), Screen::Profiles);
+        assert_eq!(Screen::Profiles.next(), Screen::Diagnostics);
         assert_eq!(Screen::Diagnostics.next(), Screen::Dashboard);
     }
 
     #[test]
     fn previous_walks_reverse_order_with_wrap() {
         assert_eq!(Screen::Dashboard.previous(), Screen::Diagnostics);
-        assert_eq!(Screen::Diagnostics.previous(), Screen::Devices);
+        assert_eq!(Screen::Diagnostics.previous(), Screen::Profiles);
+        assert_eq!(Screen::Profiles.previous(), Screen::Devices);
         assert_eq!(Screen::Devices.previous(), Screen::Battery);
         assert_eq!(Screen::Battery.previous(), Screen::Fans);
         assert_eq!(Screen::Fans.previous(), Screen::Performance);
@@ -186,6 +194,13 @@ mod tests {
         let mut state = AppState::default();
         state.apply(AppAction::GoTo(Screen::Fans));
         assert_eq!(state.current_screen(), Screen::Fans);
+    }
+
+    #[test]
+    fn goto_selects_profiles_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::GoTo(Screen::Profiles));
+        assert_eq!(state.current_screen(), Screen::Profiles);
     }
 
     #[test]

@@ -74,7 +74,8 @@ fn help_lines() -> Vec<&'static str> {
         "3 Fans",
         "4 Battery",
         "5 Devices",
-        "6 Diagnostics",
+        "6 Profiles",
+        "7 Diagnostics",
         "General",
         "?  Toggle help",
         "Esc  Close help",
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_lists_all_six_screen_mappings() {
+    fn overlay_lists_all_seven_screen_mappings() {
         let text = shown_help();
         for mapping in [
             "1 Dashboard",
@@ -133,7 +134,8 @@ mod tests {
             "3 Fans",
             "4 Battery",
             "5 Devices",
-            "6 Diagnostics",
+            "6 Profiles",
+            "7 Diagnostics",
         ] {
             assert!(text.contains(mapping), "{mapping:?} missing");
         }
@@ -183,8 +185,8 @@ mod tests {
     }
 
     #[test]
-    fn overlay_advertises_no_profiles() {
-        assert!(!shown_help().contains("Profiles"));
+    fn overlay_lists_profiles_mapping() {
+        assert!(shown_help().contains("6 Profiles"));
     }
 
     #[test]

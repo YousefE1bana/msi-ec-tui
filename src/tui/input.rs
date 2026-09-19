@@ -29,7 +29,7 @@ pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
         KeyCode::Char('h' | 'k') if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
         KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::HideHelp),
-        KeyCode::Char(digit @ '1'..='6') if key.modifiers.is_empty() => {
+        KeyCode::Char(digit @ '1'..='7') if key.modifiers.is_empty() => {
             Some(AppAction::GoTo(screen_for_digit(digit)))
         }
         _ => None,
@@ -49,6 +49,7 @@ fn screen_for_digit(digit: char) -> Screen {
         '3' => Screen::Fans,
         '4' => Screen::Battery,
         '5' => Screen::Devices,
+        '6' => Screen::Profiles,
         _ => Screen::Diagnostics,
     }
 }
@@ -149,7 +150,8 @@ mod tests {
             ('3', Screen::Fans),
             ('4', Screen::Battery),
             ('5', Screen::Devices),
-            ('6', Screen::Diagnostics),
+            ('6', Screen::Profiles),
+            ('7', Screen::Diagnostics),
         ];
         for (digit, screen) in cases {
             assert_eq!(
@@ -157,6 +159,44 @@ mod tests {
                 Some(AppAction::GoTo(screen)),
                 "digit {digit} must jump to {}",
                 screen.title(),
+            );
+        }
+    }
+
+    #[test]
+    fn digit_eight_is_unmapped() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Char('8'), KeyModifiers::empty())),
+            None
+        );
+    }
+
+    #[test]
+    fn palette_key_stays_reserved_unmapped() {
+        // P is reserved for the future Command Palette, never Profiles.
+        for (code, modifiers) in [
+            (KeyCode::Char('p'), KeyModifiers::empty()),
+            (KeyCode::Char('P'), KeyModifiers::empty()),
+            (
+                KeyCode::Char('P'),
+                KeyModifiers::empty().union(KeyModifiers::SHIFT),
+            ),
+        ] {
+            assert_eq!(
+                action_for_key(press(code, modifiers)),
+                None,
+                "{code:?} must remain unmapped",
+            );
+        }
+    }
+
+    #[test]
+    fn digit_release_events_do_nothing() {
+        for digit in ['1', '6', '7'] {
+            assert_eq!(
+                action_for_key(release(KeyCode::Char(digit), KeyModifiers::empty())),
+                None,
+                "{digit} release must be ignored",
             );
         }
     }
@@ -207,10 +247,24 @@ mod tests {
 
     #[test]
     fn alt_digit_does_not_jump() {
-        assert_eq!(
-            action_for_key(press(KeyCode::Char('1'), KeyModifiers::ALT)),
-            None
-        );
+        for digit in ['1', '6', '7'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(digit), KeyModifiers::ALT)),
+                None,
+                "Alt+{digit} must not navigate",
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_digit_does_not_jump() {
+        for digit in ['1', '6', '7'] {
+            assert_eq!(
+                action_for_key(press(KeyCode::Char(digit), KeyModifiers::CONTROL)),
+                None,
+                "Ctrl+{digit} must not navigate",
+            );
+        }
     }
 
     #[test]

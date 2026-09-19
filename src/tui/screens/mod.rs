@@ -11,6 +11,7 @@ pub(crate) mod devices;
 pub(crate) mod diagnostics;
 pub(crate) mod fans;
 pub(crate) mod performance;
+pub(crate) mod profiles;
 #[cfg(test)]
 pub(crate) mod support;
 
@@ -20,6 +21,7 @@ pub use devices::render_devices;
 pub use diagnostics::render_diagnostics;
 pub use fans::render_fans;
 pub use performance::render_performance;
+pub use profiles::render_profiles;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -98,6 +100,9 @@ fn render_active_screen<B: EcBackend>(
         Screen::Devices => {
             devices::render_devices_with_theme(frame, area, live, capabilities, theme);
         }
+        Screen::Profiles => {
+            profiles::render_profiles_with_theme(frame, area, live, capabilities, theme);
+        }
         Screen::Diagnostics => {
             diagnostics::render_diagnostics_with_theme(frame, area, live, capabilities, theme);
         }
@@ -137,6 +142,7 @@ fn short_title(screen: Screen) -> &'static str {
         Screen::Fans => "Fans",
         Screen::Battery => "Batt",
         Screen::Devices => "Dev",
+        Screen::Profiles => "Prof",
         Screen::Diagnostics => "Diag",
     }
 }
@@ -172,7 +178,7 @@ fn narrow_navigation_line(app: &AppState, theme: &Theme) -> Line<'static> {
         .expect("current screen is a member of ALL");
     Line::from(vec![
         Span::styled(
-            format!("{}/6 {}", position + 1, app.current_screen().title()),
+            format!("{}/7 {}", position + 1, app.current_screen().title()),
             navigation_entry_style(true, theme),
         ),
         Span::styled(" • ? Help • Q Quit", navigation_entry_style(false, theme)),
@@ -192,7 +198,7 @@ mod tests {
     };
     use super::{
         render_battery, render_devices, render_diagnostics, render_fans, render_performance,
-        render_screen, render_screen_with_theme,
+        render_profiles, render_screen, render_screen_with_theme,
     };
     use crate::tui::theme::Theme;
 
@@ -242,7 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn navigation_renders_all_six_screen_names() {
+    fn profiles_dispatch_renders_profiles() {
+        let text = dispatched(Screen::Profiles);
+        assert!(text.contains("BUILT-IN PROFILES"));
+        assert!(text.contains("6 Profiles"));
+    }
+
+    #[test]
+    fn navigation_renders_all_seven_screen_names() {
         let text = dispatched(Screen::Dashboard);
         for name in [
             "Dashboard",
@@ -250,6 +263,7 @@ mod tests {
             "Fans",
             "Battery",
             "Devices",
+            "Profiles",
             "Diagnostics",
         ] {
             assert!(text.contains(name), "{name:?} missing from navigation");
@@ -259,14 +273,9 @@ mod tests {
     #[test]
     fn navigation_renders_digits() {
         let text = dispatched(Screen::Dashboard);
-        for digit in ["1", "2", "3", "4", "5", "6"] {
+        for digit in ["1", "2", "3", "4", "5", "6", "7"] {
             assert!(text.contains(digit), "{digit:?} missing from navigation");
         }
-    }
-
-    #[test]
-    fn navigation_advertises_no_profiles() {
-        assert!(!dispatched(Screen::Dashboard).contains("Profiles"));
     }
 
     #[test]
@@ -279,7 +288,8 @@ mod tests {
             "3 Fans",
             "4 Battery",
             "5 Devices",
-            "6 Diagnostics",
+            "6 Profiles",
+            "7 Diagnostics",
         ] {
             positions.push(text.find(name).expect("{name:?} missing"));
         }
@@ -319,6 +329,20 @@ mod tests {
     }
 
     #[test]
+    fn goto_profiles_marks_profiles_entry_active() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Profiles);
+        let theme = Theme::default();
+        let (foreground, modifier) = first_cell_style(100, 30, "6 Profiles", |frame| {
+            render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
+        })
+        .expect("profiles entry present");
+        assert_eq!(foreground, theme.primary);
+        assert!(modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn only_one_entry_is_styled_active() {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
@@ -331,7 +355,8 @@ mod tests {
             "3 Fans",
             "4 Battery",
             "5 Devices",
-            "6 Diagnostics",
+            "6 Profiles",
+            "7 Diagnostics",
         ] {
             let (foreground, _) = first_cell_style(100, 30, label, |frame| {
                 render_screen_with_theme(frame, frame.area(), &app, &live, &capabilities, &theme);
@@ -505,6 +530,9 @@ mod tests {
         });
         let _ = screen_text(100, 30, |frame| {
             render_devices(frame, frame.area(), &live, &capabilities);
+        });
+        let _ = screen_text(100, 30, |frame| {
+            render_profiles(frame, frame.area(), &live, &capabilities);
         });
         let _ = screen_text(100, 30, |frame| {
             render_diagnostics(frame, frame.area(), &live, &capabilities);
