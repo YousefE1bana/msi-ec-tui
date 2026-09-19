@@ -354,8 +354,8 @@ mod tests {
     }
 
     #[test]
-    fn package_version_is_v04() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.4.0");
+    fn package_version_is_v05() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.0");
     }
 
     struct LoopBackend {
