@@ -619,3 +619,97 @@ fn control_characters_in_custom_profile_fail_without_escape_output() {
         b"off\n"
     );
 }
+
+#[test]
+fn show_quotes_special_mode_as_valid_toml() {
+    let sys = tempdir().unwrap();
+    cooler_root(sys.path());
+    let config = tempdir().unwrap();
+    custom_profile(
+        config.path(),
+        "odd",
+        b"name = \"Odd\"\n\n[performance]\nfan_mode = \"a/b\"\n",
+    );
+    let sys_arg = sys.path().to_string_lossy().to_string();
+    let output = mec()
+        .env("XDG_CONFIG_HOME", config.path())
+        .args(["--sys-root", &sys_arg, "profile", "show", "odd"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("fan_mode = \"a/b\""));
+    // The settings portion parses as TOML with the exact value preserved.
+    #[derive(serde::Deserialize)]
+    struct Document {
+        performance: Section,
+    }
+    #[derive(serde::Deserialize)]
+    struct Section {
+        fan_mode: Option<String>,
+    }
+    let start = stdout
+        .find("[performance]")
+        .expect("show must render a section");
+    let document: Document = toml::from_str(&stdout[start..]).expect("settings must parse");
+    assert_eq!(document.performance.fan_mode.as_deref(), Some("a/b"));
+    // Read-only: no hardware write occurred.
+    assert_eq!(
+        fs::read(sys.path().join("sys/devices/platform/msi-ec/cooler_boost")).unwrap(),
+        b"off\n"
+    );
+}
+
+#[test]
+fn show_leaves_shell_looking_mode_inert() {
+    let sys = tempdir().unwrap();
+    cooler_root(sys.path());
+    let config = tempdir().unwrap();
+    custom_profile(
+        config.path(),
+        "tricky",
+        b"name = \"Tricky\"\n\n[performance]\nfan_mode = \"$(id)\"\n",
+    );
+    let sys_arg = sys.path().to_string_lossy().to_string();
+    let output = mec()
+        .env("XDG_CONFIG_HOME", config.path())
+        .args(["--sys-root", &sys_arg, "profile", "show", "tricky"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("fan_mode = \"$(id)\""));
+}
+
+#[test]
+fn apply_unadvertised_mode_reports_actionable_reason() {
+    let sys = tempdir().unwrap();
+    msi_identity(sys.path());
+    let target = sys.path().join("sys/devices/platform/msi-ec/cooler_boost");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"off\n").unwrap();
+    let config = tempdir().unwrap();
+    custom_profile(
+        config.path(),
+        "odd",
+        b"name = \"Odd\"\n\n[performance]\nfan_mode = \"turbo\"\n",
+    );
+    let sys_arg = sys.path().to_string_lossy().to_string();
+    let output = mec()
+        .env("XDG_CONFIG_HOME", config.path())
+        .args(["--sys-root", &sys_arg, "profile", "apply", "odd"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("MEC profile failed:"));
+    assert!(stderr.contains("fan mode not advertised: turbo"));
+    // Reasons follow the prefix rather than ending at it.
+    assert!(stderr.contains("preview rejected:"));
+    assert!(
+        !sys.path()
+            .join("sys/devices/platform/msi-ec/fan_mode")
+            .exists()
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"off\n");
+}

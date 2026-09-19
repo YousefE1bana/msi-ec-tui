@@ -136,8 +136,18 @@ pub fn render_list_text(custom_slugs: &[CustomProfileSlug]) -> String {
     output
 }
 
+/// Serializes one mode value as a TOML string through the `toml` crate
+/// itself — never ad-hoc escaping — so syntactically valid future modes
+/// containing ordinary punctuation (`a/b`, `$(id)`, quotes, backslashes)
+/// round-trip exactly. Control characters can never reach this point:
+/// the mode domain rejects them at construction/parsing time.
+fn toml_string(value: &str) -> String {
+    toml::Value::String(value.to_owned()).to_string()
+}
+
 /// Renders the deterministic `profile show` view. Only fields present in
 /// the profile are printed; battery renders the end threshold only.
+/// Modes render as quoted TOML strings; booleans and integers stay native.
 pub fn render_show_text(slug: &str, source: ProfileSource, profile: &Profile) -> String {
     let mut output = format!(
         "Profile: {}\nSource: {}\nSlug: {slug}\n",
@@ -149,11 +159,11 @@ pub fn render_show_text(slug: &str, source: ProfileSource, profile: &Profile) ->
     let mut block = String::from("[performance]\n");
     let mut has_performance = false;
     if let Some(mode) = performance.shift_mode() {
-        block.push_str(&format!("shift_mode = {mode}\n"));
+        block.push_str(&format!("shift_mode = {}\n", toml_string(mode.as_str())));
         has_performance = true;
     }
     if let Some(mode) = performance.fan_mode() {
-        block.push_str(&format!("fan_mode = {mode}\n"));
+        block.push_str(&format!("fan_mode = {}\n", toml_string(mode.as_str())));
         has_performance = true;
     }
     if let Some(value) = performance.cooler_boost() {
@@ -288,7 +298,7 @@ mod tests {
         let text = render_show_text("work", ProfileSource::Custom, &profile);
         assert_eq!(
             text,
-            "Profile: Work\nSource: custom\nSlug: work\n\n[performance]\nfan_mode = silent\n"
+            "Profile: Work\nSource: custom\nSlug: work\n\n[performance]\nfan_mode = \"silent\"\n"
         );
     }
 
@@ -318,6 +328,93 @@ mod tests {
             .unwrap();
         let text = render_show_text("work", ProfileSource::Custom, &profile);
         assert!(text.starts_with("Profile: My Work\n"));
+    }
+
+    /// Parses the TOML settings portion of show output (everything from
+    /// the first section header) back into plain strings.
+    fn shown_modes(text: &str) -> (Option<String>, Option<String>) {
+        #[derive(serde::Deserialize)]
+        struct Document {
+            #[serde(default)]
+            performance: Section,
+        }
+
+        #[derive(Default, serde::Deserialize)]
+        struct Section {
+            #[serde(default)]
+            shift_mode: Option<String>,
+            #[serde(default)]
+            fan_mode: Option<String>,
+        }
+
+        let start = text.find('[').expect("show output must render sections");
+        let document: Document =
+            toml::from_str(&text[start..]).expect("settings must be valid TOML");
+        (
+            document.performance.shift_mode,
+            document.performance.fan_mode,
+        )
+    }
+
+    #[test]
+    fn show_quotes_ordinary_modes() {
+        let profile: Profile =
+            "name = \"A\"\n\n[performance]\nshift_mode = \"turbo\"\nfan_mode = \"silent\"\n"
+                .parse()
+                .unwrap();
+        let text = render_show_text("a", ProfileSource::Custom, &profile);
+        assert!(text.contains("shift_mode = \"turbo\"\n"));
+        assert!(text.contains("fan_mode = \"silent\"\n"));
+        assert_eq!(
+            shown_modes(&text),
+            (Some("turbo".to_owned()), Some("silent".to_owned()))
+        );
+    }
+
+    #[test]
+    fn show_round_trips_punctuated_modes() {
+        for mode in [
+            "a/b",
+            "$(id)",
+            "foo#bar",
+            "a=b",
+            "a\"b",
+            "a\\b",
+            "future-mode",
+            "vendor_mode_2",
+            "türbo",
+        ] {
+            let input = format!(
+                "name = \"A\"\n\n[performance]\nfan_mode = {toml}\n",
+                toml = toml::Value::String(mode.to_owned())
+            );
+            let profile: Profile = input.parse().expect("special mode must parse");
+            let text = render_show_text("a", ProfileSource::Custom, &profile);
+            let (_, fan) = shown_modes(&text);
+            assert_eq!(fan.as_deref(), Some(mode), "mode {mode:?} must round-trip");
+            let input = format!(
+                "name = \"A\"\n\n[performance]\nshift_mode = {toml}\n",
+                toml = toml::Value::String(mode.to_owned())
+            );
+            let profile: Profile = input.parse().expect("special mode must parse");
+            let text = render_show_text("a", ProfileSource::Custom, &profile);
+            let (shift, _) = shown_modes(&text);
+            assert_eq!(
+                shift.as_deref(),
+                Some(mode),
+                "mode {mode:?} must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn show_never_renders_raw_control_modes() {
+        // Fix A regression: control characters are rejected at the domain
+        // boundary, so no renderer input can ever carry them.
+        for mode in ["au\x1bto", "au\tto", "eco\x7f"] {
+            assert!(FanMode::try_from(mode).is_err());
+            assert!(ShiftMode::try_from(mode).is_err());
+        }
     }
 
     #[test]

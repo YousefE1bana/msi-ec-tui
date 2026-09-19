@@ -198,8 +198,9 @@ pub enum ProfileApplyError {
     /// The fresh rollback-baseline snapshot could not be read.
     #[error("profile apply failed reading current state: {0}")]
     Snapshot(#[from] BackendError),
-    /// Fresh preview rejected commands; nothing was written.
-    #[error("profile apply failed: preview rejected")]
+    /// Fresh preview rejected commands; nothing was written. The typed
+    /// reasons render deterministically in preview order.
+    #[error("profile apply failed: preview rejected{errors}", errors = ValidationErrorsDisplay(.0))]
     PreviewRejected(Vec<CommandValidationError>),
     /// Fresh transaction planning failed; nothing was written.
     #[error("profile apply planning failed: {0}")]
@@ -274,6 +275,30 @@ pub struct ProfileApplyFailure {
     source: CommandExecutionError,
     applied_before_failure: Vec<HardwareCommand>,
     rollback_attempts: Vec<RollbackAttempt>,
+}
+
+/// Renders stored preview validation errors deterministically: every
+/// reason in original preview order, joined with `"; "`, using each
+/// error's own `Display` — never `Debug`. Empty renders as nothing, so the
+/// rejection prefix never dangles.
+struct ValidationErrorsDisplay<'a>(&'a [CommandValidationError]);
+
+impl fmt::Display for ValidationErrorsDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        f.write_str(": ")?;
+        let mut first = true;
+        for error in self.0 {
+            if !first {
+                f.write_str("; ")?;
+            }
+            first = false;
+            write!(f, "{error}")?;
+        }
+        Ok(())
+    }
 }
 
 /// A rollback baseline that fails preparation-time policy: the exact
@@ -1827,12 +1852,83 @@ mod tests {
     fn error_display_is_stable_and_human_readable() {
         assert_eq!(
             ProfileApplyError::PreviewRejected(vec![CommandValidationError::ReadOnly]).to_string(),
-            "profile apply failed: preview rejected"
+            "profile apply failed: preview rejected: hardware command rejected while MEC is read-only"
         );
         assert_eq!(
             ProfileApplyError::Snapshot(crate::hardware::BackendError::Unavailable).to_string(),
             "profile apply failed reading current state: hardware backend is unavailable"
         );
+    }
+
+    #[test]
+    fn preview_rejection_names_unadvertised_fan_mode() {
+        let error =
+            ProfileApplyError::PreviewRejected(vec![CommandValidationError::FanModeNotAdvertised(
+                fan("turbo"),
+            )]);
+        assert_eq!(
+            error.to_string(),
+            "profile apply failed: preview rejected: fan mode not advertised: turbo"
+        );
+    }
+
+    #[test]
+    fn preview_rejection_names_unsupported_capability() {
+        let error = ProfileApplyError::PreviewRejected(vec![
+            CommandValidationError::UnsupportedCapability("cooler boost"),
+        ]);
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported capability: cooler boost"),
+            "unexpected display: {error}"
+        );
+    }
+
+    #[test]
+    fn preview_rejection_reports_backlight_levels() {
+        let error = ProfileApplyError::PreviewRejected(vec![
+            CommandValidationError::BacklightAboveMaximum { level: 4, max: 3 },
+        ]);
+        let text = error.to_string();
+        assert!(text.contains('4'), "requested level missing: {text}");
+        assert!(text.contains('3'), "maximum missing: {text}");
+    }
+
+    #[test]
+    fn preview_rejection_preserves_order_with_stable_separator() {
+        let errors = vec![
+            CommandValidationError::UnsupportedCapability("cooler boost"),
+            CommandValidationError::FanModeNotAdvertised(fan("turbo")),
+            CommandValidationError::BacklightAboveMaximum { level: 4, max: 3 },
+        ];
+        let error = ProfileApplyError::PreviewRejected(errors);
+        assert_eq!(
+            error.to_string(),
+            "profile apply failed: preview rejected: unsupported capability: cooler boost; \
+             fan mode not advertised: turbo; keyboard backlight level 4 exceeds device maximum 3"
+        );
+    }
+
+    #[test]
+    fn preview_rejection_keeps_typed_vec_inspectable() {
+        let errors = vec![
+            CommandValidationError::UnsupportedCapability("cooler boost"),
+            CommandValidationError::FanModeNotAdvertised(fan("turbo")),
+        ];
+        let error = ProfileApplyError::PreviewRejected(errors);
+        let ProfileApplyError::PreviewRejected(stored) = &error else {
+            panic!("expected preview rejection, got {error:?}");
+        };
+        assert!(matches!(
+            stored.as_slice(),
+            [
+                CommandValidationError::UnsupportedCapability("cooler boost"),
+                CommandValidationError::FanModeNotAdvertised(_),
+            ]
+        ));
+        // User-facing text uses Display, never Debug-list formatting.
+        assert!(!error.to_string().contains('['));
     }
 
     /// Non-blocking probe used only to observe lock state deterministically:
