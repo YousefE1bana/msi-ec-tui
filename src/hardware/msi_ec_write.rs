@@ -65,7 +65,7 @@ where
         let actual = self
             .reader
             .read_string(&target)
-            .map_err(|error| map_read_error(error, field))?;
+            .map_err(|error| map_post_write_read_error(error, field))?;
         if actual == expected {
             Ok(())
         } else {
@@ -90,11 +90,11 @@ where
         let start = self
             .reader
             .read_u8(&entry.join("charge_control_start_threshold"))
-            .map_err(|error| map_read_error(error, FIELD))?;
+            .map_err(|error| map_post_write_read_error(error, FIELD))?;
         let end = self
             .reader
             .read_u8(&end_target)
-            .map_err(|error| map_read_error(error, FIELD))?;
+            .map_err(|error| map_post_write_read_error(error, FIELD))?;
         if start == threshold.start_percent() && end == threshold.end_percent() {
             Ok(())
         } else {
@@ -121,11 +121,11 @@ where
             let start_present = self
                 .reader
                 .exists(&entry.join("charge_control_start_threshold"))
-                .map_err(|error| map_read_error(error, FIELD))?;
+                .map_err(|error| map_discovery_error(error, FIELD))?;
             let end_present = self
                 .reader
                 .exists(&entry.join("charge_control_end_threshold"))
-                .map_err(|error| map_read_error(error, FIELD))?;
+                .map_err(|error| map_discovery_error(error, FIELD))?;
             match (start_present, end_present) {
                 (true, true) => return Ok(entry.clone()),
                 (false, false) => {}
@@ -153,7 +153,7 @@ where
                 let actual = self
                     .reader
                     .read_string(&target)
-                    .map_err(|error| map_read_error(error, FIELD))?;
+                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
                 if actual == mode.as_str() {
                     Ok(())
                 } else {
@@ -167,7 +167,7 @@ where
                 let actual = self
                     .reader
                     .read_string(&target)
-                    .map_err(|error| map_read_error(error, FIELD))?;
+                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
                 if actual == mode.as_str() {
                     Ok(())
                 } else {
@@ -195,7 +195,7 @@ where
                 let actual = self
                     .reader
                     .read_u8(&target)
-                    .map_err(|error| map_read_error(error, FIELD))?;
+                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
                 if actual == *level {
                     Ok(())
                 } else {
@@ -209,6 +209,9 @@ where
 
 /// Writes `payload` into an already-existing node. Never creates a missing
 /// node, never appends. The handle drops on return, before any readback.
+/// Opening uses truncate, so once the open succeeds the target may already
+/// be affected: only open failures are pre-write; write failures after a
+/// successful open are classified as may-have-mutated.
 fn write_existing_text(
     target: &Path,
     payload: &str,
@@ -219,14 +222,15 @@ fn write_existing_text(
         .truncate(true)
         .create(false)
         .open(target)
-        .map_err(|error| map_write_error(error, field))?;
+        .map_err(|error| map_open_error(error, field))?;
     file.write_all(payload.as_bytes())
-        .map_err(|error| map_write_error(error, field))?;
+        .map_err(|error| map_post_open_write_error(error, field))?;
     Ok(())
 }
 
-/// Maps direct write/open failures without leaking paths.
-fn map_write_error(error: std::io::Error, field: &'static str) -> WriteBoundaryError {
+/// Maps target-open failures: no write-capable handle existed, so nothing
+/// could have mutated. Never leaks paths.
+fn map_open_error(error: std::io::Error, field: &'static str) -> WriteBoundaryError {
     match error.kind() {
         std::io::ErrorKind::NotFound => WriteBoundaryError::Unavailable,
         std::io::ErrorKind::PermissionDenied => WriteBoundaryError::AccessDenied,
@@ -234,12 +238,43 @@ fn map_write_error(error: std::io::Error, field: &'static str) -> WriteBoundaryE
     }
 }
 
-/// Maps readback failures without leaking paths.
-fn map_read_error(error: SysfsError, field: &'static str) -> WriteBoundaryError {
+/// Maps failures writing through an already-opened handle: truncate may
+/// already have taken effect, so mutation cannot be ruled out whatever the
+/// I/O kind. Never leaks paths.
+fn map_post_open_write_error(error: std::io::Error, field: &'static str) -> WriteBoundaryError {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            WriteBoundaryError::WriteFailed(format!("{field} write target vanished"))
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            WriteBoundaryError::WriteFailed(format!("{field} write access denied"))
+        }
+        _ => WriteBoundaryError::WriteFailed(format!("{field} write")),
+    }
+}
+
+/// Maps target/entry discovery failures: they occur before any
+/// write-capable handle exists. Never leaks paths.
+fn map_discovery_error(error: SysfsError, field: &'static str) -> WriteBoundaryError {
     match error {
         SysfsError::NotFound(_) => WriteBoundaryError::Unavailable,
         SysfsError::PermissionDenied(_) => WriteBoundaryError::AccessDenied,
         _ => WriteBoundaryError::ExecutionFailed(format!("{field} readback")),
+    }
+}
+
+/// Maps readback failures after a write was attempted: the target was
+/// already opened for writing, so mutation cannot be ruled out whatever
+/// the read failure kind. Never leaks paths.
+fn map_post_write_read_error(error: SysfsError, field: &'static str) -> WriteBoundaryError {
+    match error {
+        SysfsError::NotFound(_) => {
+            WriteBoundaryError::WriteFailed(format!("{field} readback missing"))
+        }
+        SysfsError::PermissionDenied(_) => {
+            WriteBoundaryError::WriteFailed(format!("{field} readback access denied"))
+        }
+        _ => WriteBoundaryError::WriteFailed(format!("{field} readback")),
     }
 }
 
@@ -721,65 +756,102 @@ mod tests {
     }
 
     #[test]
-    fn write_permission_denied_maps_to_access_denied() {
+    fn open_permission_denied_maps_to_access_denied() {
         // No chmod/UID dependence: the mapper is unit-tested with a
         // synthetic permission error.
-        let error = map_write_error(
+        let error = map_open_error(
             std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test-denied"),
             "fan mode",
         );
         assert_eq!(error, WriteBoundaryError::AccessDenied);
+        assert!(!error.may_have_mutated());
     }
 
     #[test]
-    fn write_not_found_maps_to_unavailable() {
-        let error = map_write_error(
+    fn open_not_found_maps_to_unavailable() {
+        let error = map_open_error(
             std::io::Error::new(std::io::ErrorKind::NotFound, "test-missing"),
             "fan mode",
         );
         assert_eq!(error, WriteBoundaryError::Unavailable);
+        assert!(!error.may_have_mutated());
     }
 
     #[test]
-    fn write_generic_failure_maps_without_path() {
-        let error = map_write_error(std::io::Error::other("test-boom"), "fan mode");
+    fn open_generic_failure_maps_without_path() {
+        let error = map_open_error(std::io::Error::other("test-boom"), "fan mode");
         assert_eq!(
             error,
             WriteBoundaryError::ExecutionFailed("fan mode write".to_owned())
         );
         assert_eq!(error.to_string(), "hardware write failed: fan mode write");
+        assert!(!error.may_have_mutated());
     }
 
     #[test]
-    fn readback_permission_denied_maps_to_access_denied() {
+    fn post_open_write_failure_reports_may_have_mutated() {
+        // The open already succeeded, so truncate may have taken effect:
+        // every kind maps to a may-have-mutated error without paths.
+        for (kind, message) in [
+            (
+                std::io::ErrorKind::NotFound,
+                "fan mode write target vanished",
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                "fan mode write access denied",
+            ),
+        ] {
+            let error = map_post_open_write_error(std::io::Error::new(kind, "test"), "fan mode");
+            assert_eq!(error, WriteBoundaryError::WriteFailed(message.to_owned()));
+            assert!(error.may_have_mutated());
+        }
+        let error = map_post_open_write_error(std::io::Error::other("test-boom"), "fan mode");
+        assert_eq!(
+            error,
+            WriteBoundaryError::WriteFailed("fan mode write".to_owned())
+        );
+        assert!(error.may_have_mutated());
+    }
+
+    #[test]
+    fn readback_denied_reports_may_have_mutated() {
+        // The write was already attempted before readback, so a denied
+        // readback cannot prove the hardware is untouched.
         let fixture = Fixture::new();
         fixture.ec_file("fan_mode", b"silent\n");
         let mut reads = ControlledReads::plain(LinuxSysfsReader);
         reads.read_failure = Some(ReadFailure::Denied);
+        let error = fixture
+            .controlled(reads)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")))
+            .expect_err("denied readback must fail closed");
         assert_eq!(
-            fixture
-                .controlled(reads)
-                .execute(&HardwareCommand::SetFanMode(fan("auto"))),
-            Err(WriteBoundaryError::AccessDenied)
+            error,
+            WriteBoundaryError::WriteFailed("fan mode readback access denied".to_owned())
         );
+        assert!(error.may_have_mutated());
     }
 
     #[test]
-    fn readback_not_found_maps_to_unavailable() {
+    fn readback_missing_reports_may_have_mutated() {
         let fixture = Fixture::new();
         fixture.ec_file("fan_mode", b"silent\n");
         let mut reads = ControlledReads::plain(LinuxSysfsReader);
         reads.read_failure = Some(ReadFailure::Missing);
+        let error = fixture
+            .controlled(reads)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")))
+            .expect_err("missing readback must fail closed");
         assert_eq!(
-            fixture
-                .controlled(reads)
-                .execute(&HardwareCommand::SetFanMode(fan("auto"))),
-            Err(WriteBoundaryError::Unavailable)
+            error,
+            WriteBoundaryError::WriteFailed("fan mode readback missing".to_owned())
         );
+        assert!(error.may_have_mutated());
     }
 
     #[test]
-    fn readback_parse_failure_maps_without_path() {
+    fn readback_parse_failure_reports_may_have_mutated() {
         let fixture = Fixture::new();
         fixture.ec_file("fan_mode", b"silent\n");
         let mut reads = ControlledReads::plain(LinuxSysfsReader);
@@ -790,12 +862,13 @@ mod tests {
             .expect_err("broken readback must fail");
         assert_eq!(
             error,
-            WriteBoundaryError::ExecutionFailed("fan mode readback".to_owned())
+            WriteBoundaryError::WriteFailed("fan mode readback".to_owned())
         );
         assert_eq!(
             error.to_string(),
-            "hardware write failed: fan mode readback"
+            "hardware write failed after target open: fan mode readback"
         );
+        assert!(error.may_have_mutated());
     }
 
     #[test]

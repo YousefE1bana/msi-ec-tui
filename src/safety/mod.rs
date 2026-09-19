@@ -8,5 +8,5 @@ pub use control::{apply_profile, execute_hardware_command};
 pub use executor::{CommandExecutionError, HardwareCommandExecutor};
 pub use profile_transaction::{
     ProfileApplyError, ProfileApplyFailure, ProfileApplyReport, ProfileTransactionExecutor,
-    RollbackAttempt,
+    RollbackAttempt, RollbackPreflight,
 };

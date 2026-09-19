@@ -87,6 +87,23 @@ where
                 unchanged: plan.unchanged().to_vec(),
             });
         }
+        // Rollback preflight: every changed rollback baseline must validate
+        // against the same preparation-time support/capability state before
+        // the first forward boundary crossing. The snapshot may hold a
+        // syntactically valid mode the hardware no longer advertises; fail
+        // closed here with zero boundary calls rather than discovering it
+        // mid-rollback.
+        if let Some(preflight) = plan.steps().iter().find_map(|step| {
+            step.rollback()
+                .validate(&mode, &capabilities)
+                .err()
+                .map(|source| RollbackPreflight {
+                    command: step.rollback().clone(),
+                    source,
+                })
+        }) {
+            return Err(ProfileApplyError::RollbackPreflight(preflight));
+        }
         // Forward execution in plan order; every step goes through the
         // command executor, never directly to the boundary.
         let mut applied = Vec::new();
@@ -168,6 +185,10 @@ pub enum ProfileApplyError {
     /// Fresh transaction planning failed; nothing was written.
     #[error("profile apply planning failed: {0}")]
     Planning(#[from] TransactionPlanError),
+    /// A changed rollback baseline failed preparation-time validation;
+    /// nothing was written.
+    #[error("profile apply failed: rollback preflight rejected: {0}")]
+    RollbackPreflight(RollbackPreflight),
     /// A forward command failed; see the failure for rollback detail.
     #[error("profile apply failed: {0}")]
     Execution(Box<ProfileApplyFailure>),
@@ -181,6 +202,37 @@ pub struct ProfileApplyFailure {
     source: CommandExecutionError,
     applied_before_failure: Vec<HardwareCommand>,
     rollback_attempts: Vec<RollbackAttempt>,
+}
+
+/// A rollback baseline that fails preparation-time policy: the exact
+/// rollback command plus its exact validation error. Returned before any
+/// forward boundary crossing, so nothing was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackPreflight {
+    command: HardwareCommand,
+    source: CommandValidationError,
+}
+
+impl RollbackPreflight {
+    /// The rollback command the preparation-time policy rejected.
+    pub fn command(&self) -> &HardwareCommand {
+        &self.command
+    }
+
+    /// The exact validation error for that rollback command.
+    pub fn source(&self) -> &CommandValidationError {
+        &self.source
+    }
+}
+
+impl fmt::Display for RollbackPreflight {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rollback command {:?} invalid against current capabilities: {}",
+            self.command, self.source
+        )
+    }
 }
 
 /// One rollback attempt and its individual outcome.
@@ -232,6 +284,36 @@ impl ProfileApplyFailure {
     pub fn rollback_attempts(&self) -> &[RollbackAttempt] {
         &self.rollback_attempts
     }
+
+    /// Total rollback attempts made for this failure.
+    pub fn rollback_total(&self) -> usize {
+        self.rollback_attempts.len()
+    }
+
+    /// Rollback attempts that restored their baseline successfully.
+    pub fn rollback_succeeded(&self) -> usize {
+        self.rollback_attempts
+            .iter()
+            .filter(|attempt| attempt.result().is_ok())
+            .count()
+    }
+
+    /// Rollback attempts that failed to restore their baseline.
+    pub fn rollback_failed(&self) -> usize {
+        self.rollback_attempts
+            .iter()
+            .filter(|attempt| attempt.result().is_err())
+            .count()
+    }
+
+    /// True when every rollback attempt succeeded. Vacuously true when no
+    /// rollback was needed, so a zero-attempt pre-write failure never
+    /// implies rollback failed.
+    pub fn is_rollback_complete(&self) -> bool {
+        self.rollback_attempts
+            .iter()
+            .all(|attempt| attempt.result().is_ok())
+    }
 }
 
 impl RollbackAttempt {
@@ -250,20 +332,29 @@ impl fmt::Display for ProfileApplyFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "failed to apply {:?}: {}; {} applied before failure; {} rollback attempts",
+            "failed to apply {:?}: {}; {} applied before failure; {} rollback attempts, {} succeeded, {} failed",
             self.failed_command,
             self.source,
             self.applied_before_failure.len(),
-            self.rollback_attempts.len()
+            self.rollback_total(),
+            self.rollback_succeeded(),
+            self.rollback_failed(),
         )
     }
 }
 
-/// Whether the failed step may have mutated hardware. Only a crossed
-/// write boundary leaves doubt: validation and discovery failures happen
-/// strictly before any crossing. Never inferred from display strings.
+/// Whether the failed step may have mutated hardware, from the boundary's
+/// own typed mutation state. Validation and discovery failures happen
+/// strictly before any crossing; pre-write boundary failures (denied,
+/// unavailable, preparation) provably precede any write-capable handle.
+/// Never inferred from display strings.
 fn failed_step_may_have_mutated(error: &CommandExecutionError) -> bool {
-    matches!(error, CommandExecutionError::Boundary(_))
+    match error {
+        CommandExecutionError::Validation(_) | CommandExecutionError::CapabilityDiscovery(_) => {
+            false
+        }
+        CommandExecutionError::Boundary(boundary) => boundary.may_have_mutated(),
+    }
 }
 
 #[cfg(test)]
@@ -980,30 +1071,72 @@ mod tests {
     }
 
     #[test]
-    fn access_denied_triggers_failed_step_rollback_first() {
-        check_boundary_error_rolls_back_failed_first(WriteBoundaryError::AccessDenied);
+    fn access_denied_skips_failed_step_rollback() {
+        check_pre_write_error_skips_failed_step_rollback(WriteBoundaryError::AccessDenied);
     }
 
     #[test]
-    fn unavailable_triggers_failed_step_rollback_first() {
-        check_boundary_error_rolls_back_failed_first(WriteBoundaryError::Unavailable);
+    fn unavailable_skips_failed_step_rollback() {
+        check_pre_write_error_skips_failed_step_rollback(WriteBoundaryError::Unavailable);
     }
 
     #[test]
-    fn execution_failed_triggers_failed_step_rollback_first() {
-        check_boundary_error_rolls_back_failed_first(WriteBoundaryError::ExecutionFailed(
+    fn preparation_failure_skips_failed_step_rollback() {
+        check_pre_write_error_skips_failed_step_rollback(WriteBoundaryError::ExecutionFailed(
+            "write failed".to_owned(),
+        ));
+    }
+
+    #[test]
+    fn post_open_failure_rolls_back_failed_step_first() {
+        check_post_write_error_rolls_back_failed_first(WriteBoundaryError::WriteFailed(
             "write failed".to_owned(),
         ));
     }
 
     #[test]
     fn verification_failed_triggers_failed_step_rollback_first() {
-        check_boundary_error_rolls_back_failed_first(WriteBoundaryError::VerificationFailed(
+        check_post_write_error_rolls_back_failed_first(WriteBoundaryError::VerificationFailed(
             "cooler boost",
         ));
     }
 
-    fn check_boundary_error_rolls_back_failed_first(boundary_error: WriteBoundaryError) {
+    /// Pre-write failures prove no mutation: the failed step is never
+    /// rolled back, so a single-step apply records zero attempts.
+    fn check_pre_write_error_skips_failed_step_rollback(boundary_error: WriteBoundaryError) {
+        assert!(!boundary_error.may_have_mutated());
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.ec_file("cooler_boost", b"off\n");
+        let boundary = RecordingBoundary::scripted(vec![Err(boundary_error)]);
+        let transaction = fixture.transaction(boundary.clone());
+        let profile =
+            Profile::parse_toml("name = \"A\"\n\n[performance]\ncooler_boost = true\n").unwrap();
+        let error = transaction
+            .apply(&profile)
+            .expect_err("boundary failure must fail the apply");
+        let ProfileApplyError::Execution(failure) = error else {
+            panic!("expected execution failure, got {error:?}");
+        };
+        assert_eq!(
+            failure.failed_command(),
+            &HardwareCommand::SetCoolerBoost(true)
+        );
+        assert!(matches!(
+            failure.source(),
+            CommandExecutionError::Boundary(_)
+        ));
+        assert!(failure.applied_before_failure().is_empty());
+        assert!(failure.rollback_attempts().is_empty());
+        assert!(failure.is_rollback_complete());
+        assert_eq!(failure.rollback_failed(), 0);
+        assert_eq!(boundary.calls(), 1);
+    }
+
+    /// Post-write failures may have mutated: the failed step rolls back
+    /// first, before any earlier steps.
+    fn check_post_write_error_rolls_back_failed_first(boundary_error: WriteBoundaryError) {
+        assert!(boundary_error.may_have_mutated());
         let fixture = Fixture::new();
         fixture.ready_base();
         fixture.ec_file("cooler_boost", b"off\n");
@@ -1032,6 +1165,7 @@ mod tests {
             &HardwareCommand::SetCoolerBoost(false)
         );
         assert!(failure.rollback_attempts()[0].result().is_ok());
+        assert!(failure.is_rollback_complete());
         assert_eq!(
             boundary.recorded(),
             vec![
@@ -1042,11 +1176,71 @@ mod tests {
     }
 
     #[test]
+    fn later_pre_write_failure_rolls_back_only_earlier_in_reverse() {
+        // Steps 1-2 succeed; step 3 fails before mutation. Rollback must
+        // cover exactly the two applied steps in reverse order — never the
+        // failed step this transaction never changed.
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.enable_shift_modes("comfort", &["comfort", "turbo"]);
+        fixture.enable_fan_modes("auto", &["auto", "advanced"]);
+        fixture.ec_file("cooler_boost", b"off\n");
+        let boundary = RecordingBoundary::scripted(vec![
+            Ok(()),
+            Ok(()),
+            Err(WriteBoundaryError::AccessDenied),
+            Ok(()),
+            Ok(()),
+        ]);
+        let transaction = fixture.transaction(boundary.clone());
+        let error = transaction
+            .apply(&Profile::parse_toml(TRIO_TOML).unwrap())
+            .expect_err("pre-write failure must fail the apply");
+        let ProfileApplyError::Execution(failure) = error else {
+            panic!("expected execution failure, got {error:?}");
+        };
+        assert_eq!(
+            failure.failed_command(),
+            &HardwareCommand::SetCoolerBoost(true)
+        );
+        assert_eq!(
+            failure.applied_before_failure(),
+            &[
+                HardwareCommand::SetShiftMode(shift("turbo")),
+                HardwareCommand::SetFanMode(fan("advanced")),
+            ]
+        );
+        let attempts: Vec<&HardwareCommand> = failure
+            .rollback_attempts()
+            .iter()
+            .map(|attempt| attempt.command())
+            .collect();
+        assert_eq!(
+            attempts,
+            vec![
+                &HardwareCommand::SetFanMode(fan("auto")),
+                &HardwareCommand::SetShiftMode(shift("comfort")),
+            ]
+        );
+        assert!(failure.is_rollback_complete());
+        assert_eq!(
+            boundary.recorded(),
+            vec![
+                HardwareCommand::SetShiftMode(shift("turbo")),
+                HardwareCommand::SetFanMode(fan("advanced")),
+                HardwareCommand::SetCoolerBoost(true),
+                HardwareCommand::SetFanMode(fan("auto")),
+                HardwareCommand::SetShiftMode(shift("comfort")),
+            ]
+        );
+    }
+
+    #[test]
     fn rollback_validation_failure_is_recorded() {
         let fixture = Fixture::new();
         fixture.ready_base();
         fixture.ec_file("cooler_boost", b"off\n");
-        let boundary = RecordingBoundary::scripted(vec![Err(WriteBoundaryError::ExecutionFailed(
+        let boundary = RecordingBoundary::scripted(vec![Err(WriteBoundaryError::WriteFailed(
             "boom".to_owned(),
         ))]);
         let reader = VanishAfter {
@@ -1082,7 +1276,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.ready_base();
         fixture.enable_fan_modes("silent", &["auto", "silent"]);
-        let boundary = RecordingBoundary::scripted(vec![Err(WriteBoundaryError::ExecutionFailed(
+        let boundary = RecordingBoundary::scripted(vec![Err(WriteBoundaryError::WriteFailed(
             "boom".to_owned(),
         ))]);
         let reader = FailReadsAfter {
@@ -1115,7 +1309,7 @@ mod tests {
         fixture.ready_base();
         fixture.ec_file("cooler_boost", b"off\n");
         let boundary = RecordingBoundary::scripted(vec![
-            Err(WriteBoundaryError::ExecutionFailed("fwd".to_owned())),
+            Err(WriteBoundaryError::WriteFailed("fwd".to_owned())),
             Err(WriteBoundaryError::Unavailable),
         ]);
         let transaction = fixture.transaction(boundary.clone());
@@ -1141,7 +1335,7 @@ mod tests {
         fixture.ready_base();
         fixture.ec_file("cooler_boost", b"off\n");
         let boundary = RecordingBoundary::scripted(vec![
-            Err(WriteBoundaryError::ExecutionFailed("fwd".to_owned())),
+            Err(WriteBoundaryError::WriteFailed("fwd".to_owned())),
             Err(WriteBoundaryError::VerificationFailed("cooler boost")),
         ]);
         let transaction = fixture.transaction(boundary.clone());
@@ -1171,7 +1365,7 @@ mod tests {
         let boundary = RecordingBoundary::scripted(vec![
             Ok(()),
             Ok(()),
-            Err(WriteBoundaryError::ExecutionFailed("fwd".to_owned())),
+            Err(WriteBoundaryError::WriteFailed("fwd".to_owned())),
             Err(WriteBoundaryError::ExecutionFailed("rb2".to_owned())),
             Ok(()),
             Ok(()),
@@ -1185,7 +1379,7 @@ mod tests {
         };
         assert!(matches!(
             failure.source(),
-            CommandExecutionError::Boundary(WriteBoundaryError::ExecutionFailed(message))
+            CommandExecutionError::Boundary(WriteBoundaryError::WriteFailed(message))
             if message == "fwd"
         ));
         assert_eq!(failure.rollback_attempts().len(), 3);
@@ -1346,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_step_classification() {
+    fn failed_step_classification_uses_typed_mutation_state() {
         assert!(!failed_step_may_have_mutated(
             &CommandExecutionError::Validation(CommandValidationError::ReadOnly)
         ));
@@ -1358,20 +1552,201 @@ mod tests {
                 }
             )
         ));
-        assert!(failed_step_may_have_mutated(
+        // Pre-write boundary failures prove no mutation occurred.
+        assert!(!failed_step_may_have_mutated(
             &CommandExecutionError::Boundary(WriteBoundaryError::AccessDenied)
         ));
-        assert!(failed_step_may_have_mutated(
+        assert!(!failed_step_may_have_mutated(
             &CommandExecutionError::Boundary(WriteBoundaryError::Unavailable)
         ));
-        assert!(failed_step_may_have_mutated(
+        assert!(!failed_step_may_have_mutated(
             &CommandExecutionError::Boundary(WriteBoundaryError::ExecutionFailed(
                 "test".to_owned()
             ))
         ));
+        // Post-open failures may have mutated.
+        assert!(failed_step_may_have_mutated(
+            &CommandExecutionError::Boundary(WriteBoundaryError::WriteFailed("test".to_owned()))
+        ));
         assert!(failed_step_may_have_mutated(
             &CommandExecutionError::Boundary(WriteBoundaryError::VerificationFailed("test"))
         ));
+    }
+
+    #[test]
+    fn rollback_preflight_rejects_unadvertised_fan_baseline() {
+        // Current "legacy" is syntactically valid but not advertised, while
+        // desired "silent" is: preview passes, the snapshot records legacy,
+        // the plan describes the rollback — and preflight fails closed
+        // before any boundary crossing.
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.ec_file("fan_mode", b"legacy\n");
+        fixture.ec_file("available_fan_modes", b"silent\n");
+        let boundary = RecordingBoundary::succeeding();
+        let transaction = fixture.transaction(boundary.clone());
+        let profile =
+            Profile::parse_toml("name = \"A\"\n\n[performance]\nfan_mode = \"silent\"\n").unwrap();
+        let error = transaction
+            .apply(&profile)
+            .expect_err("unadvertised rollback baseline must fail closed");
+        let ProfileApplyError::RollbackPreflight(preflight) = &error else {
+            panic!("expected rollback preflight failure, got {error:?}");
+        };
+        assert_eq!(
+            preflight.command(),
+            &HardwareCommand::SetFanMode(fan("legacy"))
+        );
+        assert_eq!(
+            preflight.source(),
+            &CommandValidationError::FanModeNotAdvertised(fan("legacy"))
+        );
+        assert_eq!(boundary.calls(), 0);
+        assert_eq!(
+            fs::read(fixture.ec_dir().join("fan_mode")).unwrap(),
+            b"legacy\n"
+        );
+    }
+
+    #[test]
+    fn rollback_preflight_rejects_unadvertised_shift_baseline() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.ec_file("shift_mode", b"legacy\n");
+        fixture.ec_file("available_shift_modes", b"eco\n");
+        let boundary = RecordingBoundary::succeeding();
+        let transaction = fixture.transaction(boundary.clone());
+        let profile =
+            Profile::parse_toml("name = \"A\"\n\n[performance]\nshift_mode = \"eco\"\n").unwrap();
+        let error = transaction
+            .apply(&profile)
+            .expect_err("unadvertised rollback baseline must fail closed");
+        let ProfileApplyError::RollbackPreflight(preflight) = &error else {
+            panic!("expected rollback preflight failure, got {error:?}");
+        };
+        assert_eq!(
+            preflight.command(),
+            &HardwareCommand::SetShiftMode(shift("legacy"))
+        );
+        assert_eq!(
+            preflight.source(),
+            &CommandValidationError::ShiftModeNotAdvertised(shift("legacy"))
+        );
+        assert_eq!(boundary.calls(), 0);
+    }
+
+    #[test]
+    fn rollback_preflight_passes_advertised_baseline() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.enable_fan_modes("auto", &["auto", "silent"]);
+        let boundary = RecordingBoundary::succeeding();
+        let transaction = fixture.transaction(boundary.clone());
+        let profile =
+            Profile::parse_toml("name = \"A\"\n\n[performance]\nfan_mode = \"silent\"\n").unwrap();
+        let report = transaction.apply(&profile).expect("apply must succeed");
+        assert_eq!(
+            report.applied(),
+            &[HardwareCommand::SetFanMode(fan("silent"))]
+        );
+        assert_eq!(boundary.calls(), 1);
+    }
+
+    #[test]
+    fn rollback_reporting_counts_agree_with_attempts() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.enable_shift_modes("comfort", &["comfort", "turbo"]);
+        fixture.enable_fan_modes("auto", &["auto", "advanced"]);
+        fixture.ec_file("cooler_boost", b"off\n");
+        let boundary = RecordingBoundary::scripted(vec![
+            Ok(()),
+            Ok(()),
+            Err(WriteBoundaryError::VerificationFailed("cooler boost")),
+            Ok(()),
+            Ok(()),
+            Ok(()),
+        ]);
+        let transaction = fixture.transaction(boundary.clone());
+        let error = transaction
+            .apply(&Profile::parse_toml(TRIO_TOML).unwrap())
+            .expect_err("boundary failure must fail the apply");
+        let ProfileApplyError::Execution(failure) = &error else {
+            panic!("expected execution failure, got {error:?}");
+        };
+        assert_eq!(failure.rollback_total(), 3);
+        assert_eq!(failure.rollback_succeeded(), 3);
+        assert_eq!(failure.rollback_failed(), 0);
+        assert!(failure.is_rollback_complete());
+        assert_eq!(failure.rollback_total(), failure.rollback_attempts().len());
+        assert!(
+            failure
+                .to_string()
+                .contains("3 rollback attempts, 3 succeeded, 0 failed"),
+            "unexpected display: {failure}"
+        );
+    }
+
+    #[test]
+    fn partial_rollback_failure_display_reports_failed_count() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.enable_shift_modes("comfort", &["comfort", "turbo"]);
+        fixture.enable_fan_modes("auto", &["auto", "advanced"]);
+        fixture.ec_file("cooler_boost", b"off\n");
+        let boundary = RecordingBoundary::scripted(vec![
+            Ok(()),
+            Ok(()),
+            Err(WriteBoundaryError::WriteFailed("fwd".to_owned())),
+            Err(WriteBoundaryError::ExecutionFailed("rb2".to_owned())),
+            Ok(()),
+            Ok(()),
+        ]);
+        let transaction = fixture.transaction(boundary.clone());
+        let error = transaction
+            .apply(&Profile::parse_toml(TRIO_TOML).unwrap())
+            .expect_err("forward failure must fail the apply");
+        let ProfileApplyError::Execution(failure) = &error else {
+            panic!("expected execution failure, got {error:?}");
+        };
+        assert_eq!(failure.rollback_total(), 3);
+        assert_eq!(failure.rollback_succeeded(), 2);
+        assert_eq!(failure.rollback_failed(), 1);
+        assert!(!failure.is_rollback_complete());
+        assert!(
+            failure
+                .to_string()
+                .contains("3 rollback attempts, 2 succeeded, 1 failed"),
+            "unexpected display: {failure}"
+        );
+        // The primary forward failure stays authoritative in the text.
+        assert!(failure.to_string().contains("fwd"));
+    }
+
+    #[test]
+    fn zero_attempt_failure_reports_complete_rollback() {
+        let fixture = Fixture::new();
+        fixture.ready_base();
+        fixture.ec_file("cooler_boost", b"off\n");
+        let boundary = RecordingBoundary::scripted(vec![Err(WriteBoundaryError::AccessDenied)]);
+        let transaction = fixture.transaction(boundary.clone());
+        let profile =
+            Profile::parse_toml("name = \"A\"\n\n[performance]\ncooler_boost = true\n").unwrap();
+        let error = transaction
+            .apply(&profile)
+            .expect_err("pre-write failure must fail the apply");
+        let ProfileApplyError::Execution(failure) = &error else {
+            panic!("expected execution failure, got {error:?}");
+        };
+        assert_eq!(failure.rollback_total(), 0);
+        assert_eq!(failure.rollback_failed(), 0);
+        assert!(failure.is_rollback_complete());
+        assert!(
+            failure
+                .to_string()
+                .contains("0 rollback attempts, 0 succeeded, 0 failed"),
+            "unexpected display: {failure}"
+        );
     }
 
     #[test]

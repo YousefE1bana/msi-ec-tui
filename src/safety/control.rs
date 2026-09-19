@@ -449,7 +449,8 @@ mod tests {
     #[test]
     fn unreadable_battery_start_surfaces_typed_boundary_error() {
         // Presence-only discovery advertises the control, but readback
-        // cannot parse the start view, so verification fails closed.
+        // cannot parse the start view after the end limit was already
+        // written, so the failure reports may-have-mutated.
         let fixture = Fixture::new();
         fixture.ready_base();
         let entry = fixture.root.path().join("sys/class/power_supply/BAT0");
@@ -464,10 +465,14 @@ mod tests {
         assert!(
             matches!(
                 error,
-                CommandExecutionError::Boundary(WriteBoundaryError::ExecutionFailed(_))
+                CommandExecutionError::Boundary(WriteBoundaryError::WriteFailed(_))
             ),
             "unexpected error: {error:?}"
         );
+        assert!(matches!(
+            error,
+            CommandExecutionError::Boundary(error) if error.may_have_mutated()
+        ));
     }
 
     #[test]

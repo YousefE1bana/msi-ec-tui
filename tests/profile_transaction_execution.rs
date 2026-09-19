@@ -177,7 +177,7 @@ fn rollback_continues_after_rollback_failure() {
     let boundary = RecordingBoundary::scripted(vec![
         Ok(()),
         Ok(()),
-        Err(WriteBoundaryError::ExecutionFailed("fwd".to_owned())),
+        Err(WriteBoundaryError::WriteFailed("fwd".to_owned())),
         Err(WriteBoundaryError::AccessDenied),
         Ok(()),
         Ok(()),
