@@ -34,9 +34,17 @@ fn main() {
                 println!("MEC — MSI EC Control Center");
             }
         }
-        Some(Command::Doctor) => {
-            let report = doctor(SystemPaths::new(cli.sys_root), LinuxSysfsReader);
-            println!("{report}");
+        Some(Command::Doctor { export }) => {
+            if export {
+                let report = mec::diagnostics::compatibility_report(
+                    SystemPaths::new(cli.sys_root),
+                    LinuxSysfsReader,
+                );
+                println!("{report}");
+            } else {
+                let report = doctor(SystemPaths::new(cli.sys_root), LinuxSysfsReader);
+                println!("{report}");
+            }
         }
         Some(Command::Monitor { interval }) => {
             match mec::cli::monitor::run_monitor(

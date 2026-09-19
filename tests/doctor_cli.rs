@@ -240,3 +240,50 @@ fn unreadable_sys_root_reports_unreadable_without_coherence_claim() {
         .stdout(predicates::str::contains("msi-ec interface unreadable"))
         .stdout(predicates::str::contains("[PASS] EC interface coherent").not());
 }
+
+#[test]
+fn export_prints_compatibility_report_only() {
+    mec()
+        .args(["--sys-root", &fixture_arg("gf63"), "doctor", "--export"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MEC Compatibility Report"))
+        .stdout(predicates::str::contains("MEC Doctor").not())
+        .stdout(predicates::str::contains("GF63 Thin 11UC"))
+        .stdout(predicates::str::contains("Mode: READY"));
+}
+
+#[test]
+fn export_read_only_fixture_exits_successfully() {
+    mec()
+        .args([
+            "--sys-root",
+            &fixture_arg("broken-sysfs"),
+            "doctor",
+            "--export",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MEC Compatibility Report"))
+        .stdout(predicates::str::contains("Mode: READ-ONLY"));
+}
+
+#[test]
+fn export_contains_privacy_declaration() {
+    mec()
+        .args(["--sys-root", &fixture_arg("gf63"), "doctor", "--export"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("No serial number collected"))
+        .stdout(predicates::str::contains("RPM").not());
+}
+
+#[test]
+fn plain_doctor_output_unchanged_by_export_flag() {
+    mec()
+        .args(["--sys-root", &fixture_arg("gf63"), "doctor"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("MEC Doctor"))
+        .stdout(predicates::str::contains("MEC Compatibility Report").not());
+}

@@ -212,7 +212,8 @@ fn compact_body<B: EcBackend>(
             lines
         }
         Screen::Diagnostics => {
-            let mut lines = diagnostics_screen::identity_lines(live.device());
+            let mut lines = vec![Line::from("Export: mec doctor --export")];
+            lines.extend(diagnostics_screen::identity_lines(live.device()));
             lines.extend(diagnostics_screen::telemetry_lines(live, theme));
             lines.extend(diagnostics_screen::matrix_lines(capabilities, theme));
             lines
