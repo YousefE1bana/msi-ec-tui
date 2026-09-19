@@ -66,6 +66,10 @@ pub fn render_screen<B: EcBackend>(
 
 /// Theme-aware dispatcher. `render_screen` stays source-compatible for
 /// Task-5 callers while named themes gain an injection seam later.
+///
+/// Layering is deterministic: active/compact screen at the bottom, then the
+/// result notice, then the modal confirmation, then help on top. Tiny skips
+/// confirmation/notice overlays and stays a safe fallback.
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_theme<B: EcBackend>(
     frame: &mut Frame,
@@ -96,6 +100,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 controls,
                 theme,
             );
+            render_overlays(frame, area, live, capabilities, controls, theme);
         }
         LayoutTier::Compact => {
             render_compact_screen(
@@ -109,6 +114,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 controls,
                 theme,
             );
+            render_overlays(frame, area, live, capabilities, controls, theme);
         }
         LayoutTier::Tiny => render_compact(frame, rows[1]),
     }
@@ -168,6 +174,33 @@ fn render_active_screen<B: EcBackend>(
         Screen::Diagnostics => {
             diagnostics::render_diagnostics_with_theme(frame, area, live, capabilities, theme);
         }
+    }
+}
+
+/// Renders notice then confirmation above the screen. Confirmation sits
+/// above notice; help renders last and stays on top. Zero-area safe via
+/// saturating overlay geometry.
+fn render_overlays<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    controls: &crate::tui::editing::ControlState,
+    theme: &Theme,
+) {
+    if let Some(notice) = controls.notice() {
+        crate::tui::confirmation::render_notice(frame, area, notice, theme);
+    }
+    if let Some(pending) = controls.pending() {
+        crate::tui::confirmation::render_confirmation(
+            frame,
+            area,
+            pending,
+            live.current_snapshot(),
+            live.mode(),
+            capabilities,
+            theme,
+        );
     }
 }
 
@@ -764,6 +797,221 @@ mod tests {
                 })
                 .expect("zero-area screen draws");
         }
+    }
+
+    #[test]
+    fn confirmation_overlay_sits_above_command_screen() {
+        use crate::tui::confirmation::PendingMutation;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            Screen::Fans,
+            live.current_snapshot(),
+            &capabilities,
+            live.mode(),
+        ));
+        assert!(controls.confirm(live.mode(), &capabilities));
+        assert!(matches!(
+            controls.pending(),
+            Some(PendingMutation::Command(_))
+        ));
+        let text = screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+            );
+        });
+        assert!(text.contains("Fans"));
+        assert!(text.contains("Confirm Hardware Change"));
+        assert!(text.contains("Requested: Fan Mode:"));
+        assert!(!text.contains("RPM"));
+    }
+
+    #[test]
+    fn confirmation_overlay_sits_above_profile_screen() {
+        use crate::profiles::BuiltinPreset;
+        use crate::profiles::ProfilePlanner;
+        use crate::tui::confirmation::{PendingMutation, ProfilePending, ProfileSource};
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Profiles);
+        let profile = BuiltinPreset::Balanced
+            .resolve(&capabilities)
+            .expect("balanced resolves");
+        assert!(ProfilePlanner::preview(&profile, live.mode(), &capabilities).is_applicable());
+        let mut controls = crate::tui::editing::ControlState::default();
+        controls.set_profile_pending(ProfilePending::new(
+            profile,
+            "balanced".to_owned(),
+            ProfileSource::Builtin,
+        ));
+        assert!(matches!(
+            controls.pending(),
+            Some(PendingMutation::Profile(_))
+        ));
+        let text = screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+            );
+        });
+        assert!(text.contains("Profiles"));
+        assert!(text.contains("Confirm Profile Apply"));
+        assert!(text.contains("Balanced"));
+    }
+
+    #[test]
+    fn zero_area_confirmation_does_not_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            Screen::Fans,
+            live.current_snapshot(),
+            &capabilities,
+            live.mode(),
+        ));
+        assert!(controls.confirm(live.mode(), &capabilities));
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_screen(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &controls,
+                );
+            })
+            .expect("zero-area confirmation draws");
+    }
+
+    #[test]
+    fn tiny_mode_with_pending_remains_safe() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            Screen::Fans,
+            live.current_snapshot(),
+            &capabilities,
+            live.mode(),
+        ));
+        assert!(controls.confirm(live.mode(), &capabilities));
+        let text = screen_text(20, 8, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+            );
+        });
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn help_overlay_takes_precedence_over_confirmation() {
+        use crate::app::AppAction;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let mut app = app_on(Screen::Fans);
+        app.apply(AppAction::ShowHelp);
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            Screen::Fans,
+            live.current_snapshot(),
+            &capabilities,
+            live.mode(),
+        ));
+        assert!(controls.confirm(live.mode(), &capabilities));
+        let text = screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+            );
+        });
+        // Help renders last and stays on top; confirmation still exists below.
+        assert!(text.contains("MEC Help"));
+    }
+
+    #[test]
+    fn success_notice_renders_with_semantic_text() {
+        use crate::tui::confirmation::Notice;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut controls = crate::tui::editing::ControlState::default();
+        controls.set_notice(Notice::success("Applied Fan Mode: silent".to_owned()));
+        let text = screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+            );
+        });
+        assert!(text.contains("Applied Fan Mode: silent"));
+        assert!(text.contains("Result"));
+    }
+
+    #[test]
+    fn failure_notice_renders_display_error() {
+        use crate::tui::confirmation::Notice;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut controls = crate::tui::editing::ControlState::default();
+        controls.set_notice(Notice::failure("Action failed: gone".to_owned()));
+        let text = screen_text(100, 30, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+            );
+        });
+        assert!(text.contains("Action failed: gone"));
     }
 
     #[test]

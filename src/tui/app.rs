@@ -15,8 +15,11 @@ use crate::hardware::{
     MsiEcBackend, SupportEvaluator, SupportMode, SysfsReader, SystemPaths,
 };
 use crate::monitoring::{PollInterval, SnapshotHistory};
+use crate::profiles::ProfilePlanner;
 
+use super::confirmation::{PendingMutation, ProfilePending, ProfileSource};
 use super::editing::{ControlState, is_interactive_screen};
+use super::executor::{SafeTuiExecutor, TuiMutationExecutor};
 use super::profile_catalog::ProfileCatalog;
 use super::{CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen};
 
@@ -51,18 +54,20 @@ pub enum TuiError {
 /// Interactive application state: navigation, live telemetry, the startup
 /// capability set, and the prepared read-only profile catalog. Owns no
 /// terminal or filesystem handles beyond the backend itself.
-pub struct TuiApp<B> {
+pub struct TuiApp<B, E = SafeTuiExecutor> {
     state: AppState,
     live: LiveHardware<B>,
     capabilities: Capabilities,
     profile_catalog: ProfileCatalog,
     profile_selection: ProfileSelection,
     controls: ControlState,
+    executor: E,
 }
 
-impl<B> TuiApp<B>
+impl<B, E> TuiApp<B, E>
 where
     B: EcBackend,
+    E: TuiMutationExecutor,
 {
     /// Navigation state driving screen dispatch and the help overlay.
     pub fn state(&self) -> &AppState {
@@ -101,9 +106,24 @@ where
     }
 
     /// Control editing state: row selections, draft editor, and pending
-    /// data-only command. Task 4 never executes.
+    /// modal confirmation.
     pub fn controls(&self) -> &ControlState {
         &self.controls
+    }
+
+    /// Pending modal confirmation, if any.
+    pub fn pending(&self) -> Option<&PendingMutation> {
+        self.controls.pending()
+    }
+
+    /// Post-attempt result banner, if any.
+    pub fn notice(&self) -> Option<&super::confirmation::Notice> {
+        self.controls.notice()
+    }
+
+    /// Execution adapter (fake in tests).
+    pub fn executor(&self) -> &E {
+        &self.executor
     }
 
     /// Selectable profile rows: five built-ins plus custom entries in
@@ -112,22 +132,39 @@ where
         super::screens::profiles::profile_row_count(&self.profile_catalog)
     }
 
-    /// Contextual action dispatch.
+    /// Contextual action dispatch with confirmed execution.
     ///
+    /// Browsing (no editor, no pending):
     /// - `MoveUp`/`MoveDown` drive profile rows on Profiles, control rows
-    ///   on interactive screens, and fall back to screen navigation
-    ///   elsewhere. While editing they are ignored to preserve the draft.
-    /// - `MoveLeft`/`MoveRight` adjust the open draft while editing and
-    ///   navigate screens otherwise.
-    /// - `Activate` (Enter) begins editing the selected supported control,
-    ///   or accepts the draft into pending data while editing. Profiles
-    ///   stays selection-only until Task 5.
-    /// - `Cancel` (Esc) discards the editor, then pending, and only hides
-    ///   help when neither exists.
-    /// - Screen navigation always clears a stale editor so drafts never
-    ///   follow to another screen; the global pending command is kept.
+    ///   on interactive screens, else screen navigation. While editing they
+    ///   are ignored to preserve the draft.
+    /// - `MoveLeft`/`MoveRight` adjust the draft while editing, else screen
+    ///   navigation. `Tab`/`Shift+Tab` always navigate (clearing an editor).
+    /// - `Activate` begins editing, accepts a draft into a command pending,
+    ///   or opens a profile confirmation when its pure preview is
+    ///   applicable. Opening creates zero executor calls.
+    /// - `Cancel` discards editor then pending, else hides help.
+    ///
+    /// Modal confirmation (pending exists): navigation and new edits are
+    /// blocked; only `Activate` (execute exactly once) or `Cancel`
+    /// (discard, zero calls) apply. After any attempt that reaches the
+    /// executor, live state refreshes once before redraw, on success or
+    /// error. Opening, cancelling, or READ-ONLY rejections never refresh
+    /// and never call the executor. The stored preview is presentation
+    /// only; execution re-evaluates fresh through the safe APIs.
     pub fn handle_action(&mut self, action: crate::app::AppAction) {
         use crate::app::AppAction as A;
+        // Modal confirmation blocks navigation and new edits.
+        if self.controls.has_pending() {
+            match action {
+                A::Activate => self.execute_pending(),
+                A::Cancel => {
+                    self.controls.cancel();
+                }
+                _ => {}
+            }
+            return;
+        }
         let screen = self.state.current_screen();
         match action {
             A::MoveUp if self.controls.is_editing() => {}
@@ -152,11 +189,16 @@ where
             }
             A::Activate if self.controls.is_editing() => {
                 let mode = self.live.mode().clone();
+                self.controls.clear_notice();
                 self.controls.confirm(&mode, &self.capabilities);
             }
-            A::Activate if screen == Screen::Profiles => {}
+            A::Activate if screen == Screen::Profiles => {
+                self.controls.clear_notice();
+                self.open_profile_confirmation();
+            }
             A::Activate if is_interactive_screen(screen) => {
                 let mode = self.live.mode().clone();
+                self.controls.clear_notice();
                 self.controls.begin_edit(
                     screen,
                     self.live.current_snapshot(),
@@ -179,6 +221,102 @@ where
                 self.controls.on_screen_change();
             }
             _ => self.state.apply(action),
+        }
+    }
+
+    /// Opens a profile confirmation only when the pure preview deems the
+    /// retained profile applicable. Unavailable built-ins, invalid customs,
+    /// and READ-ONLY rejections create nothing and call nothing.
+    fn open_profile_confirmation(&mut self) {
+        use super::screens::profiles::ProfileRow;
+        use super::screens::profiles::profile_row;
+        let index = self.profile_selection.index();
+        let mode = self.live.mode().clone();
+        let capabilities = self.capabilities.clone();
+        let Some(row) = profile_row(index, &self.profile_catalog) else {
+            return;
+        };
+        match row {
+            ProfileRow::Builtin(preset) => {
+                let Ok(profile) = preset.resolve(&capabilities) else {
+                    return;
+                };
+                if !ProfilePlanner::preview(&profile, &mode, &capabilities).is_applicable() {
+                    return;
+                }
+                self.controls.set_profile_pending(ProfilePending::new(
+                    profile,
+                    preset.slug().to_owned(),
+                    ProfileSource::Builtin,
+                ));
+            }
+            ProfileRow::Custom(position) => {
+                let Some(entry) = self.profile_catalog.customs().get(position) else {
+                    return;
+                };
+                let Some(profile) = entry.profile() else {
+                    return;
+                };
+                if !ProfilePlanner::preview(profile, &mode, &capabilities).is_applicable() {
+                    return;
+                }
+                self.controls.set_profile_pending(ProfilePending::new(
+                    profile.clone(),
+                    entry.slug().as_str().to_owned(),
+                    ProfileSource::Custom,
+                ));
+            }
+        }
+    }
+
+    /// Executes the pending modal exactly once, clears it before any repeat
+    /// key can re-run it, refreshes live state once, and records a Display
+    /// notice. At most one executor call per confirm.
+    fn execute_pending(&mut self) {
+        let Some(pending) = self.controls.pending().cloned() else {
+            return;
+        };
+        // Clear before refresh/draw so key repeat cannot re-execute.
+        self.controls.cancel();
+        match pending {
+            PendingMutation::Command(command) => {
+                let result = self.executor.execute_command(&command);
+                self.live.refresh();
+                match result {
+                    Ok(()) => {
+                        self.controls
+                            .set_notice(super::confirmation::Notice::success(format!(
+                                "Applied {}",
+                                crate::tui::controls::command_text(&command)
+                            )));
+                    }
+                    Err(error) => {
+                        self.controls
+                            .set_notice(super::confirmation::Notice::failure(format!(
+                                "Action failed: {error}"
+                            )));
+                    }
+                }
+            }
+            PendingMutation::Profile(request) => {
+                let result = self.executor.apply_profile(request.profile());
+                self.live.refresh();
+                match result {
+                    Ok(summary) => {
+                        self.controls
+                            .set_notice(super::confirmation::Notice::success(format!(
+                                "Applied profile {} ({} changed, {} unchanged)",
+                                summary.name, summary.applied, summary.unchanged
+                            )));
+                    }
+                    Err(error) => {
+                        self.controls
+                            .set_notice(super::confirmation::Notice::failure(format!(
+                                "Action failed: {error}"
+                            )));
+                    }
+                }
+            }
         }
     }
 
@@ -232,6 +370,8 @@ fn prepare_tui_with_catalog<R>(
 where
     R: SysfsReader + Clone,
 {
+    // Same root for reads and the production executor by construction.
+    let executor = SafeTuiExecutor::new(paths.clone());
     let mode = SupportEvaluator::new(paths.clone(), reader.clone()).evaluate();
     let backend = MsiEcBackend::new(paths.clone(), reader.clone());
     let device = backend.detect_device()?;
@@ -252,6 +392,7 @@ where
         profile_catalog,
         profile_selection: ProfileSelection::default(),
         controls: ControlState::default(),
+        executor,
     })
 }
 
@@ -265,16 +406,17 @@ pub fn should_launch_tui(stdin_terminal: bool, stdout_terminal: bool) -> bool {
 /// event exactly one refresh+draw on ticks, one draw on actions and
 /// resizes, and nothing on ignored events. Refresh failures degrade;
 /// event and draw errors propagate without extra work.
-pub fn run_tui_loop<B, E, D>(
-    app: &mut TuiApp<B>,
-    events: &mut E,
+pub fn run_tui_loop<B, X, Ev, D>(
+    app: &mut TuiApp<B, X>,
+    events: &mut Ev,
     timeout: Duration,
     mut draw: D,
 ) -> std::io::Result<()>
 where
     B: EcBackend,
-    E: EventSource,
-    D: FnMut(&mut TuiApp<B>) -> std::io::Result<()>,
+    X: TuiMutationExecutor,
+    Ev: EventSource,
+    D: FnMut(&mut TuiApp<B, X>) -> std::io::Result<()>,
 {
     app.refresh();
     draw(app)?;
@@ -287,16 +429,17 @@ where
 /// Applies one runtime event: actions redraw unless quitting, ticks refresh
 /// and redraw, resizes redraw, ignored events rest. Errors propagate with
 /// no extra refresh or redraw.
-fn step_tui_loop<B, E, D>(
-    app: &mut TuiApp<B>,
-    events: &mut E,
+fn step_tui_loop<B, X, Ev, D>(
+    app: &mut TuiApp<B, X>,
+    events: &mut Ev,
     timeout: Duration,
     draw: &mut D,
 ) -> std::io::Result<()>
 where
     B: EcBackend,
-    E: EventSource,
-    D: FnMut(&mut TuiApp<B>) -> std::io::Result<()>,
+    X: TuiMutationExecutor,
+    Ev: EventSource,
+    D: FnMut(&mut TuiApp<B, X>) -> std::io::Result<()>,
 {
     match events.next_event(timeout)? {
         TuiEvent::Action(action) => {
@@ -666,7 +809,7 @@ mod tests {
     fn loop_app(
         script: Vec<Result<HardwareSnapshot, BackendError>>,
         log: Rc<RefCell<Vec<&'static str>>>,
-    ) -> TuiApp<LoopBackend> {
+    ) -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
         TuiApp {
             state: AppState::default(),
             live: LiveHardware::new(
@@ -688,6 +831,7 @@ mod tests {
             profile_catalog: crate::tui::ProfileCatalog::empty(),
             profile_selection: ProfileSelection::default(),
             controls: crate::tui::editing::ControlState::default(),
+            executor: crate::tui::executor::FakeTuiExecutor::new(),
         }
     }
 
@@ -702,11 +846,12 @@ mod tests {
         std::fs::write(store.directory().join(name), contents).expect("profile writes");
     }
 
+    #[allow(clippy::type_complexity)]
     fn run_loop(
         script: Vec<Result<HardwareSnapshot, BackendError>>,
         events: Vec<TuiEvent>,
     ) -> (
-        TuiApp<LoopBackend>,
+        TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor>,
         Rc<RefCell<Vec<&'static str>>>,
         LoopHarness,
         usize,
@@ -1006,7 +1151,7 @@ mod tests {
 
     // ---- Task 3: contextual profile selection dispatch ----
 
-    fn selection_app_on_profiles() -> TuiApp<LoopBackend> {
+    fn selection_app_on_profiles() -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
         let log = Rc::new(RefCell::new(Vec::new()));
         let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
         app.handle_action(AppAction::GoTo(Screen::Profiles));
@@ -1107,28 +1252,53 @@ mod tests {
 
     // ---- Task 4: control editing dispatch (no writes) ----
 
-    fn healthy_control_app(screen: Screen) -> TuiApp<LoopBackend> {
+    fn healthy_control_app(
+        screen: Screen,
+    ) -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
         use crate::tui::screens::support::healthy_snapshot;
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut app = loop_app(vec![Ok(healthy_snapshot())], Rc::clone(&log));
+        let mut app = loop_app(
+            vec![
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
         app.capabilities = crate::tui::screens::support::full_capabilities();
         app.refresh();
         app.handle_action(AppAction::GoTo(screen));
         app
     }
 
-    fn read_only_control_app(screen: Screen) -> TuiApp<LoopBackend> {
+    fn read_only_control_app(
+        screen: Screen,
+    ) -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
         use crate::hardware::{ReadOnlyReason, SupportMode};
         use crate::tui::screens::support::healthy_snapshot;
         let log = Rc::new(RefCell::new(Vec::new()));
-        let mut app = loop_app(vec![Ok(healthy_snapshot())], Rc::clone(&log));
+        let mut app = loop_app(
+            vec![
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
         app.capabilities = crate::tui::screens::support::full_capabilities();
         // Rebuild live state in READ-ONLY mode with the same healthy snapshot.
         app.live = LiveHardware::new(
             app.live.device().clone(),
             SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnavailable),
             LoopBackend {
-                script: RefCell::new(vec![Ok(healthy_snapshot())].into()),
+                script: RefCell::new(
+                    vec![
+                        Ok(healthy_snapshot()),
+                        Ok(healthy_snapshot()),
+                        Ok(healthy_snapshot()),
+                    ]
+                    .into(),
+                ),
                 log: Rc::clone(&log),
             },
             SnapshotHistory::default(),
@@ -1178,12 +1348,12 @@ mod tests {
 
     #[test]
     fn pending_command_is_typed_fan_mode() {
-        use crate::hardware::HardwareCommand;
+        use crate::tui::confirmation::PendingMutation;
         let mut app = healthy_control_app(Screen::Fans);
         app.handle_action(AppAction::Activate);
         app.handle_action(AppAction::Activate);
         let pending = app.controls().pending().expect("pending stored");
-        assert!(matches!(pending, HardwareCommand::SetFanMode(_)));
+        assert!(matches!(pending, PendingMutation::Command(_)));
     }
 
     #[test]
@@ -1267,11 +1437,15 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_profiles_does_not_create_pending() {
+    fn enter_on_profiles_opens_confirmation_without_execution() {
         let mut app = healthy_control_app(Screen::Profiles);
         app.handle_action(AppAction::Activate);
         assert!(!app.controls().is_editing());
-        assert!(app.controls().pending().is_none());
+        // Balanced with full capabilities previews applicable: confirmation
+        // opens, but the executor is not called until a second Enter.
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
     }
 
     #[test]
@@ -1284,5 +1458,332 @@ mod tests {
         app.handle_action(AppAction::Activate);
         app.handle_action(AppAction::Activate);
         assert!(app.controls().pending().is_some());
+    }
+
+    // ---- Task 5: confirmed execution through fake executor ----
+
+    #[test]
+    fn opening_command_confirmation_makes_zero_calls() {
+        let mut app = healthy_control_app(Screen::Fans);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        assert!(app.notice().is_none());
+    }
+
+    #[test]
+    fn cancelling_command_confirmation_makes_zero_calls() {
+        let mut app = healthy_control_app(Screen::Fans);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Cancel);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        assert!(app.notice().is_none());
+    }
+
+    #[test]
+    fn confirming_command_executes_exactly_once_with_exact_command() {
+        use crate::hardware::{FanMode, HardwareCommand};
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        // Adjust auto -> silent for an exact typed expectation.
+        app.handle_action(AppAction::MoveRight);
+        app.handle_action(AppAction::Activate);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        let expected = HardwareCommand::SetFanMode(FanMode::try_from("silent").unwrap());
+        assert_eq!(app.executor.received_commands(), &[expected]);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.live().history().len(), history_before + 1);
+        let notice = app.notice().expect("success notice");
+        assert!(notice.message().contains("Applied Fan Mode: silent"));
+        assert!(!notice.message().contains("RPM"));
+    }
+
+    #[test]
+    fn key_repeat_cannot_execute_twice_without_new_pending() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        // Repeat Enter with no pending does nothing further.
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+    }
+
+    #[test]
+    fn read_only_command_makes_zero_calls() {
+        let mut app = read_only_control_app(Screen::Fans);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn unsupported_command_makes_zero_calls() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.capabilities = crate::hardware::Capabilities::default();
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn command_failure_notice_uses_display_error() {
+        use crate::hardware::{CommandValidationError, FanMode, HardwareCommand};
+        use crate::safety::CommandExecutionError;
+        use crate::tui::executor::FakeTuiExecutor;
+        // Build an app whose fake fails with a typed boundary error.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.executor = FakeTuiExecutor::with_command_error(CommandExecutionError::Validation(
+            CommandValidationError::FanModeNotAdvertised(FanMode::try_from("silent").unwrap()),
+        ));
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Fans));
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.command_calls(), 1);
+        assert_eq!(app.live().history().len(), history_before + 1);
+        let notice = app.notice().expect("failure notice");
+        assert!(notice.message().contains("Action failed:"));
+        assert!(notice.message().contains("fan mode not advertised"));
+        assert!(!notice.message().contains("Boundary"));
+        let _ = HardwareCommand::SetFanMode(FanMode::try_from("auto").unwrap());
+    }
+
+    #[test]
+    fn profile_builtin_can_open_confirmation_without_calls() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn profile_valid_custom_opens_without_reopening_file() {
+        let (dir, store) = catalog_store();
+        write_profile(
+            &store,
+            "work.toml",
+            b"name = \"Custom Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        );
+        let catalog = crate::tui::ProfileCatalog::from_store(&store);
+        // Delete source files: retained catalog must open alone.
+        std::fs::remove_dir_all(store.directory()).expect("source removed");
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.profile_catalog = catalog;
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        for _ in 0..5 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        let _ = dir;
+    }
+
+    #[test]
+    fn profile_invalid_custom_cannot_open() {
+        let (dir, store) = catalog_store();
+        write_profile(&store, "bad.toml", b"name = [unclosed\n");
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![Ok(crate::tui::screens::support::healthy_snapshot())],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.profile_catalog = crate::tui::ProfileCatalog::from_store(&store);
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        for _ in 0..5 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.profile_calls(), 0);
+        let _ = dir;
+    }
+
+    #[test]
+    fn profile_unavailable_builtin_cannot_open() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        app.capabilities = crate::hardware::Capabilities::default();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.profile_calls(), 0);
+    }
+
+    #[test]
+    fn profile_read_only_cannot_execute() {
+        let mut app = read_only_control_app(Screen::Profiles);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+    }
+
+    #[test]
+    fn cancelling_profile_confirmation_makes_zero_calls() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.handle_action(AppAction::Cancel);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        assert!(app.notice().is_none());
+    }
+
+    #[test]
+    fn confirming_profile_executes_once_with_exact_retained_profile() {
+        let (dir, store) = catalog_store();
+        write_profile(
+            &store,
+            "work.toml",
+            b"name = \"Exact Work\"\n\n[performance]\nfan_mode = \"silent\"\n",
+        );
+        let expected = store.load(&"work".parse().unwrap()).expect("profile loads");
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.profile_catalog = crate::tui::ProfileCatalog::from_store(&store);
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        for _ in 0..5 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.profile_calls(), 1);
+        assert_eq!(app.executor.received_profiles(), &[expected]);
+        assert!(app.controls().pending().is_none());
+        assert_eq!(app.live().history().len(), history_before + 1);
+        let notice = app.notice().expect("profile success notice");
+        assert!(notice.message().contains("Applied profile"));
+        assert!(notice.message().contains("changed"));
+        let _ = dir;
+    }
+
+    #[test]
+    fn profile_success_notice_shows_report_counts() {
+        use crate::tui::executor::{FakeTuiExecutor, ProfileApplySummary};
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.executor = FakeTuiExecutor::with_profile_summary(ProfileApplySummary {
+            name: "Gaming".to_owned(),
+            applied: 2,
+            unchanged: 1,
+        });
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        let notice = app.notice().expect("counts notice");
+        assert!(notice.message().contains("Gaming"));
+        assert!(notice.message().contains("2 changed"));
+        assert!(notice.message().contains("1 unchanged"));
+    }
+
+    #[test]
+    fn profile_failure_notice_uses_display_error() {
+        use crate::hardware::CommandValidationError;
+        use crate::safety::ProfileApplyError;
+        use crate::tui::executor::FakeTuiExecutor;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+                Ok(crate::tui::screens::support::healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.executor =
+            FakeTuiExecutor::with_profile_error(ProfileApplyError::PreviewRejected(vec![
+                CommandValidationError::ReadOnly,
+            ]));
+        app.refresh();
+        app.handle_action(AppAction::GoTo(Screen::Profiles));
+        app.handle_action(AppAction::Activate);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.executor.profile_calls(), 1);
+        assert_eq!(app.live().history().len(), history_before + 1);
+        let notice = app.notice().expect("failure notice");
+        assert!(notice.message().contains("Action failed:"));
+        assert!(!notice.message().contains("PreviewRejected("));
+    }
+
+    #[test]
+    fn modal_pending_blocks_navigation_until_resolved() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.handle_action(AppAction::GoTo(Screen::Battery));
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        app.handle_action(AppAction::NextScreen);
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        app.handle_action(AppAction::Cancel);
+        app.handle_action(AppAction::GoTo(Screen::Battery));
+        assert_eq!(app.state().current_screen(), Screen::Battery);
     }
 }

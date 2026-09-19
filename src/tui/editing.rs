@@ -23,6 +23,7 @@
 //! 10-point grid `10,20,...,100` via
 //! [`BatteryThreshold::from_end_percent`].
 
+use super::confirmation::{Notice, PendingMutation, ProfilePending};
 use crate::app::Screen;
 use crate::hardware::{
     BatteryThreshold, Capabilities, CommandValidationError, HardwareCommand, HardwareSnapshot,
@@ -333,8 +334,9 @@ pub struct ControlState {
     battery: usize,
     devices: usize,
     editor: Option<ControlEditor>,
-    pending: Option<HardwareCommand>,
+    pending: Option<PendingMutation>,
     error: Option<String>,
+    notice: Option<Notice>,
 }
 
 impl ControlState {
@@ -413,15 +415,52 @@ impl ControlState {
         self.editor.is_some()
     }
 
-    /// Pending data-only command awaiting Task-5 confirmation. Never
-    /// executed from this model.
-    pub fn pending(&self) -> Option<&HardwareCommand> {
+    /// Pending modal confirmation: one command or one profile, data only.
+    /// Never executed from this model; Task 5 executes through the narrow
+    /// adapter exactly once per confirm.
+    pub fn pending(&self) -> Option<&PendingMutation> {
         self.pending.as_ref()
+    }
+
+    /// Pending command, if the modal holds a hardware command.
+    pub fn pending_command(&self) -> Option<&HardwareCommand> {
+        match self.pending.as_ref() {
+            Some(PendingMutation::Command(command)) => Some(command),
+            _ => None,
+        }
+    }
+
+    /// Whether any modal confirmation is open.
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Stages a retained profile for confirmation. Only call after a pure
+    /// preview deemed it applicable; this stores data, never authorization.
+    pub fn set_profile_pending(&mut self, pending: ProfilePending) {
+        self.pending = Some(PendingMutation::Profile(pending));
+        self.editor = None;
+        self.error = None;
     }
 
     /// Inline safe reason from the last rejected draft validation.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Post-attempt result banner, if any.
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
+    }
+
+    /// Records a post-attempt banner.
+    pub fn set_notice(&mut self, notice: Notice) {
+        self.notice = Some(notice);
+    }
+
+    /// Clears the banner when starting a new flow.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
     }
 
     /// Begins editing the selected control. Returns false and creates
@@ -434,6 +473,9 @@ impl ControlState {
         capabilities: &Capabilities,
         mode: &SupportMode,
     ) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
         let Some(control) = self.selected(screen) else {
             return false;
         };
@@ -465,7 +507,7 @@ impl ControlState {
         };
         match editor.draft.validate(mode, capabilities) {
             Ok(()) => {
-                self.pending = Some(editor.draft);
+                self.pending = Some(PendingMutation::Command(editor.draft));
                 self.editor = None;
                 self.error = None;
                 true

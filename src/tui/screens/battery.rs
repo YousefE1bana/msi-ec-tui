@@ -236,7 +236,7 @@ mod tests {
             &SupportMode::Ready,
         ));
         assert!(controls.confirm(&SupportMode::Ready, &full_capabilities()));
-        let pending = controls.pending().expect("pending stored");
+        let pending = controls.pending_command().expect("pending stored");
         match pending {
             crate::hardware::HardwareCommand::SetBatteryThreshold(threshold) => {
                 assert!(

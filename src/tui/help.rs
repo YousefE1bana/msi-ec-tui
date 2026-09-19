@@ -76,10 +76,10 @@ fn help_lines() -> Vec<&'static str> {
         "5 Devices",
         "6 Profiles",
         "7 Diagnostics",
-        "Editing (no writes yet)",
-        "Enter  Edit selected control / Accept draft as pending",
-        "Esc  Cancel edit or pending draft, else close help",
-        "Pending means NOT applied yet",
+        "Editing and confirmation",
+        "Enter  Edit / Accept draft / Confirm once",
+        "Esc  Cancel edit or confirmation",
+        "One confirm executes at most once",
         "General",
         "?  Toggle help",
         "Esc  Close help",
@@ -221,9 +221,8 @@ mod tests {
         let text = shown_help();
         assert!(text.contains("Enter"));
         assert!(text.contains("Esc"));
-        assert!(text.contains("Pending"));
-        assert!(text.contains("NOT applied"));
-        assert!(!text.contains("Applied "));
+        assert!(text.contains("Confirm once"));
+        assert!(text.contains("at most once"));
         assert!(!text.contains("Command Palette"));
         // P stays reserved and unadvertised.
         assert!(!text.contains("\nP "));

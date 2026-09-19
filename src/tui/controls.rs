@@ -211,12 +211,12 @@ fn control_row_line(
             text.push_str(&format!(" — {reason}"));
         }
     }
-    if let Some(pending) = controls.pending()
-        && control_for_command(pending) == control
+    if let Some(crate::tui::confirmation::PendingMutation::Command(command)) = controls.pending()
+        && control_for_command(command) == control
     {
         text.push_str(&format!(
             " — Pending confirmation: {} (NOT applied yet)",
-            command_text(pending)
+            command_text(command)
         ));
     }
     let plain = match state {

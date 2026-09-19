@@ -5,9 +5,11 @@
 //! tasks. This module never reads sysfs directly.
 
 mod app;
+mod confirmation;
 mod controls;
 pub mod editing;
 mod event;
+pub mod executor;
 mod help;
 mod input;
 mod profile_catalog;
