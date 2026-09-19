@@ -563,3 +563,59 @@ fn previous_show_grants_no_authorization() {
         b"on\n"
     );
 }
+
+#[test]
+fn control_characters_in_custom_profile_fail_without_escape_output() {
+    let sys = tempdir().unwrap();
+    cooler_root(sys.path());
+    let config = tempdir().unwrap();
+    let sys_arg = sys.path().to_string_lossy().to_string();
+    // ESC in the display name and in mode values: all must fail parsing,
+    // and neither stdout nor stderr may carry the attacker bytes back.
+    let cases = [
+        (
+            "evil-name",
+            b"name = \"Gam\x1b[2Jpwned\"\n\n[device]\nkeyboard_backlight = 1\n".as_slice(),
+        ),
+        (
+            "evil-fan",
+            b"name = \"Evil\"\n\n[performance]\nfan_mode = \"au\x1b[2J\"\n".as_slice(),
+        ),
+        (
+            "evil-shift",
+            b"name = \"Evil\"\n\n[performance]\nshift_mode = \"eco\x7f\"\n".as_slice(),
+        ),
+    ];
+    for (slug, contents) in cases {
+        custom_profile(config.path(), slug, contents);
+        for subcommand in ["show", "apply"] {
+            let output = mec()
+                .env("XDG_CONFIG_HOME", config.path())
+                .args(["--sys-root", &sys_arg, "profile", subcommand, slug])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{slug}/{subcommand} must fail");
+            assert!(
+                !output.stdout.contains(&0x1b),
+                "{slug}/{subcommand} stdout must not contain ESC"
+            );
+            assert!(
+                !output.stderr.contains(&0x1b),
+                "{slug}/{subcommand} stderr must not contain ESC"
+            );
+            assert!(
+                !output.stdout.contains(&0x7f),
+                "{slug}/{subcommand} stdout must not contain DEL"
+            );
+            assert!(
+                !output.stderr.contains(&0x7f),
+                "{slug}/{subcommand} stderr must not contain DEL"
+            );
+        }
+    }
+    // The fake hardware is untouched by the rejected profiles.
+    assert_eq!(
+        fs::read(sys.path().join("sys/devices/platform/msi-ec/cooler_boost")).unwrap(),
+        b"off\n"
+    );
+}

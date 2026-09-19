@@ -26,8 +26,8 @@ pub struct Profile {
     device: DeviceProfile,
 }
 
-/// A validated profile display name: non-empty, trimmed, no newline,
-/// carriage return, or NUL, at most 64 UTF-8 bytes. Internal spaces are
+/// A validated profile display name: non-empty, trimmed, no control
+/// characters, at most 64 UTF-8 bytes. Internal spaces are
 /// allowed. Never a filesystem path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProfileName(String);
@@ -80,6 +80,11 @@ pub enum ProfileValidationError {
     /// The battery end limit is not representable.
     #[error("invalid battery threshold: {0}")]
     InvalidBatteryThreshold(#[from] BatteryThresholdError),
+    /// The raw document contains a control character that TOML never
+    /// permits unescaped and that no profile field may hold. Rejected
+    /// before parsing so error text can never echo attacker bytes.
+    #[error("profile must not contain control characters")]
+    ForbiddenControlCharacter,
     /// The profile describes no settings at all.
     #[error("profile describes no settings")]
     NoSettings,
@@ -94,8 +99,9 @@ pub enum ProfileNameError {
     /// The name has leading or trailing whitespace.
     #[error("profile name must already be trimmed")]
     Untrimmed,
-    /// The name contains newline, carriage return, or NUL.
-    #[error("profile name must not contain newline, carriage return, or NUL")]
+    /// The name contains newline, carriage return, NUL, or any other
+    /// terminal control character.
+    #[error("profile name must not contain control characters")]
     ForbiddenCharacter,
     /// The name exceeds 64 UTF-8 bytes.
     #[error("profile name must not exceed 64 UTF-8 bytes")]
@@ -143,7 +149,7 @@ fn validate_profile_name(value: &str) -> Result<(), ProfileNameError> {
     if value.is_empty() {
         return Err(ProfileNameError::Empty);
     }
-    if value.contains(['\n', '\r', '\0']) {
+    if value.chars().any(char::is_control) {
         return Err(ProfileNameError::ForbiddenCharacter);
     }
     if value.trim() != value {
@@ -190,6 +196,16 @@ impl Profile {
     /// Parses a TOML profile document into a validated [`Profile`]. Pure:
     /// no filesystem, environment, shell, or hardware access.
     pub fn parse_toml(input: &str) -> Result<Self, ProfileParseError> {
+        // Tab, LF, and CR are legal TOML structure; every other control
+        // character is never legal raw TOML and no profile field may hold
+        // one. Reject upfront so the TOML parser's error snippets can never
+        // echo attacker-controlled escape bytes back to a terminal.
+        if input
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+        {
+            return Err(ProfileValidationError::ForbiddenControlCharacter.into());
+        }
         let raw: RawProfile = toml::from_str(input)?;
         let performance = PerformanceProfile {
             shift_mode: raw
@@ -467,6 +483,40 @@ mod tests {
             ProfileName::try_from("Gaming\0Profile"),
             Err(ProfileNameError::ForbiddenCharacter)
         );
+    }
+
+    #[test]
+    fn terminal_control_characters_rejected() {
+        for name in [
+            "Gam\x1bing",
+            "\u{1b}Gaming",
+            "Gaming\u{1b}",
+            "Gam\ting",
+            "Gaming\x7f",
+            "\u{7f}Gaming",
+            "Gam\u{80}ing",
+        ] {
+            assert_eq!(
+                ProfileName::try_from(name),
+                Err(ProfileNameError::ForbiddenCharacter),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_characters_rejected_in_profile_parsing() {
+        for input in [
+            "name = \"Gam\x1bing\"\n\n[device]\nkeyboard_backlight = 1\n",
+            "name = \"A\"\n\n[performance]\nfan_mode = \"au\x1bto\"\n",
+            "name = \"A\"\n\n[performance]\nshift_mode = \"eco\x7f\"\n",
+            "name = \"A\"\n\n[performance]\nfan_mode = \"au\tto\"\n",
+        ] {
+            assert!(
+                Profile::parse_toml(input).is_err(),
+                "{input:?} must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -62,6 +62,34 @@ fn unknown_field_rejected_through_public_api() {
 }
 
 #[test]
+fn terminal_control_characters_rejected_in_name_and_modes() {
+    for input in [
+        "name = \"Gam\x1bing\"\n\n[device]\nkeyboard_backlight = 1\n",
+        "name = \"A\"\n\n[performance]\nfan_mode = \"au\x1bto\"\n",
+        "name = \"A\"\n\n[performance]\nshift_mode = \"eco\x7f\"\n",
+        "name = \"A\"\n\n[performance]\nfan_mode = \"au\tto\"\n",
+        "name = \"A\"\n\n[performance]\nshift_mode = \"\u{7f}eco\"\n",
+    ] {
+        assert!(
+            input.parse::<Profile>().is_err(),
+            "{input:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn ordinary_future_modes_remain_valid() {
+    for mode in ["future-mode", "vendor_mode_2", "future-mode_v2"] {
+        let fan: FanMode = mode.try_into().unwrap();
+        assert_eq!(fan.as_str(), mode);
+        let shift: ShiftMode = mode.try_into().unwrap();
+        assert_eq!(shift.as_str(), mode);
+        let input = format!("name = \"A\"\n\n[performance]\nfan_mode = \"{mode}\"\n");
+        assert!(input.parse::<Profile>().is_ok());
+    }
+}
+
+#[test]
 fn empty_profile_rejected_as_no_settings() {
     let error = "name = \"Empty\"\n"
         .parse::<Profile>()

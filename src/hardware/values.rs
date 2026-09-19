@@ -10,7 +10,7 @@ pub enum ModeValidationError {
     Empty,
     #[error("mode name must already be trimmed")]
     Untrimmed,
-    #[error("mode name must not contain newline, carriage return, or NUL")]
+    #[error("mode name must not contain control characters")]
     ForbiddenCharacter,
     #[error("mode name must not exceed 64 UTF-8 bytes")]
     TooLong,
@@ -20,7 +20,7 @@ fn validate_mode(value: &str) -> Result<(), ModeValidationError> {
     if value.is_empty() {
         return Err(ModeValidationError::Empty);
     }
-    if value.contains(['\n', '\r', '\0']) {
+    if value.chars().any(char::is_control) {
         return Err(ModeValidationError::ForbiddenCharacter);
     }
     if value.trim() != value {
@@ -171,6 +171,25 @@ mod tests {
                 }
 
                 #[test]
+                fn terminal_control_characters_are_rejected() {
+                    for input in [
+                        "au\x1bto",
+                        "\u{1b}auto",
+                        "auto\u{1b}",
+                        "au\tto",
+                        "auto\x7f",
+                        "\u{7f}auto",
+                        "au\u{80}to",
+                    ] {
+                        assert_eq!(
+                            $mode::try_from(input),
+                            Err(ModeValidationError::ForbiddenCharacter),
+                            "{input:?}"
+                        );
+                    }
+                }
+
+                #[test]
                 fn byte_limit_is_enforced() {
                     for input in ["a".repeat(64), "é".repeat(32)] {
                         assert_eq!($mode::try_from(input.as_str()).unwrap().as_str(), input);
@@ -184,9 +203,11 @@ mod tests {
 
                 #[test]
                 fn unknown_valid_mode_is_accepted() {
-                    let mode = $mode::try_from("future-mode_v2").unwrap();
-                    assert_eq!(mode.as_str(), "future-mode_v2");
-                    assert_eq!(mode.to_string(), "future-mode_v2");
+                    for mode in ["future-mode_v2", "future-mode", "vendor_mode_2"] {
+                        let parsed = $mode::try_from(mode).unwrap();
+                        assert_eq!(parsed.as_str(), mode);
+                        assert_eq!(parsed.to_string(), mode);
+                    }
                 }
 
                 #[test]
