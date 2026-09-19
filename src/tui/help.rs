@@ -63,10 +63,10 @@ fn help_overlay_area(area: Rect, line_count: usize) -> Rect {
 fn help_lines() -> Vec<&'static str> {
     vec![
         "Navigation",
-        "↑ / ←  Previous screen",
-        "↓ / →  Next screen",
-        "h / k  Previous screen",
-        "j / l  Next screen",
+        "↑ / k  Previous row, else previous screen",
+        "↓ / j  Next row, else next screen",
+        "← / h  Previous value while editing, else previous screen",
+        "→ / l  Next value while editing, else next screen",
         "Tab  Next screen",
         "Shift+Tab  Previous screen",
         "1 Dashboard",
@@ -76,6 +76,10 @@ fn help_lines() -> Vec<&'static str> {
         "5 Devices",
         "6 Profiles",
         "7 Diagnostics",
+        "Editing (no writes yet)",
+        "Enter  Edit selected control / Accept draft as pending",
+        "Esc  Cancel edit or pending draft, else close help",
+        "Pending means NOT applied yet",
         "General",
         "?  Toggle help",
         "Esc  Close help",
@@ -108,6 +112,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         })
     }
@@ -125,6 +130,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         })
     }
@@ -211,6 +217,19 @@ mod tests {
     }
 
     #[test]
+    fn overlay_describes_editing_without_claiming_execution() {
+        let text = shown_help();
+        assert!(text.contains("Enter"));
+        assert!(text.contains("Esc"));
+        assert!(text.contains("Pending"));
+        assert!(text.contains("NOT applied"));
+        assert!(!text.contains("Applied "));
+        assert!(!text.contains("Command Palette"));
+        // P stays reserved and unadvertised.
+        assert!(!text.contains("\nP "));
+    }
+
+    #[test]
     fn overlay_advertises_no_f1() {
         assert!(!shown_help().contains("F1"));
     }
@@ -231,6 +250,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         });
         assert!(!text.contains("MEC Help"));
@@ -309,6 +329,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         });
         assert!(!text.is_empty());
@@ -335,6 +356,7 @@ mod tests {
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
                 );
             })
             .expect("minimal help draws");
@@ -362,6 +384,7 @@ mod tests {
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
                 );
             })
             .expect("zero-area help-visible dispatch draws");

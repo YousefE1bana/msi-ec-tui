@@ -15,8 +15,7 @@ use crate::hardware::{Capabilities, EcBackend};
 
 use super::profile_catalog::ProfileCatalog;
 use super::screens::{
-    battery as battery_screen, devices as devices_screen, diagnostics as diagnostics_screen,
-    fans as fans_screen, performance as performance_screen, profiles as profiles_screen,
+    diagnostics as diagnostics_screen, fans as fans_screen, profiles as profiles_screen,
 };
 use super::theme::Theme;
 use super::ui::{
@@ -49,6 +48,7 @@ pub(crate) fn layout_tier(area: Rect) -> LayoutTier {
 
 /// Renders the selected screen's key values as plain truncatable lines.
 /// Current snapshots only; capabilities follow where space permits.
+/// Interactive screens also list control rows with selection state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_compact_screen<B: EcBackend>(
     frame: &mut Frame,
@@ -58,6 +58,7 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
+    controls: &crate::tui::editing::ControlState,
     theme: &Theme,
 ) {
     let mut lines = compact_header(app, live, theme);
@@ -67,6 +68,7 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
         capabilities,
         catalog,
         selection,
+        controls,
         theme,
     ));
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
@@ -116,12 +118,14 @@ fn compact_header<B: EcBackend>(
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compact_body<B: EcBackend>(
     app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
+    controls: &crate::tui::editing::ControlState,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let snapshot = live.current_snapshot();
@@ -137,25 +141,50 @@ fn compact_body<B: EcBackend>(
         }
         Screen::Performance => {
             let mut lines = performance_lines(snapshot);
-            lines.extend(performance_screen::capability_lines(capabilities, theme));
+            lines.extend(crate::tui::controls::control_row_lines(
+                Screen::Performance,
+                snapshot,
+                capabilities,
+                live.mode(),
+                controls,
+                theme,
+            ));
             lines
         }
         Screen::Fans => {
             let mut lines = fans_screen::current_lines(snapshot);
-            lines.extend(fans_screen::capability_lines(capabilities, theme));
+            lines.extend(crate::tui::controls::control_row_lines(
+                Screen::Fans,
+                snapshot,
+                capabilities,
+                live.mode(),
+                controls,
+                theme,
+            ));
             lines
         }
         Screen::Battery => {
             let mut lines = battery_lines(snapshot);
-            lines.push(battery_screen::threshold_capability_line(
+            lines.extend(crate::tui::controls::control_row_lines(
+                Screen::Battery,
+                snapshot,
                 capabilities,
+                live.mode(),
+                controls,
                 theme,
             ));
             lines
         }
         Screen::Devices => {
             let mut lines = device_lines(snapshot);
-            lines.extend(devices_screen::capability_lines(capabilities, theme));
+            lines.extend(crate::tui::controls::control_row_lines(
+                Screen::Devices,
+                snapshot,
+                capabilities,
+                live.mode(),
+                controls,
+                theme,
+            ));
             lines
         }
         Screen::Profiles => {
@@ -226,6 +255,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         })
     }
@@ -318,10 +348,29 @@ mod tests {
                 &capabilities,
                 &catalog,
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         });
         assert!(text.contains("Compact Work"));
         assert!(text.contains("Valid"));
+    }
+
+    #[test]
+    fn compact_control_screens_show_selection_safely() {
+        for screen in [
+            Screen::Performance,
+            Screen::Fans,
+            Screen::Battery,
+            Screen::Devices,
+        ] {
+            let text = rendered(screen, 50, 16);
+            assert!(text.contains("MEC"), "{screen:?}");
+            assert!(text.contains(screen.title()), "{screen:?}");
+        }
+        // Fans compact shows the selected Fan Mode row without RPM.
+        let fans = rendered(Screen::Fans, 50, 16);
+        assert!(fans.contains("Fan Mode"));
+        assert!(!fans.contains("RPM"));
     }
 
     #[test]
@@ -376,6 +425,7 @@ mod tests {
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
                 );
             })
             .expect("zero-area dispatch draws");

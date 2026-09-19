@@ -6,6 +6,7 @@
 
 mod app;
 mod controls;
+pub mod editing;
 mod event;
 mod help;
 mod input;

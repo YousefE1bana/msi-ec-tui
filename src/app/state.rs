@@ -95,7 +95,9 @@ impl AppState {
 
     /// Applies one terminal-independent action. `MoveUp`/`MoveDown` keep
     /// legacy screen-navigation fallback semantics here; row-driven
-    /// screens are dispatched contextually above this layer.
+    /// screens are dispatched contextually above this layer. `MoveLeft` /
+    /// `MoveRight` fall back to screen navigation; `Activate` is a no-op
+    /// here and `Cancel` hides help so legacy state tests stay meaningful.
     pub fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.should_quit = true,
@@ -105,6 +107,10 @@ impl AppState {
             }
             AppAction::MoveUp => self.current_screen = self.current_screen.previous(),
             AppAction::MoveDown => self.current_screen = self.current_screen.next(),
+            AppAction::MoveLeft => self.current_screen = self.current_screen.previous(),
+            AppAction::MoveRight => self.current_screen = self.current_screen.next(),
+            AppAction::Activate => {}
+            AppAction::Cancel => self.help_visible = false,
             AppAction::GoTo(screen) => self.current_screen = screen,
             AppAction::ToggleHelp => self.help_visible = !self.help_visible,
             AppAction::ShowHelp => self.help_visible = true,
@@ -249,6 +255,36 @@ mod tests {
     }
 
     #[test]
+    fn move_left_falls_back_to_previous_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveLeft);
+        assert_eq!(state.current_screen(), Screen::Diagnostics);
+    }
+
+    #[test]
+    fn move_right_falls_back_to_next_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveRight);
+        assert_eq!(state.current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn activate_is_noop_for_state() {
+        let mut state = AppState::default();
+        state.apply(AppAction::Activate);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+        assert!(!state.should_quit());
+    }
+
+    #[test]
+    fn cancel_hides_help_for_state() {
+        let mut state = AppState::default();
+        state.apply(AppAction::ShowHelp);
+        state.apply(AppAction::Cancel);
+        assert!(!state.help_visible());
+    }
+
+    #[test]
     fn navigation_does_not_mutate_help_visibility() {
         let mut state = AppState::default();
         state.apply(AppAction::ShowHelp);
@@ -266,6 +302,10 @@ mod tests {
             AppAction::PreviousScreen,
             AppAction::MoveUp,
             AppAction::MoveDown,
+            AppAction::MoveLeft,
+            AppAction::MoveRight,
+            AppAction::Activate,
+            AppAction::Cancel,
             AppAction::GoTo(Screen::Fans),
             AppAction::ToggleHelp,
             AppAction::ShowHelp,

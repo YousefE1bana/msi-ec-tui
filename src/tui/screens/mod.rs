@@ -49,6 +49,7 @@ pub fn render_screen<B: EcBackend>(
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
+    controls: &crate::tui::editing::ControlState,
 ) {
     render_screen_with_theme(
         frame,
@@ -58,6 +59,7 @@ pub fn render_screen<B: EcBackend>(
         capabilities,
         catalog,
         selection,
+        controls,
         &Theme::default(),
     );
 }
@@ -73,6 +75,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
+    controls: &crate::tui::editing::ControlState,
     theme: &Theme,
 ) {
     let rows = Layout::default()
@@ -90,6 +93,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 capabilities,
                 catalog,
                 selection,
+                controls,
                 theme,
             );
         }
@@ -102,6 +106,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 capabilities,
                 catalog,
                 selection,
+                controls,
                 theme,
             );
         }
@@ -123,6 +128,7 @@ fn render_active_screen<B: EcBackend>(
     capabilities: &Capabilities,
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
+    controls: &crate::tui::editing::ControlState,
     theme: &Theme,
 ) {
     match app.current_screen() {
@@ -130,14 +136,23 @@ fn render_active_screen<B: EcBackend>(
             dashboard::render_dashboard_with_theme(frame, area, live, theme);
         }
         Screen::Performance => {
-            performance::render_performance_with_theme(frame, area, live, capabilities, theme);
+            performance::render_performance_with_theme(
+                frame,
+                area,
+                live,
+                capabilities,
+                controls,
+                theme,
+            );
         }
-        Screen::Fans => fans::render_fans_with_theme(frame, area, live, capabilities, theme),
+        Screen::Fans => {
+            fans::render_fans_with_theme(frame, area, live, capabilities, controls, theme);
+        }
         Screen::Battery => {
-            battery::render_battery_with_theme(frame, area, live, capabilities, theme);
+            battery::render_battery_with_theme(frame, area, live, capabilities, controls, theme);
         }
         Screen::Devices => {
-            devices::render_devices_with_theme(frame, area, live, capabilities, theme);
+            devices::render_devices_with_theme(frame, area, live, capabilities, controls, theme);
         }
         Screen::Profiles => {
             profiles::render_profiles_with_theme(
@@ -268,6 +283,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         })
     }
@@ -336,6 +352,7 @@ mod tests {
                 &capabilities,
                 &catalog,
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         });
         assert!(text.contains("Dispatch Work"));
@@ -399,6 +416,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -422,6 +440,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -436,6 +455,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -458,6 +478,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -491,6 +512,7 @@ mod tests {
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
                     &theme,
                 );
             })
@@ -517,6 +539,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -543,6 +566,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -565,6 +589,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -587,6 +612,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -613,6 +639,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -634,6 +661,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
             );
         });
         assert!(text.contains("CPU Fan Telemetry"));
@@ -657,6 +685,7 @@ mod tests {
                 &capabilities,
                 &crate::tui::ProfileCatalog::empty(),
                 &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
                 &theme,
             );
         })
@@ -680,6 +709,7 @@ mod tests {
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
                 );
             });
         }
@@ -701,6 +731,7 @@ mod tests {
                     &capabilities,
                     &crate::tui::ProfileCatalog::empty(),
                     &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
                 );
             });
             assert!(text.contains("Terminal too small"), "{screen:?}");
@@ -728,6 +759,7 @@ mod tests {
                         &capabilities,
                         &crate::tui::ProfileCatalog::empty(),
                         &crate::app::ProfileSelection::default(),
+                        &crate::tui::editing::ControlState::default(),
                     );
                 })
                 .expect("zero-area screen draws");
@@ -739,16 +771,40 @@ mod tests {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let _ = screen_text(100, 30, |frame| {
-            render_performance(frame, frame.area(), &live, &capabilities);
+            render_performance(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         let _ = screen_text(100, 30, |frame| {
-            render_fans(frame, frame.area(), &live, &capabilities);
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         let _ = screen_text(100, 30, |frame| {
-            render_battery(frame, frame.area(), &live, &capabilities);
+            render_battery(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         let _ = screen_text(100, 30, |frame| {
-            render_devices(frame, frame.area(), &live, &capabilities);
+            render_devices(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         let _ = screen_text(100, 30, |frame| {
             render_profiles(

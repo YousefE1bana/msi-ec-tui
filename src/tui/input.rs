@@ -23,16 +23,17 @@ pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
         KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => Some(AppAction::Quit),
         KeyCode::Tab if key.modifiers.is_empty() => Some(AppAction::NextScreen),
         KeyCode::BackTab if allows_only_shift(key.modifiers) => Some(AppAction::PreviousScreen),
-        KeyCode::Right if key.modifiers.is_empty() => Some(AppAction::NextScreen),
+        KeyCode::Right if key.modifiers.is_empty() => Some(AppAction::MoveRight),
         KeyCode::Down if key.modifiers.is_empty() => Some(AppAction::MoveDown),
-        KeyCode::Left if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
+        KeyCode::Left if key.modifiers.is_empty() => Some(AppAction::MoveLeft),
         KeyCode::Up if key.modifiers.is_empty() => Some(AppAction::MoveUp),
-        KeyCode::Char('l') if key.modifiers.is_empty() => Some(AppAction::NextScreen),
+        KeyCode::Char('l') if key.modifiers.is_empty() => Some(AppAction::MoveRight),
         KeyCode::Char('j') if key.modifiers.is_empty() => Some(AppAction::MoveDown),
-        KeyCode::Char('h') if key.modifiers.is_empty() => Some(AppAction::PreviousScreen),
+        KeyCode::Char('h') if key.modifiers.is_empty() => Some(AppAction::MoveLeft),
         KeyCode::Char('k') if key.modifiers.is_empty() => Some(AppAction::MoveUp),
+        KeyCode::Enter if key.modifiers.is_empty() => Some(AppAction::Activate),
+        KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::Cancel),
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
-        KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::HideHelp),
         KeyCode::Char(digit @ '1'..='7') if key.modifiers.is_empty() => {
             Some(AppAction::GoTo(screen_for_digit(digit)))
         }
@@ -139,10 +140,18 @@ mod tests {
     }
 
     #[test]
-    fn escape_hides_help() {
+    fn escape_cancels() {
         assert_eq!(
             action_for_key(press(KeyCode::Esc, KeyModifiers::empty())),
-            Some(AppAction::HideHelp)
+            Some(AppAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn enter_activates() {
+        assert_eq!(
+            action_for_key(press(KeyCode::Enter, KeyModifiers::empty())),
+            Some(AppAction::Activate)
         );
     }
 
@@ -208,10 +217,6 @@ mod tests {
     #[test]
     fn unrelated_key_maps_to_none() {
         assert_eq!(
-            action_for_key(press(KeyCode::Enter, KeyModifiers::empty())),
-            None
-        );
-        assert_eq!(
             action_for_key(press(KeyCode::Char('x'), KeyModifiers::empty())),
             None
         );
@@ -272,10 +277,10 @@ mod tests {
     }
 
     #[test]
-    fn right_advances_screen() {
+    fn right_moves_right() {
         assert_eq!(
             action_for_key(press(KeyCode::Right, KeyModifiers::empty())),
-            Some(AppAction::NextScreen)
+            Some(AppAction::MoveRight)
         );
     }
 
@@ -288,10 +293,10 @@ mod tests {
     }
 
     #[test]
-    fn left_goes_to_previous_screen() {
+    fn left_moves_left() {
         assert_eq!(
             action_for_key(press(KeyCode::Left, KeyModifiers::empty())),
-            Some(AppAction::PreviousScreen)
+            Some(AppAction::MoveLeft)
         );
     }
 
@@ -304,14 +309,14 @@ mod tests {
     }
 
     #[test]
-    fn vim_horizontal_keys_navigate_screens() {
+    fn vim_horizontal_keys_move_sideways() {
         assert_eq!(
             action_for_key(press(KeyCode::Char('l'), KeyModifiers::empty())),
-            Some(AppAction::NextScreen)
+            Some(AppAction::MoveRight)
         );
         assert_eq!(
             action_for_key(press(KeyCode::Char('h'), KeyModifiers::empty())),
-            Some(AppAction::PreviousScreen)
+            Some(AppAction::MoveLeft)
         );
     }
 
@@ -383,10 +388,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_remains_unmapped() {
+    fn enter_activates_editing() {
         assert_eq!(
             action_for_key(press(KeyCode::Enter, KeyModifiers::empty())),
-            None
+            Some(AppAction::Activate)
         );
     }
 }

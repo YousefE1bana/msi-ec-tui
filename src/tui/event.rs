@@ -104,7 +104,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
         let key = KeyEvent {
-            code: KeyCode::Enter,
+            code: KeyCode::F(12),
             modifiers: KeyModifiers::empty(),
             kind: KeyEventKind::Press,
             state: KeyEventState::empty(),

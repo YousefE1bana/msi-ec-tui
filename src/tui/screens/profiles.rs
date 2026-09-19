@@ -958,6 +958,7 @@ mod tests {
                 &capabilities,
                 &catalog,
                 &selection,
+                &crate::tui::editing::ControlState::default(),
                 &Theme::default(),
             );
         });

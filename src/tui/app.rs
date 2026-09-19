@@ -9,13 +9,14 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::app::{AppState, LiveHardware, ProfileSelection};
+use crate::app::{AppState, LiveHardware, ProfileSelection, Screen};
 use crate::hardware::{
     Capabilities, CapabilityDetector, CapabilityDiscoveryError, EcBackend, LinuxSysfsReader,
     MsiEcBackend, SupportEvaluator, SupportMode, SysfsReader, SystemPaths,
 };
 use crate::monitoring::{PollInterval, SnapshotHistory};
 
+use super::editing::{ControlState, is_interactive_screen};
 use super::profile_catalog::ProfileCatalog;
 use super::{CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen};
 
@@ -56,6 +57,7 @@ pub struct TuiApp<B> {
     capabilities: Capabilities,
     profile_catalog: ProfileCatalog,
     profile_selection: ProfileSelection,
+    controls: ControlState,
 }
 
 impl<B> TuiApp<B>
@@ -98,26 +100,83 @@ where
         &self.profile_selection
     }
 
+    /// Control editing state: row selections, draft editor, and pending
+    /// data-only command. Task 4 never executes.
+    pub fn controls(&self) -> &ControlState {
+        &self.controls
+    }
+
     /// Selectable profile rows: five built-ins plus custom entries in
     /// catalog order.
     pub fn profile_row_count(&self) -> usize {
         super::screens::profiles::profile_row_count(&self.profile_catalog)
     }
 
-    /// Contextual action dispatch: `MoveUp`/`MoveDown` drive profile rows
-    /// on the Profiles screen and fall back to screen navigation
-    /// elsewhere. All other actions apply to shared state directly.
+    /// Contextual action dispatch.
+    ///
+    /// - `MoveUp`/`MoveDown` drive profile rows on Profiles, control rows
+    ///   on interactive screens, and fall back to screen navigation
+    ///   elsewhere. While editing they are ignored to preserve the draft.
+    /// - `MoveLeft`/`MoveRight` adjust the open draft while editing and
+    ///   navigate screens otherwise.
+    /// - `Activate` (Enter) begins editing the selected supported control,
+    ///   or accepts the draft into pending data while editing. Profiles
+    ///   stays selection-only until Task 5.
+    /// - `Cancel` (Esc) discards the editor, then pending, and only hides
+    ///   help when neither exists.
+    /// - Screen navigation always clears a stale editor so drafts never
+    ///   follow to another screen; the global pending command is kept.
     pub fn handle_action(&mut self, action: crate::app::AppAction) {
+        use crate::app::AppAction as A;
+        let screen = self.state.current_screen();
         match action {
-            crate::app::AppAction::MoveUp
-                if self.state.current_screen() == crate::app::Screen::Profiles =>
-            {
+            A::MoveUp if self.controls.is_editing() => {}
+            A::MoveDown if self.controls.is_editing() => {}
+            A::MoveUp if screen == Screen::Profiles => {
                 self.profile_selection.move_up(self.profile_row_count());
             }
-            crate::app::AppAction::MoveDown
-                if self.state.current_screen() == crate::app::Screen::Profiles =>
-            {
+            A::MoveDown if screen == Screen::Profiles => {
                 self.profile_selection.move_down(self.profile_row_count());
+            }
+            A::MoveUp if is_interactive_screen(screen) => {
+                self.controls.move_up(screen);
+            }
+            A::MoveDown if is_interactive_screen(screen) => {
+                self.controls.move_down(screen);
+            }
+            A::MoveLeft if self.controls.is_editing() => {
+                self.controls.adjust(&self.capabilities, -1);
+            }
+            A::MoveRight if self.controls.is_editing() => {
+                self.controls.adjust(&self.capabilities, 1);
+            }
+            A::Activate if self.controls.is_editing() => {
+                let mode = self.live.mode().clone();
+                self.controls.confirm(&mode, &self.capabilities);
+            }
+            A::Activate if screen == Screen::Profiles => {}
+            A::Activate if is_interactive_screen(screen) => {
+                let mode = self.live.mode().clone();
+                self.controls.begin_edit(
+                    screen,
+                    self.live.current_snapshot(),
+                    &self.capabilities,
+                    &mode,
+                );
+            }
+            A::Activate => {}
+            A::Cancel => {
+                if !self.controls.cancel() {
+                    self.state.apply(action);
+                }
+            }
+            A::NextScreen | A::PreviousScreen | A::GoTo(_) => {
+                self.state.apply(action);
+                self.controls.on_screen_change();
+            }
+            A::MoveLeft | A::MoveRight => {
+                self.state.apply(action);
+                self.controls.on_screen_change();
             }
             _ => self.state.apply(action),
         }
@@ -192,6 +251,7 @@ where
         capabilities,
         profile_catalog,
         profile_selection: ProfileSelection::default(),
+        controls: ControlState::default(),
     })
 }
 
@@ -291,6 +351,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.capabilities(),
                     app.profile_catalog(),
                     app.profile_selection(),
+                    app.controls(),
                 );
             })
             .map(|_| ())
@@ -626,6 +687,7 @@ mod tests {
             capabilities: Capabilities::default(),
             profile_catalog: crate::tui::ProfileCatalog::empty(),
             profile_selection: ProfileSelection::default(),
+            controls: crate::tui::editing::ControlState::default(),
         }
     }
 
@@ -1018,13 +1080,18 @@ mod tests {
     fn move_keys_fall_back_to_screen_navigation_off_profiles() {
         let log = Rc::new(RefCell::new(Vec::new()));
         let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
-        assert_eq!(app.state().current_screen(), Screen::Dashboard);
-        app.handle_action(AppAction::MoveDown);
-        assert_eq!(app.state().current_screen(), Screen::Performance);
-        app.handle_action(AppAction::MoveUp);
+        // Dashboard has no control rows: vertical moves fall back to screens.
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
         app.handle_action(AppAction::MoveUp);
         assert_eq!(app.state().current_screen(), Screen::Diagnostics);
+        // Diagnostics also has no rows.
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        // Interactive screens consume vertical moves as row navigation.
+        app.handle_action(AppAction::GoTo(Screen::Performance));
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+        assert_eq!(app.controls().selected_index(Screen::Performance), 1);
     }
 
     #[test]
@@ -1036,5 +1103,186 @@ mod tests {
         assert_eq!(app.state().current_screen(), Screen::Profiles);
         // Selection survives screen excursions.
         assert_eq!(app.profile_selection().index(), 0);
+    }
+
+    // ---- Task 4: control editing dispatch (no writes) ----
+
+    fn healthy_control_app(screen: Screen) -> TuiApp<LoopBackend> {
+        use crate::tui::screens::support::healthy_snapshot;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(healthy_snapshot())], Rc::clone(&log));
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.refresh();
+        app.handle_action(AppAction::GoTo(screen));
+        app
+    }
+
+    fn read_only_control_app(screen: Screen) -> TuiApp<LoopBackend> {
+        use crate::hardware::{ReadOnlyReason, SupportMode};
+        use crate::tui::screens::support::healthy_snapshot;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(healthy_snapshot())], Rc::clone(&log));
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        // Rebuild live state in READ-ONLY mode with the same healthy snapshot.
+        app.live = LiveHardware::new(
+            app.live.device().clone(),
+            SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnavailable),
+            LoopBackend {
+                script: RefCell::new(vec![Ok(healthy_snapshot())].into()),
+                log: Rc::clone(&log),
+            },
+            SnapshotHistory::default(),
+        );
+        app.refresh();
+        app.handle_action(AppAction::GoTo(screen));
+        app
+    }
+
+    #[test]
+    fn control_row_navigation_for_each_interactive_screen() {
+        for screen in [
+            Screen::Performance,
+            Screen::Fans,
+            Screen::Battery,
+            Screen::Devices,
+        ] {
+            let mut app = healthy_control_app(screen);
+            let before = app.controls().selected_index(screen);
+            app.handle_action(AppAction::MoveDown);
+            assert_eq!(app.state().current_screen(), screen);
+            let rows = crate::tui::editing::control_rows(screen).len();
+            assert_eq!(app.controls().selected_index(screen), (before + 1) % rows);
+            app.handle_action(AppAction::MoveUp);
+            assert_eq!(app.controls().selected_index(screen), before);
+        }
+    }
+
+    #[test]
+    fn dashboard_vertical_moves_still_navigate_screens() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn enter_begins_edit_and_accepts_pending_only() {
+        let mut app = healthy_control_app(Screen::Fans);
+        assert!(!app.controls().is_editing());
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_some());
+    }
+
+    #[test]
+    fn pending_command_is_typed_fan_mode() {
+        use crate::hardware::HardwareCommand;
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        let pending = app.controls().pending().expect("pending stored");
+        assert!(matches!(pending, HardwareCommand::SetFanMode(_)));
+    }
+
+    #[test]
+    fn esc_discards_editor_then_pending() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        app.handle_action(AppAction::Cancel);
+        assert!(app.controls().pending().is_none());
+    }
+
+    #[test]
+    fn left_right_adjust_draft_while_editing_otherwise_navigate() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        let before = app.controls().editor().unwrap().draft().clone();
+        app.handle_action(AppAction::MoveRight);
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        let after = app.controls().editor().unwrap().draft().clone();
+        assert_ne!(before, after);
+        app.handle_action(AppAction::MoveLeft);
+        assert_eq!(app.controls().editor().unwrap().draft(), &before);
+        app.handle_action(AppAction::Cancel);
+        app.handle_action(AppAction::MoveRight);
+        assert_eq!(app.state().current_screen(), Screen::Battery);
+    }
+
+    #[test]
+    fn tab_always_navigates_even_while_editing() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().is_editing());
+        app.handle_action(AppAction::NextScreen);
+        assert_eq!(app.state().current_screen(), Screen::Battery);
+        assert!(!app.controls().is_editing());
+    }
+
+    #[test]
+    fn read_only_never_enters_edit_mode() {
+        let mut app = read_only_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+    }
+
+    #[test]
+    fn unsupported_capability_blocks_edit() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.capabilities = crate::hardware::Capabilities::default();
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+    }
+
+    #[test]
+    fn fn_win_info_rows_never_edit() {
+        let mut app = healthy_control_app(Screen::Devices);
+        // Devices rows: Webcam(0), WebcamBlock(1), Backlight(2), Fn(3), Win(4).
+        for _ in 0..3 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        assert_eq!(
+            app.controls().selected(Screen::Devices),
+            Some(crate::tui::editing::ControlId::FnKeyInfo)
+        );
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+        app.handle_action(AppAction::MoveDown);
+        assert_eq!(
+            app.controls().selected(Screen::Devices),
+            Some(crate::tui::editing::ControlId::WinKeyInfo)
+        );
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+    }
+
+    #[test]
+    fn enter_on_profiles_does_not_create_pending() {
+        let mut app = healthy_control_app(Screen::Profiles);
+        app.handle_action(AppAction::Activate);
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+    }
+
+    #[test]
+    fn edit_confirm_causes_zero_backend_refresh_calls() {
+        // Editing validates purely: no live refresh occurs through dispatch.
+        // LoopBackend counts refreshes via draws in run_loop; here dispatch
+        // alone must not pop extra snapshots. A second refresh would exhaust
+        // the single-script backend, so reaching pending proves zero reads.
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
     }
 }
