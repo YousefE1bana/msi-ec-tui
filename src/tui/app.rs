@@ -23,7 +23,10 @@ use super::executor::{SafeTuiExecutor, TuiMutationExecutor};
 use super::notifications::NotificationCenter;
 use super::palette::{CommandPalette, PaletteCommand};
 use super::profile_catalog::ProfileCatalog;
-use super::{CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen};
+use super::theme::{Theme, ThemeName};
+use super::{
+    CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen_with_theme,
+};
 
 /// Failures that prevent the read-only TUI from running.
 #[derive(Debug, Error)]
@@ -67,6 +70,7 @@ pub struct TuiApp<B, E = SafeTuiExecutor> {
     palette: CommandPalette,
     notifications: NotificationCenter,
     notifications_open: bool,
+    theme_name: ThemeName,
 }
 
 impl<B, E> TuiApp<B, E>
@@ -144,6 +148,16 @@ where
     /// Whether the read-only notification history overlay is visible.
     pub fn notifications_open(&self) -> bool {
         self.notifications_open
+    }
+
+    /// Current named theme identity. Presentation only.
+    pub fn theme_name(&self) -> ThemeName {
+        self.theme_name
+    }
+
+    /// Current theme palette. Every overlay in one frame shares it.
+    pub fn theme(&self) -> Theme {
+        Theme::for_name(self.theme_name)
     }
 
     /// Selectable profile rows: five built-ins plus custom entries in
@@ -321,6 +335,11 @@ where
                 self.palette.close();
                 self.state.apply(crate::app::AppAction::Quit);
             }
+            command if command.theme().is_some() => {
+                let name = command.theme().expect("theme row carries an identity");
+                self.palette.close();
+                self.switch_theme(name);
+            }
             command => {
                 if let Some(screen) = command.screen() {
                     self.palette.close();
@@ -329,6 +348,20 @@ where
                 }
             }
         }
+    }
+
+    /// Switches the session theme with presentation-only effects: no
+    /// backend refresh, no executor call, no filesystem write. Records
+    /// exactly one success notification. Selecting the active theme again
+    /// is harmless.
+    fn switch_theme(&mut self, name: ThemeName) {
+        self.theme_name = name;
+        let notice = super::confirmation::Notice::success(format!(
+            "Theme changed to {}",
+            name.display_name()
+        ));
+        self.notifications.push(notice.clone());
+        self.controls.set_notice(notice);
     }
 
     /// Opens a profile confirmation only when the pure preview deems the
@@ -495,6 +528,7 @@ where
         palette: CommandPalette::default(),
         notifications: NotificationCenter::new(),
         notifications_open: false,
+        theme_name: ThemeName::MsiDark,
     })
 }
 
@@ -588,7 +622,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
         session
             .terminal_mut()
             .draw(|frame| {
-                render_screen(
+                render_screen_with_theme(
                     frame,
                     frame.area(),
                     app.state(),
@@ -600,6 +634,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.palette(),
                     app.notifications(),
                     app.notifications_open(),
+                    &app.theme(),
                 );
             })
             .map(|_| ())
@@ -940,6 +975,7 @@ mod tests {
             palette: crate::tui::palette::CommandPalette::default(),
             notifications: crate::tui::notifications::NotificationCenter::new(),
             notifications_open: false,
+            theme_name: crate::tui::theme::ThemeName::MsiDark,
         }
     }
 
@@ -1948,9 +1984,9 @@ mod tests {
         }
         assert_eq!(app.palette().selected_index(), 0);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.palette().selected(), PaletteCommand::Quit);
+        assert_eq!(app.palette().selected(), PaletteCommand::ThemeLight);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.palette().selected(), PaletteCommand::Help);
+        assert_eq!(app.palette().selected(), PaletteCommand::ThemeTerminal);
     }
 
     #[test]
@@ -2398,5 +2434,80 @@ mod tests {
         let mut app = help_visible_control_app(Screen::Dashboard);
         app.handle_action(AppAction::Quit);
         assert!(app.state().should_quit());
+    }
+
+    // ---- Task 8: named theme switching ----
+
+    #[test]
+    fn session_boots_msi_dark_deterministically() {
+        let app = healthy_control_app(Screen::Dashboard);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
+        let prepared =
+            prepare_tui(fixture_root("gf63"), crate::hardware::LinuxSysfsReader).expect("prepares");
+        assert_eq!(prepared.theme_name(), crate::tui::theme::ThemeName::MsiDark);
+    }
+
+    #[test]
+    fn selecting_each_theme_switches_palette_closed_with_one_notification() {
+        use crate::tui::theme::ThemeName;
+        let cases = [
+            (11, ThemeName::MsiDark, "MSI Dark"),
+            (12, ThemeName::Terminal, "Terminal"),
+            (13, ThemeName::Light, "Light"),
+        ];
+        for (steps, name, display) in cases {
+            let mut app = healthy_control_app(Screen::Dashboard);
+            let history_before = app.live().history().len();
+            app.handle_action(AppAction::TogglePalette);
+            for _ in 0..steps {
+                app.handle_action(AppAction::MoveDown);
+            }
+            app.handle_action(AppAction::Activate);
+            assert_eq!(app.theme_name(), name, "{display}");
+            assert_eq!(app.theme(), crate::tui::theme::Theme::for_name(name));
+            assert!(!app.palette().is_open());
+            assert_eq!(app.executor.command_calls(), 0);
+            assert_eq!(app.executor.profile_calls(), 0);
+            assert_eq!(app.live().history().len(), history_before);
+            assert_eq!(app.notifications().len(), 1);
+            let latest = app.notifications().latest().expect("theme notification");
+            assert!(
+                latest
+                    .message()
+                    .contains(&format!("Theme changed to {display}"))
+            );
+        }
+    }
+
+    #[test]
+    fn reselecting_active_theme_is_harmless() {
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..11 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        // Selection persists across opens: reopening lands back on the
+        // theme row, so Activate reselects it directly.
+        assert_eq!(app.palette().selected_index(), 11);
+        app.handle_action(AppAction::TogglePalette);
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.notifications().len(), 2);
+    }
+
+    #[test]
+    fn pending_confirmation_blocks_theme_switching() {
+        let mut app = healthy_control_app(Screen::Fans);
+        app.handle_action(AppAction::Activate);
+        app.handle_action(AppAction::Activate);
+        assert!(app.controls().pending().is_some());
+        let before = app.theme_name();
+        app.handle_action(AppAction::TogglePalette);
+        assert!(!app.palette().is_open());
+        assert_eq!(app.theme_name(), before);
+        assert!(app.notifications().is_empty());
     }
 }

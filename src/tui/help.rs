@@ -79,7 +79,7 @@ fn help_lines() -> Vec<&'static str> {
         "Esc  Cancel edit or confirmation",
         "One confirm executes at most once",
         "Palette",
-        "P  Command Palette",
+        "P  Command Palette (screens, themes)",
         "General",
         "?  Toggle help",
         "Esc  Close help",

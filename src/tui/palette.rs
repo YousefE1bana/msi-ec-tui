@@ -7,7 +7,8 @@
 //! it can never initiate a mutation.
 //!
 //! Stable command order: the seven screens in canonical `1..7` order,
-//! then Notifications, Clear Notifications, Help, Quit.
+//! then Notifications, Clear Notifications, Help, Quit, then one theme row
+//! per [`ThemeName`](super::theme::ThemeName) in stable identity order.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -45,11 +46,17 @@ pub enum PaletteCommand {
     Help,
     /// Close the palette, then request application quit.
     Quit,
+    /// Close the palette and switch to the MSI Dark theme.
+    ThemeMsiDark,
+    /// Close the palette and switch to the Terminal theme.
+    ThemeTerminal,
+    /// Close the palette and switch to the Light theme.
+    ThemeLight,
 }
 
 impl PaletteCommand {
     /// All commands in stable display order.
-    pub const ALL: [PaletteCommand; 11] = [
+    pub const ALL: [PaletteCommand; 14] = [
         PaletteCommand::GoDashboard,
         PaletteCommand::GoPerformance,
         PaletteCommand::GoFans,
@@ -61,6 +68,9 @@ impl PaletteCommand {
         PaletteCommand::ClearNotifications,
         PaletteCommand::Help,
         PaletteCommand::Quit,
+        PaletteCommand::ThemeMsiDark,
+        PaletteCommand::ThemeTerminal,
+        PaletteCommand::ThemeLight,
     ];
 
     /// Stable user-facing label.
@@ -77,6 +87,19 @@ impl PaletteCommand {
             PaletteCommand::ClearNotifications => "Clear Notifications",
             PaletteCommand::Help => "Help",
             PaletteCommand::Quit => "Quit",
+            PaletteCommand::ThemeMsiDark => "Theme: MSI Dark",
+            PaletteCommand::ThemeTerminal => "Theme: Terminal",
+            PaletteCommand::ThemeLight => "Theme: Light",
+        }
+    }
+
+    /// Theme destination for theme rows; `None` otherwise.
+    pub fn theme(self) -> Option<super::theme::ThemeName> {
+        match self {
+            PaletteCommand::ThemeMsiDark => Some(super::theme::ThemeName::MsiDark),
+            PaletteCommand::ThemeTerminal => Some(super::theme::ThemeName::Terminal),
+            PaletteCommand::ThemeLight => Some(super::theme::ThemeName::Light),
+            _ => None,
         }
     }
 
@@ -93,7 +116,10 @@ impl PaletteCommand {
             PaletteCommand::Notifications
             | PaletteCommand::ClearNotifications
             | PaletteCommand::Help
-            | PaletteCommand::Quit => None,
+            | PaletteCommand::Quit
+            | PaletteCommand::ThemeMsiDark
+            | PaletteCommand::ThemeTerminal
+            | PaletteCommand::ThemeLight => None,
         }
     }
 }
@@ -241,9 +267,9 @@ mod tests {
         let mut palette = CommandPalette::default();
         palette.move_up();
         assert_eq!(palette.selected_index(), PaletteCommand::ALL.len() - 1);
-        assert_eq!(palette.selected(), PaletteCommand::Quit);
+        assert_eq!(palette.selected(), PaletteCommand::ThemeLight);
         palette.move_up();
-        assert_eq!(palette.selected(), PaletteCommand::Help);
+        assert_eq!(palette.selected(), PaletteCommand::ThemeTerminal);
     }
 
     #[test]
@@ -263,6 +289,9 @@ mod tests {
                 "Clear Notifications",
                 "Help",
                 "Quit",
+                "Theme: MSI Dark",
+                "Theme: Terminal",
+                "Theme: Light",
             ]
         );
     }
@@ -290,9 +319,28 @@ mod tests {
             PaletteCommand::ClearNotifications,
             PaletteCommand::Help,
             PaletteCommand::Quit,
+            PaletteCommand::ThemeMsiDark,
+            PaletteCommand::ThemeTerminal,
+            PaletteCommand::ThemeLight,
         ] {
             assert_eq!(command.screen(), None);
         }
+    }
+
+    #[test]
+    fn theme_rows_map_to_theme_identities() {
+        use super::super::theme::ThemeName;
+        assert_eq!(
+            PaletteCommand::ThemeMsiDark.theme(),
+            Some(ThemeName::MsiDark)
+        );
+        assert_eq!(
+            PaletteCommand::ThemeTerminal.theme(),
+            Some(ThemeName::Terminal)
+        );
+        assert_eq!(PaletteCommand::ThemeLight.theme(), Some(ThemeName::Light));
+        assert_eq!(PaletteCommand::GoFans.theme(), None);
+        assert_eq!(PaletteCommand::Quit.theme(), None);
     }
 
     #[test]

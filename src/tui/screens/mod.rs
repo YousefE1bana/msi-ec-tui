@@ -1315,4 +1315,327 @@ mod tests {
         });
         assert!(text.contains("MEC Help"));
     }
+
+    // ---- Task 8: overlays honor the session theme ----
+
+    fn themed_text(screen: Screen, theme: &Theme, width: u16, height: u16) -> String {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(screen);
+        screen_text(width, height, |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                theme,
+            );
+        })
+    }
+
+    fn themed_style(
+        screen: Screen,
+        theme: &Theme,
+        needle: &str,
+    ) -> Option<(ratatui::style::Color, Modifier)> {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(screen);
+        first_cell_style(100, 30, needle, |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                theme,
+            );
+        })
+    }
+
+    #[test]
+    fn navigation_uses_current_theme_primary() {
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        assert_eq!(light.primary, Color::Blue);
+        let (foreground, modifier) = themed_style(Screen::Dashboard, &light, "1 Dashboard")
+            .expect("navigation entry present");
+        assert_eq!(foreground, Color::Blue);
+        assert!(modifier.contains(Modifier::BOLD));
+        // Default terminal theme differs, proving the session theme flows.
+        assert_ne!(Theme::default().primary, Color::Blue);
+    }
+
+    #[test]
+    fn read_only_uses_current_theme_warning() {
+        use crate::hardware::ReadOnlyReason;
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(
+            vec![Ok(healthy_snapshot())],
+            SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnavailable),
+            1,
+        );
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (foreground, _) = first_cell_style(100, 30, "READ-ONLY", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                &light,
+            );
+        })
+        .expect("mode present");
+        assert_eq!(foreground, Color::Yellow);
+        assert_eq!(foreground, light.warning);
+    }
+
+    #[test]
+    fn degraded_uses_current_theme_danger() {
+        use crate::hardware::BackendError;
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let dark = Theme::for_name(ThemeName::MsiDark);
+        let (live, _) = live_for(
+            vec![Ok(healthy_snapshot()), Err(BackendError::Unavailable)],
+            SupportMode::Ready,
+            2,
+        );
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (foreground, _) = first_cell_style(100, 30, "DEGRADED", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                &dark,
+            );
+        })
+        .expect("telemetry state present");
+        assert_eq!(foreground, Color::LightRed);
+        assert_eq!(foreground, dark.danger);
+    }
+
+    #[test]
+    fn confirmation_uses_current_theme() {
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let dark = Theme::for_name(ThemeName::MsiDark);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Fans);
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            Screen::Fans,
+            live.current_snapshot(),
+            &capabilities,
+            live.mode(),
+        ));
+        assert!(controls.confirm(live.mode(), &capabilities));
+        let (foreground, _) = first_cell_style(100, 30, "Confirm Hardware Change", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &controls,
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                &dark,
+            );
+        })
+        .expect("confirmation present");
+        assert_eq!(foreground, Color::Red);
+    }
+
+    #[test]
+    fn palette_uses_current_theme() {
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let mut palette = crate::tui::palette::CommandPalette::default();
+        palette.open();
+        let (foreground, modifier) = first_cell_style(100, 30, "> Dashboard", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &palette,
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                &light,
+            );
+        })
+        .expect("palette selection present");
+        assert_eq!(foreground, Color::Blue);
+        assert!(modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn notification_overlay_uses_current_theme() {
+        use crate::tui::confirmation::Notice;
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let mut center = crate::tui::notifications::NotificationCenter::new();
+        center.push(Notice::success("Applied Fan Mode: silent".to_owned()));
+        let (foreground, _) = first_cell_style(100, 30, "Notifications", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &center,
+                true,
+                &light,
+            );
+        })
+        .expect("notifications title present");
+        assert_eq!(foreground, Color::Blue);
+    }
+
+    #[test]
+    fn help_uses_current_theme() {
+        use crate::app::AppAction;
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let mut app = app_on(Screen::Dashboard);
+        app.apply(AppAction::ShowHelp);
+        let (foreground, _) = first_cell_style(100, 30, "MEC Help", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                &light,
+            );
+        })
+        .expect("help present");
+        assert_eq!(foreground, Color::Blue);
+    }
+
+    #[test]
+    fn compact_uses_current_theme() {
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::style::Color;
+        let light = Theme::for_name(ThemeName::Light);
+        let text = themed_text(Screen::Dashboard, &light, 50, 16);
+        assert!(text.contains("MEC"));
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let (foreground, _) = first_cell_style(50, 16, "MEC", |frame| {
+            render_screen_with_theme(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+                &light,
+            );
+        })
+        .expect("compact header present");
+        assert_eq!(foreground, Color::Blue);
+    }
+
+    #[test]
+    fn tiny_and_zero_area_stay_safe_under_light_theme() {
+        use crate::tui::theme::{Theme, ThemeName};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let light = Theme::for_name(ThemeName::Light);
+        let text = themed_text(Screen::Dashboard, &light, 20, 8);
+        assert!(!text.is_empty());
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_screen_with_theme(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
+                    &light,
+                );
+            })
+            .expect("zero-area themed dispatch draws");
+    }
 }
