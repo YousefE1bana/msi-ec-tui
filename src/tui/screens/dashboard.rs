@@ -1,7 +1,9 @@
-//! Read-only dashboard screen: current telemetry presentation.
+//! Dashboard screen: current telemetry plus labeled history sparklines.
 //!
-//! Renders [`LiveHardware::current_snapshot`] only, never stale history.
-//! No sampling, no sysfs, no terminal lifecycle here.
+//! Current values render [`LiveHardware::current_snapshot`] only, never
+//! stale history. History sparklines read the bounded [`SnapshotHistory`]
+//! and are labeled as history, so a degraded current state still reports
+//! DEGRADED/N/A. No sampling, no sysfs, no terminal lifecycle here.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -12,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::LiveHardware;
 use crate::hardware::{EcBackend, SupportMode};
 
+use crate::tui::history;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
     MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH, SCREEN_FOOTER, battery_lines, device_lines,
@@ -24,11 +27,12 @@ use crate::tui::ui::{
 const MIN_DASHBOARD_WIDTH: u16 = MIN_SCREEN_WIDTH;
 const MIN_DASHBOARD_HEIGHT: u16 = MIN_SCREEN_HEIGHT;
 
-/// Renders the read-only dashboard into `area` with the default theme.
+/// Renders the dashboard into `area` with the default theme.
 ///
 /// Reads only already-sampled [`LiveHardware`] state and performs zero
 /// backend calls. Absent values render `N/A`; a failed latest sample hides
-/// older history values instead of presenting them as current.
+/// older history values instead of presenting them as current. Labeled
+/// history sparklines may remain visible separately.
 pub fn render_dashboard<B: EcBackend>(frame: &mut Frame, area: Rect, live: &LiveHardware<B>) {
     render_dashboard_with_theme(frame, area, live, &Theme::default());
 }
@@ -91,13 +95,17 @@ fn render_panels<B: EcBackend>(
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(columns[1]);
     let snapshot = live.current_snapshot();
-    render_panel(
-        frame,
-        left[0],
-        " THERMALS ",
-        thermals_lines(snapshot),
-        theme,
+    // Glyph budget is the THERMALS inner width: borders consume two cells.
+    // Saturating math keeps narrow panels panic-free; an empty budget
+    // yields label-only rows, never fabricated glyphs.
+    let history_budget = usize::from(left[0].width.saturating_sub(2));
+    let mut thermals = thermals_lines(snapshot);
+    thermals.extend(
+        history::temperature_history_lines(live.history(), history_budget)
+            .into_iter()
+            .map(Line::from),
     );
+    render_panel(frame, left[0], " THERMALS ", thermals, theme);
     render_panel(frame, left[1], " BATTERY ", battery_lines(snapshot), theme);
     render_panel(
         frame,
@@ -515,7 +523,14 @@ mod tests {
         let live = degraded_live();
         assert_eq!(live.history().len(), 1);
         let text = dashboard_text(&live, 100, 30);
-        assert!(!text.contains("63°C"));
+        // Current rows must not present the stale sample as live telemetry;
+        // the value may remain visible only inside labeled history rows.
+        for line in text.lines() {
+            if line.contains("63°C") {
+                assert!(line.contains("History"), "{line:?}");
+            }
+        }
+        assert!(text.lines().any(|line| line.contains("63°C")));
         assert!(!text.contains("77%"));
     }
 
@@ -631,5 +646,90 @@ mod tests {
         terminal
             .draw(|frame| render_dashboard(frame, Rect::new(0, 0, 0, 0), &live))
             .expect("zero-area dashboard draws");
+    }
+
+    #[test]
+    fn full_shows_temperature_history() {
+        let (live, _) = healthy_live();
+        let text = dashboard_text(&live, 100, 30);
+        assert!(text.contains("CPU Temp History: 63°C"));
+        assert!(text.contains("GPU Temp History: 51°C"));
+        assert!(text.contains("min 63 / max 63"));
+        assert!(text.contains("min 51 / max 51"));
+    }
+
+    #[test]
+    fn cpu_only_sensor_does_not_invent_gpu_graph() {
+        let snapshot = HardwareSnapshot {
+            cpu_temperature: TemperatureCelsius::try_from(60).ok(),
+            ..Default::default()
+        };
+        let mut live = LiveHardware::new(
+            device(),
+            SupportMode::Ready,
+            CountingBackend::scripted(vec![Ok(snapshot)]),
+            SnapshotHistory::default(),
+        );
+        live.refresh();
+        let text = dashboard_text(&live, 100, 30);
+        assert!(text.contains("CPU Temp History: 60°C"));
+        assert!(text.contains("GPU Temp History: No history"));
+    }
+
+    #[test]
+    fn gpu_only_sensor_does_not_invent_cpu_graph() {
+        let snapshot = HardwareSnapshot {
+            gpu_temperature: TemperatureCelsius::try_from(49).ok(),
+            ..Default::default()
+        };
+        let mut live = LiveHardware::new(
+            device(),
+            SupportMode::Ready,
+            CountingBackend::scripted(vec![Ok(snapshot)]),
+            SnapshotHistory::default(),
+        );
+        live.refresh();
+        let text = dashboard_text(&live, 100, 30);
+        assert!(text.contains("GPU Temp History: 49°C"));
+        assert!(text.contains("CPU Temp History: No history"));
+    }
+
+    #[test]
+    fn empty_history_shows_no_history_state() {
+        let live = LiveHardware::new(
+            device(),
+            SupportMode::Ready,
+            CountingBackend::scripted(vec![]),
+            SnapshotHistory::default(),
+        );
+        let text = dashboard_text(&live, 100, 30);
+        assert!(text.contains("CPU Temp History: No history"));
+        assert!(text.contains("GPU Temp History: No history"));
+    }
+
+    #[test]
+    fn history_rendering_performs_zero_backend_calls() {
+        let calls = Rc::new(Cell::new(0));
+        let mut live = LiveHardware::new(
+            device(),
+            SupportMode::Ready,
+            CountingBackend::counted(
+                vec![
+                    Ok(healthy_snapshot()),
+                    Ok(healthy_snapshot()),
+                    Ok(healthy_snapshot()),
+                ],
+                Rc::clone(&calls),
+            ),
+            SnapshotHistory::default(),
+        );
+        live.refresh();
+        live.refresh();
+        live.refresh();
+        assert_eq!(calls.get(), 3);
+        assert_eq!(live.history().len(), 3);
+        let _ = dashboard_text(&live, 100, 30);
+        let _ = dashboard_text(&live, 100, 30);
+        assert_eq!(calls.get(), 3);
     }
 }

@@ -132,6 +132,11 @@ fn compact_body<B: EcBackend>(
     match app.current_screen() {
         Screen::Dashboard => {
             let mut lines = thermals_lines(snapshot);
+            lines.extend(
+                crate::tui::history::temperature_summary_lines(live.history())
+                    .into_iter()
+                    .map(Line::from),
+            );
             lines.extend(performance_lines(snapshot));
             lines.extend(battery_lines(snapshot));
             let devices = device_lines(snapshot);
@@ -153,6 +158,11 @@ fn compact_body<B: EcBackend>(
         }
         Screen::Fans => {
             let mut lines = fans_screen::current_lines(snapshot);
+            lines.extend(
+                crate::tui::history::fan_summary_lines(live.history())
+                    .into_iter()
+                    .map(Line::from),
+            );
             lines.extend(crate::tui::controls::control_row_lines(
                 Screen::Fans,
                 snapshot,
@@ -452,7 +462,14 @@ mod tests {
         );
         assert!(text.contains("DEGRADED"));
         assert!(text.contains("CPU Fan: N/A"));
-        assert!(!text.contains("42%"));
+        // The stale sample may remain visible only inside the labeled
+        // history summary, never as current telemetry.
+        for line in text.lines() {
+            if line.contains("42%") {
+                assert!(line.contains("History"), "{line:?}");
+            }
+        }
+        assert!(text.lines().any(|line| line.contains("42%")));
     }
 
     #[test]
@@ -475,5 +492,28 @@ mod tests {
         assert_eq!(layout_tier(Rect::new(0, 0, 40, 10)), LayoutTier::Compact);
         assert_eq!(layout_tier(Rect::new(0, 0, 39, 30)), LayoutTier::Tiny);
         assert_eq!(layout_tier(Rect::new(0, 0, 40, 9)), LayoutTier::Tiny);
+    }
+
+    #[test]
+    fn compact_dashboard_shows_concise_history_summaries() {
+        let text = rendered(Screen::Dashboard, 50, 16);
+        assert!(text.contains("CPU History: 1 samples 63-63°C"));
+        assert!(text.contains("GPU History: 1 samples 51-51°C"));
+    }
+
+    #[test]
+    fn compact_fans_shows_concise_fan_summaries() {
+        let text = rendered(Screen::Fans, 50, 16);
+        assert!(text.contains("CPU Fan History: 1 samples 42-42%"));
+        assert!(text.contains("GPU Fan History: 1 samples 31-31%"));
+        assert!(!text.contains("RPM"));
+    }
+
+    #[test]
+    fn tiny_history_screens_remain_safe() {
+        for screen in [Screen::Dashboard, Screen::Fans] {
+            let text = rendered(screen, 20, 8);
+            assert!(!text.is_empty());
+        }
     }
 }

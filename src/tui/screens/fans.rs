@@ -12,6 +12,7 @@ use crate::hardware::{Capabilities, EcBackend, HardwareSnapshot};
 
 use crate::tui::controls::control_row_lines;
 use crate::tui::editing::ControlState;
+use crate::tui::history;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
     capability_style, fan_mode_text, fan_text, joined_modes, on_off_text, render_panel,
@@ -19,8 +20,8 @@ use crate::tui::ui::{
 };
 
 /// Renders current fan telemetry plus fan capability metadata with
-/// selectable control rows. Fan readings stay percentage-style; no curves,
-/// graphs, or execution.
+/// selectable control rows and labeled history graphs. Fan readings stay
+/// percentage-style; no execution.
 pub fn render_fans<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
@@ -49,11 +50,19 @@ pub(crate) fn render_fans_with_theme<B: EcBackend>(
         controls,
         theme,
     );
+    // Glyph budget is the full-width HISTORY inner width: borders consume
+    // two cells. Saturating math keeps narrow panels panic-free.
+    let history_rows: Vec<Line<'static>> =
+        history::fan_history_lines(live.history(), usize::from(content.width.saturating_sub(2)))
+            .into_iter()
+            .map(Line::from)
+            .collect();
     let panels = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),
             Constraint::Length(control_rows.len() as u16 + 2),
+            Constraint::Length(history_rows.len() as u16 + 2),
             Constraint::Min(0),
         ])
         .split(content);
@@ -65,9 +74,10 @@ pub(crate) fn render_fans_with_theme<B: EcBackend>(
         theme,
     );
     render_panel(frame, panels[1], " CONTROLS ", control_rows, theme);
+    render_panel(frame, panels[2], " HISTORY ", history_rows, theme);
     render_panel(
         frame,
-        panels[2],
+        panels[3],
         " CAPABILITIES ",
         capability_lines(capabilities, theme),
         theme,
@@ -206,7 +216,14 @@ mod tests {
         });
         assert!(text.contains("DEGRADED"));
         assert!(text.contains("CPU Fan: N/A"));
-        assert!(!text.contains("42%"));
+        // The stale sample may remain visible only inside labeled history
+        // rows, never as current telemetry.
+        for line in text.lines() {
+            if line.contains("42%") {
+                assert!(line.contains("History"), "{line:?}");
+            }
+        }
+        assert!(text.lines().any(|line| line.contains("42%")));
     }
 
     #[test]
@@ -318,5 +335,106 @@ mod tests {
                 );
             })
             .expect("zero-area fans draws");
+    }
+
+    #[test]
+    fn full_shows_fan_history_with_percent_semantics() {
+        let text = text();
+        assert!(text.contains("HISTORY"));
+        assert!(text.contains("CPU Fan History: 42%"));
+        assert!(text.contains("GPU Fan History: 31%"));
+        assert!(text.contains("min 42 / max 42"));
+        assert!(!text.contains("RPM"));
+    }
+
+    #[test]
+    fn cpu_only_fan_does_not_invent_gpu_graph() {
+        use crate::hardware::FanPercent;
+        let snapshot = crate::hardware::HardwareSnapshot {
+            cpu_fan: FanPercent::try_from(55).ok(),
+            ..Default::default()
+        };
+        let (live, _) = live_for(vec![Ok(snapshot)], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let text = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert!(text.contains("CPU Fan History: 55%"));
+        assert!(text.contains("GPU Fan History: No history"));
+    }
+
+    #[test]
+    fn gpu_only_fan_does_not_invent_cpu_graph() {
+        use crate::hardware::FanPercent;
+        let snapshot = crate::hardware::HardwareSnapshot {
+            gpu_fan: FanPercent::try_from(70).ok(),
+            ..Default::default()
+        };
+        let (live, _) = live_for(vec![Ok(snapshot)], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let text = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert!(text.contains("GPU Fan History: 70%"));
+        assert!(text.contains("CPU Fan History: No history"));
+    }
+
+    #[test]
+    fn empty_history_shows_no_history_state() {
+        let (live, _) = live_for(
+            vec![Ok(crate::hardware::HardwareSnapshot::default())],
+            SupportMode::Ready,
+            1,
+        );
+        let capabilities = full_capabilities();
+        let text = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert!(text.contains("CPU Fan History: No history"));
+        assert!(text.contains("GPU Fan History: No history"));
+    }
+
+    #[test]
+    fn history_rendering_performs_zero_backend_calls() {
+        let (live, calls) = live_for(
+            vec![
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+            ],
+            SupportMode::Ready,
+            3,
+        );
+        assert_eq!(calls.get(), 3);
+        assert_eq!(live.history().len(), 3);
+        let capabilities = full_capabilities();
+        let _ = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert_eq!(calls.get(), 3);
     }
 }

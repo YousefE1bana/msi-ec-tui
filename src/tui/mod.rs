@@ -11,6 +11,7 @@ pub mod editing;
 mod event;
 pub mod executor;
 mod help;
+mod history;
 mod input;
 mod notifications;
 mod palette;
