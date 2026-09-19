@@ -1,4 +1,4 @@
-//! Key-to-action translation for the read-only TUI.
+//! Key-to-action translation for the interactive TUI.
 //!
 //! Pure mapping from Crossterm key events to terminal-independent
 //! [`AppAction`] intents. Release events are ignored; shortcuts reject

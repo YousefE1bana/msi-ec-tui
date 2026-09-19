@@ -1,4 +1,4 @@
-//! Responsive tiers for the read-only TUI: full, compact, tiny.
+//! Responsive tiers for the interactive TUI: full, compact, tiny.
 //!
 //! Full preserves the Task-4/5 layouts; compact renders the selected
 //! screen's key values as plain lines; tiny falls back safely. Tiers derive

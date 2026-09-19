@@ -2,8 +2,9 @@
 //!
 //! Screens consume semantic roles only and never branch on identity.
 //! [`Theme::default()`] maps exactly to [`ThemeName::Terminal`]. The
-//! interactive session boots [`ThemeName::MsiDark`] until config
-//! persistence lands; that choice lives in TUI preparation, not here.
+//! interactive session boots [`ThemeName::MsiDark`] unless the user
+//! configuration selects another theme; that choice lives in TUI
+//! preparation via [`crate::config::AppConfig`], not here.
 
 use ratatui::style::{Color, Style};
 

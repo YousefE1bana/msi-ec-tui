@@ -8,12 +8,17 @@ safely controlling supported MSI laptops through the
 
 ## Status
 
-PLAN-005 (profiles + transactions, v0.5.0) is implemented. Running
-`cargo run` with no subcommand launches the interactive read-only TUI when
+PLAN-006 (interactive TUI, v0.9.0 release candidate) is implemented.
+Running `cargo run` with no subcommand launches the interactive TUI when
 both stdin and stdout are terminals:
 
-- Arrow keys / hjkl / Tab move between screens
-- `1`–`6` jump directly to a screen
+- `1`–`7` jump directly to a screen (Dashboard, Performance, Fans,
+  Battery, Devices, Profiles, Diagnostics)
+- Arrow keys / Tab move between screens; `h`/`j`/`k`/`l` too unless
+  `vim_keys = false` is configured
+- `P` opens the command palette (screens, notifications, themes)
+- `Enter` edits / accepts / confirms depending on context;
+  `Esc` cancels an edit or confirmation, or closes an overlay
 - `?` toggles help, `q` quits
 
 When stdout is redirected or captured (pipes, scripts, CI), bare `mec` still
@@ -30,14 +35,31 @@ Implemented in this tree:
 - Conservative `READY` / `READ-ONLY` compatibility policy
 - Read-only `msi-ec` backend with validated hardware snapshots
 - `mec doctor [--sys-root PATH]` diagnostics (read-only)
-- Read-only `mec status` with human-readable and `--json` output
+- Privacy-conscious `mec doctor --export` compatibility report for
+  GitHub issues (no serials, hostnames, network data, profile/config
+  contents, or live telemetry)
+- `mec status` with human-readable and `--json` output
 - Runtime battery state (charge, status, AC presence)
-- Read-only `mec monitor` with validated 500ms/1s/2s/5s polling,
+- `mec monitor` with validated 500ms/1s/2s/5s polling,
   bounded in-memory history, Ctrl+C shutdown, and graceful
   snapshot-error degradation with recovery notices
-- Interactive read-only TUI (`mec` on a terminal): Dashboard, Performance,
-  Fans, Battery, Devices, and Diagnostics screens with 1-second polling,
-  keyboard navigation, help overlay, and degraded-telemetry presentation
+- Seven-screen interactive TUI (`mec` on a terminal): Dashboard,
+  Performance, Fans, Battery, Devices, Profiles, and Diagnostics with
+  configurable polling, contextual selection/editing, and an explicit
+  confirmation step before any mutation
+- Safe TUI hardware commands through the existing safety APIs, and TUI
+  profile preview/apply through the transactional pipeline
+- Custom profile catalog (built-ins plus `~/.config/mec/profiles/`)
+- Command palette (`P`) with screens, notification history, and theme
+  switching
+- Bounded notification history (16 entries) behind the result banner
+- Temperature history sparklines (Dashboard) and fan percentage/raw
+  history graphs (Fans); fan values are never RPM
+- Named themes MSI Dark / Terminal / Light with runtime switching
+- Persistent `~/.config/mec/config.toml` settings (refresh interval,
+  theme, vim keys) with strict validation and atomic saves
+- Responsive Full / Compact / Tiny modes with degraded-telemetry
+  presentation
 - Typed hardware commands with pure validation against fresh
   support/capability state (`HardwareCommand`)
 - Restricted `msi-ec` sysfs writer covering a closed set of known nodes,
@@ -65,7 +87,8 @@ Implemented in this tree:
 
 ### CLI controls
 
-Hardware mutation is exposed through explicit CLI controls only:
+Hardware mutation is exposed through explicit CLI controls and through
+confirmed TUI actions (same safe pipeline either way):
 
 ```text
 mec fan mode <MODE>
@@ -88,7 +111,9 @@ driver represents as the typed pair start = 70 / end = 80 (a fixed
 
 ### Profile CLI
 
-Profile mutation is CLI-driven; the interactive TUI remains read-only.
+Profiles can be applied from the CLI or, after an explicit on-screen
+confirmation, from the TUI Profiles screen. Both paths resolve through
+the same safe transactional pipeline.
 
 ```text
 mec profile list
@@ -227,21 +252,50 @@ Notes:
   Linux advisory lock held for the full apply/rollback lifetime, so two
   concurrent `mec profile apply` processes cannot interleave
 
+### TUI configuration
+
+TUI settings persist in:
+
+```text
+~/.config/mec/config.toml
+```
+
+```toml
+refresh_interval_ms = 1000
+theme = "msi-dark"
+vim_keys = true
+```
+
+- `refresh_interval_ms` must be one of `500`, `1000`, `2000`, `5000`
+- `theme` is one of `msi-dark`, `terminal`, `light` (`default` is
+  accepted as an alias for `msi-dark` and normalized on save)
+- `vim_keys = false` unmaps `h`/`j`/`k`/`l`; arrows, Tab, digits, `P`,
+  `?`, and quit shortcuts always work
+- unknown fields (including `mouse`, which MEC does not implement),
+  wrong types, and malformed documents are rejected; a missing file
+  loads defaults without creating anything; an invalid file falls back
+  to defaults with a startup notice while monitoring still launches
+- saves are atomic (temp file plus rename) with user-only permissions
+- theme changes from the command palette persist across launches
+
 ### Privilege model
 
 Control commands execute with the current process permissions. MEC performs
 no sudo/pkexec/polkit/setuid escalation and ships no privileged helper: a
 write the OS denies returns a typed failure (`AccessDenied` chain). The
-interactive TUI remains unprivileged and read-only. A dedicated
-privilege/packaging deployment model remains future work.
+interactive TUI runs unprivileged; supported `READY` controls execute only
+after an explicit confirmation, while `READ-ONLY` compatibility mode
+prohibits writes entirely. A dedicated privilege/packaging deployment
+model remains future work.
 
 Explicitly NOT implemented yet:
 
-- Editable TUI controls / confirmations / command palette / profile
-  screen (PLAN-006)
 - Automatic privileged helper / privilege deployment integration
 - Physical hardware write validation
 - Packaging/release binaries (PLAN-007)
+- Optional advanced fan-curve features not representable through the
+  safe typed commands
+- GUI, cloud, or telemetry features (out of v1 scope)
 
 See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
 [implementation plan](docs/superpowers/plans/2026-09-18-mec-v1-implementation-plan.md).
@@ -251,7 +305,7 @@ See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
 - Primary physical test target: MSI GF series laptops
 - Other MSI laptops through capabilities exposed by the `msi-ec` kernel module
 
-Read-only behavior has been manually smoke-tested on real MSI hardware, but
+Read behavior has been manually smoke-tested on real MSI hardware, but
 hardware WRITE behavior has not yet been physically validated; write
 semantics are currently covered by fake/temp sysfs integration tests.
 

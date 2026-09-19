@@ -6,7 +6,7 @@
 
 use super::action::AppAction;
 
-/// Read-only TUI screen in canonical navigation order.
+/// Interactive TUI screen in canonical navigation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Screen {
     /// Overview of thermals, performance, battery, and devices.
@@ -69,7 +69,7 @@ impl Screen {
     }
 }
 
-/// Interaction and navigation state for the read-only TUI.
+/// Interaction and navigation state for the interactive TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AppState {
     current_screen: Screen,

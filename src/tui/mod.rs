@@ -1,8 +1,7 @@
-//! Read-only TUI runtime: terminal lifecycle, events, and input mapping.
+//! Interactive TUI runtime: terminal lifecycle, events, and input mapping.
 //!
-//! Task 2 establishes the Crossterm/Ratatui runtime foundation. Hardware
-//! access, rendering, and binary orchestration belong to later PLAN-003
-//! tasks. This module never reads sysfs directly.
+//! Hardware access, rendering, and binary orchestration live in sibling
+//! modules. This module never reads sysfs directly.
 
 mod app;
 mod confirmation;

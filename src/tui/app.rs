@@ -29,7 +29,7 @@ use super::{
     CrosstermEventSource, EventSource, TerminalSession, TuiEvent, render_screen_with_theme,
 };
 
-/// Failures that prevent the read-only TUI from running.
+/// Failures that prevent the interactive TUI from running.
 #[derive(Debug, Error)]
 pub enum TuiError {
     /// Device identity could not be established; nothing is invented.
@@ -870,8 +870,8 @@ mod tests {
     }
 
     #[test]
-    fn package_version_is_v05() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.0");
+    fn package_version_is_v09() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.9.0");
     }
 
     #[test]

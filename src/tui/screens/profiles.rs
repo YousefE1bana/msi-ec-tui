@@ -78,7 +78,7 @@ pub(crate) fn render_profiles_with_theme<B: EcBackend>(
         panels[2],
         " NOTE ",
         vec![Line::from(
-            "Viewing applies nothing. Interactive apply is added in later PLAN-006 tasks.",
+            "Viewing applies nothing. Enter confirms an explicit apply.",
         )],
         theme,
     );

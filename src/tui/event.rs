@@ -21,7 +21,7 @@ pub enum TuiEvent {
     Tick,
     /// The terminal was resized.
     Resize { width: u16, height: u16 },
-    /// An event the read-only TUI does not act on.
+    /// An event the TUI does not act on.
     Ignored,
 }
 
