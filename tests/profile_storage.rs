@@ -241,3 +241,82 @@ fn repeated_load_deterministic_and_files_untouched() {
         before
     );
 }
+
+#[test]
+fn symlink_to_regular_file_is_never_followed() {
+    let dir = tempdir().unwrap();
+    let store = store_in(dir.path());
+    write(
+        &store,
+        "real.toml",
+        b"name = \"Real\"\n\n[device]\nkeyboard_backlight = 1\n",
+    );
+    symlink(
+        store.directory().join("real.toml"),
+        store.directory().join("alias.toml"),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.load(&slug("alias")),
+        Err(ProfileStorageError::SymlinkRejected(_))
+    ));
+    // The link target is untouched: loading never opened it for content.
+    assert_eq!(
+        fs::read(store.directory().join("real.toml")).unwrap(),
+        b"name = \"Real\"\n\n[device]\nkeyboard_backlight = 1\n"
+    );
+}
+
+#[test]
+fn symlink_outside_directory_is_never_followed() {
+    let outside = tempdir().unwrap();
+    let secret = outside.path().join("secret.toml");
+    fs::write(
+        &secret,
+        b"name = \"Secret\"\n\n[device]\nkeyboard_backlight = 3\n",
+    )
+    .unwrap();
+    let dir = tempdir().unwrap();
+    let store = store_in(dir.path());
+    fs::create_dir_all(store.directory()).unwrap();
+    symlink(&secret, store.directory().join("sneaky.toml")).unwrap();
+    assert!(matches!(
+        store.load(&slug("sneaky")),
+        Err(ProfileStorageError::SymlinkRejected(_))
+    ));
+    assert_eq!(
+        fs::read(&secret).unwrap(),
+        b"name = \"Secret\"\n\n[device]\nkeyboard_backlight = 3\n"
+    );
+}
+
+#[test]
+fn fifo_target_does_not_block_and_returns_not_regular_file() {
+    use std::ffi::CString;
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let store = store_in(dir.path());
+    fs::create_dir_all(store.directory()).unwrap();
+    let path = store.directory().join("pipe.toml");
+    let raw = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o644) }, 0);
+    // O_NONBLOCK open plus the opened-handle type check means this cannot
+    // block; the timeout only guards the suite against regressions.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let store = store_in(dir.path());
+            let result = store.load(&slug("pipe"));
+            let _ = done_tx.send(result.is_ok());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "FIFO load must not block"
+        );
+    });
+    assert!(matches!(
+        store.load(&slug("pipe")),
+        Err(ProfileStorageError::NotRegularFile(_))
+    ));
+}

@@ -7,8 +7,9 @@
 //! custom profiles.
 
 use std::fmt;
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -217,39 +218,42 @@ impl ProfileStore {
     }
 
     /// Loads `<slug>.toml` beneath the store directory and parses it via
-    /// [`Profile::parse_toml`]. Rejects reserved slugs, missing targets,
-    /// symlinks, non-regular files, oversized files, non-UTF-8 bytes, and
-    /// schema violations with typed errors. Performs no writes.
+    /// [`Profile::parse_toml`]. The file is opened atomically with
+    /// `O_NOFOLLOW | O_NONBLOCK`, so a concurrent replacement with a
+    /// symlink can never be followed: the open itself fails with
+    /// `SymlinkRejected`. Authority attaches to the opened handle —
+    /// [`std::fs::File::metadata`] decides regular-file status, and the
+    /// bounded read comes from that same handle; the path is never
+    /// reopened. Rejects reserved slugs, missing targets, symlinks,
+    /// non-regular files, oversized files, non-UTF-8 bytes, and schema
+    /// violations with typed errors. Performs no writes.
     pub fn load(&self, slug: &CustomProfileSlug) -> Result<Profile, ProfileStorageError> {
         if slug.is_reserved() {
             return Err(ProfileStorageError::ReservedSlug(slug.as_str().to_owned()));
         }
         let target = self.directory.join(format!("{}.toml", slug.as_str()));
-        match std::fs::symlink_metadata(&target) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(ProfileStorageError::SymlinkRejected(
-                        slug.as_str().to_owned(),
-                    ));
-                }
-                if !metadata.file_type().is_file() {
-                    return Err(ProfileStorageError::NotRegularFile(
-                        slug.as_str().to_owned(),
-                    ));
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ProfileStorageError::NotFound(slug.as_str().to_owned()));
-            }
-            Err(error) => return Err(ProfileStorageError::Io(error)),
-        }
-        let file = match File::open(&target) {
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&target)
+        {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(ProfileStorageError::NotFound(slug.as_str().to_owned()));
             }
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return Err(ProfileStorageError::SymlinkRejected(
+                    slug.as_str().to_owned(),
+                ));
+            }
             Err(error) => return Err(ProfileStorageError::Io(error)),
         };
+        let metadata = file.metadata().map_err(ProfileStorageError::Io)?;
+        if !metadata.file_type().is_file() {
+            return Err(ProfileStorageError::NotRegularFile(
+                slug.as_str().to_owned(),
+            ));
+        }
         let mut bytes = Vec::new();
         file.take((MAX_PROFILE_SIZE + 1) as u64)
             .read_to_end(&mut bytes)
@@ -586,6 +590,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn symlink_outside_directory_is_never_followed() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.toml");
+        // Valid profile bytes outside the store: must never be read.
+        fs::write(
+            &secret,
+            b"name = \"Secret\"\n\n[device]\nkeyboard_backlight = 3\n",
+        )
+        .unwrap();
+        let (_temp, store) = store_in_temp();
+        fs::create_dir_all(store.directory()).unwrap();
+        symlink(&secret, store.directory().join("sneaky.toml")).unwrap();
+        assert!(matches!(
+            store.load(&slug("sneaky")),
+            Err(ProfileStorageError::SymlinkRejected(_))
+        ));
+        // The outside file is byte-identical: nothing followed the link.
+        assert_eq!(
+            fs::read(&secret).unwrap(),
+            b"name = \"Secret\"\n\n[device]\nkeyboard_backlight = 3\n"
+        );
+    }
+
+    #[test]
+    fn dangling_symlink_is_rejected() {
+        let (_temp, store) = store_in_temp();
+        fs::create_dir_all(store.directory()).unwrap();
+        symlink(
+            store.directory().join("absent-target.toml"),
+            store.directory().join("ghost.toml"),
+        )
+        .unwrap();
+        assert!(matches!(
+            store.load(&slug("ghost")),
+            Err(ProfileStorageError::SymlinkRejected(_))
+        ));
+    }
+
+    #[test]
+    fn fifo_target_returns_not_regular_file_without_blocking() {
+        use std::ffi::CString;
+        use std::time::Duration;
+
+        let (_temp, store) = store_in_temp();
+        fs::create_dir_all(store.directory()).unwrap();
+        let path = store.directory().join("pipe.toml");
+        let raw = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o644) }, 0);
+        // O_NONBLOCK open plus opened-handle type check means this load
+        // cannot block; the timeout only guards against regressions.
+        let store_clone = ProfileStore::new(store.directory());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let result = store_clone.load(&slug("pipe"));
+                let _ = done_tx.send(result.is_ok());
+            });
+            assert!(
+                done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+                "FIFO load must not block"
+            );
+        });
+        assert!(matches!(
+            store.load(&slug("pipe")),
+            Err(ProfileStorageError::NotRegularFile(_))
+        ));
+    }
     #[test]
     fn directory_target_rejected() {
         let (_temp, store) = store_in_temp();
