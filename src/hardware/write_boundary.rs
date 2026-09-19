@@ -26,20 +26,42 @@ pub trait HardwareWriteBoundary {
 
 /// Why a boundary crossing failed. Carries human-readable context only;
 /// never paths, command lines, or secrets.
+///
+/// Every variant carries an explicit hardware-mutation phase: variants
+/// describing failures strictly before a write-capable handle existed
+/// report [`may_have_mutated`](Self::may_have_mutated) as false, while
+/// failures once a target has been opened for writing (truncate may
+/// already have taken effect) or a write was attempted report true.
+/// Consumers must use that accessor — never message text — to decide
+/// whether a failed step needs rollback.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WriteBoundaryError {
-    /// The transport refused the write for privilege reasons.
+    /// The transport refused the write for privilege reasons before any
+    /// mutation could occur (target preparation / open / discovery).
     #[error("hardware write access denied")]
     AccessDenied,
-    /// No write transport is available.
+    /// No write transport is available; nothing was mutated.
     #[error("hardware write transport unavailable")]
     Unavailable,
-    /// The write was attempted but failed.
+    /// Preparation failed before any mutation could occur.
     #[error("hardware write failed: {0}")]
     ExecutionFailed(String),
+    /// The target was opened for writing but the write or its readback
+    /// failed; hardware may already have been mutated.
+    #[error("hardware write failed after target open: {0}")]
+    WriteFailed(String),
     /// The write completed but readback did not show the requested state.
     #[error("hardware write verification failed: {0}")]
     VerificationFailed(&'static str),
+}
+
+impl WriteBoundaryError {
+    /// Whether hardware may have been mutated: true once a write-capable
+    /// handle has been successfully opened or a write was attempted.
+    /// Pure typed data; never inferred from display strings.
+    pub fn may_have_mutated(&self) -> bool {
+        matches!(self, Self::WriteFailed(_) | Self::VerificationFailed(_))
+    }
 }
 
 #[cfg(test)]
@@ -216,9 +238,24 @@ mod tests {
             "hardware write failed: fan write rejected"
         );
         assert_eq!(
+            WriteBoundaryError::WriteFailed("fan mode write".to_owned()).to_string(),
+            "hardware write failed after target open: fan mode write"
+        );
+        assert_eq!(
             WriteBoundaryError::VerificationFailed("fan mode").to_string(),
             "hardware write verification failed: fan mode"
         );
+    }
+
+    #[test]
+    fn mutation_state_is_explicit_per_variant() {
+        assert!(!WriteBoundaryError::AccessDenied.may_have_mutated());
+        assert!(!WriteBoundaryError::Unavailable.may_have_mutated());
+        assert!(
+            !WriteBoundaryError::ExecutionFailed("fan mode write".to_owned()).may_have_mutated()
+        );
+        assert!(WriteBoundaryError::WriteFailed("fan mode write".to_owned()).may_have_mutated());
+        assert!(WriteBoundaryError::VerificationFailed("fan mode").may_have_mutated());
     }
 
     #[test]

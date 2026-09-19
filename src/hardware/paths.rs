@@ -45,6 +45,13 @@ impl SystemPaths {
         Self { root: root.into() }
     }
 
+    /// The raw filesystem root. Crate-private: only the transaction lock
+    /// needs the inode itself; all hardware access resolves through the
+    /// validated accessors above.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Resolves exactly one normal DMI attribute filename.
     pub fn dmi(&self, attribute: &str) -> Result<PathBuf, PathValidationError> {
         validate_component(attribute)?;
