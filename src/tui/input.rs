@@ -13,7 +13,20 @@ use crate::app::{AppAction, Screen};
 /// Returns `None` for release events and unmapped keys. Modifier handling
 /// is conservative: shortcuts fire only with their natural modifiers, so
 /// `Alt+q` or `Ctrl+q` never quit and `Alt+1` never jumps screens.
+/// Vim navigation (`h`/`j`/`k`/`l`) stays enabled; use
+/// [`action_for_key_with_options`] to honor the configured `vim_keys`
+/// setting.
 pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
+    action_for_key_with_options(key, true)
+}
+
+/// Key translation honoring the configured vim-keys setting.
+///
+/// With `vim_keys` false, `h`/`j`/`k`/`l` become unmapped while arrow keys,
+/// Tab, digits, palette, help, and quit shortcuts keep working. The input
+/// layer never reads files: callers pass the prepared boolean down from
+/// the loaded [`crate::config::AppConfig`].
+pub fn action_for_key_with_options(key: KeyEvent, vim_keys: bool) -> Option<AppAction> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
@@ -27,10 +40,10 @@ pub fn action_for_key(key: KeyEvent) -> Option<AppAction> {
         KeyCode::Down if key.modifiers.is_empty() => Some(AppAction::MoveDown),
         KeyCode::Left if key.modifiers.is_empty() => Some(AppAction::MoveLeft),
         KeyCode::Up if key.modifiers.is_empty() => Some(AppAction::MoveUp),
-        KeyCode::Char('l') if key.modifiers.is_empty() => Some(AppAction::MoveRight),
-        KeyCode::Char('j') if key.modifiers.is_empty() => Some(AppAction::MoveDown),
-        KeyCode::Char('h') if key.modifiers.is_empty() => Some(AppAction::MoveLeft),
-        KeyCode::Char('k') if key.modifiers.is_empty() => Some(AppAction::MoveUp),
+        KeyCode::Char('l') if key.modifiers.is_empty() && vim_keys => Some(AppAction::MoveRight),
+        KeyCode::Char('j') if key.modifiers.is_empty() && vim_keys => Some(AppAction::MoveDown),
+        KeyCode::Char('h') if key.modifiers.is_empty() && vim_keys => Some(AppAction::MoveLeft),
+        KeyCode::Char('k') if key.modifiers.is_empty() && vim_keys => Some(AppAction::MoveUp),
         KeyCode::Enter if key.modifiers.is_empty() => Some(AppAction::Activate),
         KeyCode::Esc if key.modifiers.is_empty() => Some(AppAction::Cancel),
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
@@ -67,7 +80,7 @@ mod tests {
 
     use crate::app::{AppAction, Screen};
 
-    use super::action_for_key;
+    use super::{action_for_key, action_for_key_with_options};
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
@@ -425,5 +438,68 @@ mod tests {
             action_for_key(press(KeyCode::Enter, KeyModifiers::empty())),
             Some(AppAction::Activate)
         );
+    }
+
+    #[test]
+    fn vim_keys_disabled_unmaps_hjkl() {
+        for key in ['h', 'j', 'k', 'l'] {
+            assert_eq!(
+                action_for_key_with_options(
+                    press(KeyCode::Char(key), KeyModifiers::empty()),
+                    false
+                ),
+                None,
+                "{key} must stay unmapped when vim keys are off",
+            );
+        }
+    }
+
+    #[test]
+    fn vim_keys_disabled_keeps_arrows_tab_digits_palette() {
+        use crate::app::Screen;
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Right, KeyModifiers::empty()), false),
+            Some(AppAction::MoveRight)
+        );
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Up, KeyModifiers::empty()), false),
+            Some(AppAction::MoveUp)
+        );
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Tab, KeyModifiers::empty()), false),
+            Some(AppAction::NextScreen)
+        );
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Char('3'), KeyModifiers::empty()), false),
+            Some(AppAction::GoTo(Screen::Fans))
+        );
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Char('p'), KeyModifiers::empty()), false),
+            Some(AppAction::TogglePalette)
+        );
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Enter, KeyModifiers::empty()), false),
+            Some(AppAction::Activate)
+        );
+        assert_eq!(
+            action_for_key_with_options(press(KeyCode::Esc, KeyModifiers::empty()), false),
+            Some(AppAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn vim_keys_enabled_keeps_hjkl() {
+        for (key, action) in [
+            ('h', AppAction::MoveLeft),
+            ('j', AppAction::MoveDown),
+            ('k', AppAction::MoveUp),
+            ('l', AppAction::MoveRight),
+        ] {
+            assert_eq!(
+                action_for_key_with_options(press(KeyCode::Char(key), KeyModifiers::empty()), true),
+                Some(action),
+                "{key} must navigate when vim keys are on",
+            );
+        }
     }
 }

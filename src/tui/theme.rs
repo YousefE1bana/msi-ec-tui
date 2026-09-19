@@ -32,6 +32,28 @@ impl ThemeName {
             ThemeName::Light => "Light",
         }
     }
+
+    /// Canonical persistent config slug. Never a display string: the
+    /// user-facing name and the on-disk value are separate concepts.
+    pub const fn config_name(self) -> &'static str {
+        match self {
+            ThemeName::MsiDark => "msi-dark",
+            ThemeName::Terminal => "terminal",
+            ThemeName::Light => "light",
+        }
+    }
+
+    /// Parses a config slug. Accepts the three canonical values plus the
+    /// `default` alias (design-spec compatibility), which maps to the
+    /// interactive product default MSI Dark. Anything else is rejected.
+    pub fn from_config_name(value: &str) -> Option<Self> {
+        match value {
+            "msi-dark" | "default" => Some(ThemeName::MsiDark),
+            "terminal" => Some(ThemeName::Terminal),
+            "light" => Some(ThemeName::Light),
+            _ => None,
+        }
+    }
 }
 
 /// Semantic color roles consumed by screens, chrome, and overlays.
@@ -227,6 +249,33 @@ mod tests {
         let theme = Theme::for_name(ThemeName::MsiDark);
         assert_eq!(theme.primary, Color::Red);
         assert_eq!(theme.background, Color::Black);
+    }
+
+    #[test]
+    fn theme_config_names_are_stable_slugs() {
+        use super::ThemeName;
+        assert_eq!(ThemeName::MsiDark.config_name(), "msi-dark");
+        assert_eq!(ThemeName::Terminal.config_name(), "terminal");
+        assert_eq!(ThemeName::Light.config_name(), "light");
+        assert_eq!(
+            ThemeName::from_config_name("msi-dark"),
+            Some(ThemeName::MsiDark)
+        );
+        assert_eq!(
+            ThemeName::from_config_name("terminal"),
+            Some(ThemeName::Terminal)
+        );
+        assert_eq!(ThemeName::from_config_name("light"), Some(ThemeName::Light));
+        // `default` is the design-spec compatibility alias for MSI Dark.
+        assert_eq!(
+            ThemeName::from_config_name("default"),
+            Some(ThemeName::MsiDark)
+        );
+        // Display strings are never valid config values.
+        assert_eq!(ThemeName::from_config_name("MSI Dark"), None);
+        assert_eq!(ThemeName::from_config_name("Terminal "), None);
+        assert_eq!(ThemeName::from_config_name(""), None);
+        assert_eq!(ThemeName::from_config_name("dark"), None);
     }
 
     #[test]

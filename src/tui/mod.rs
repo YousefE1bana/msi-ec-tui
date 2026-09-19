@@ -26,8 +26,11 @@ pub mod ui;
 pub use app::{
     TuiApp, prepare_tui, prepare_tui_with_profile_store, run_tui, run_tui_loop, should_launch_tui,
 };
-pub use event::{CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event};
-pub use input::action_for_key;
+pub use event::{
+    CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event,
+    event_to_tui_event_with_options,
+};
+pub use input::{action_for_key, action_for_key_with_options};
 pub use profile_catalog::{CustomProfileEntry, ProfileCatalog};
 pub use runtime::{run_event_loop, run_event_loop_with_ticks};
 pub use screens::{

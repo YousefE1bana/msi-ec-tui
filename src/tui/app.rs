@@ -10,11 +10,12 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::app::{AppState, LiveHardware, ProfileSelection, Screen};
+use crate::config::{AppConfig, AppConfigStore, ConfigError};
 use crate::hardware::{
     Capabilities, CapabilityDetector, CapabilityDiscoveryError, EcBackend, LinuxSysfsReader,
     MsiEcBackend, SupportEvaluator, SupportMode, SysfsReader, SystemPaths,
 };
-use crate::monitoring::{PollInterval, SnapshotHistory};
+use crate::monitoring::SnapshotHistory;
 use crate::profiles::ProfilePlanner;
 
 use super::confirmation::{PendingMutation, ProfilePending, ProfileSource};
@@ -71,6 +72,8 @@ pub struct TuiApp<B, E = SafeTuiExecutor> {
     notifications: NotificationCenter,
     notifications_open: bool,
     theme_name: ThemeName,
+    config: AppConfig,
+    config_store: Option<AppConfigStore>,
 }
 
 impl<B, E> TuiApp<B, E>
@@ -158,6 +161,18 @@ where
     /// Current theme palette. Every overlay in one frame shares it.
     pub fn theme(&self) -> Theme {
         Theme::for_name(self.theme_name)
+    }
+
+    /// Loaded user configuration (defaults when unavailable/invalid).
+    /// Renderers never read this directly; preparation copies the theme
+    /// out and the event loop reads the interval and vim-keys setting.
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    /// Event-loop poll timeout derived from the configured interval.
+    pub fn poll_timeout(&self) -> Duration {
+        self.config.refresh_interval().as_duration()
     }
 
     /// Selectable profile rows: five built-ins plus custom entries in
@@ -353,16 +368,31 @@ where
         }
     }
 
-    /// Switches the session theme with presentation-only effects: no
-    /// backend refresh, no executor call, no filesystem write. Records
-    /// exactly one success notification. Selecting the active theme again
-    /// is harmless.
+    /// Switches the session theme and persists it: the runtime theme
+    /// changes immediately, the in-memory config follows, and an atomic
+    /// config save is attempted. No backend refresh, no executor call.
+    /// Records exactly one notice: success on save, or a truthful
+    /// session-only notice when persistence fails (the visible theme is
+    /// never rolled back). Selecting the active theme again is harmless.
     fn switch_theme(&mut self, name: ThemeName) {
         self.theme_name = name;
-        let notice = super::confirmation::Notice::success(format!(
-            "Theme changed to {}",
-            name.display_name()
-        ));
+        self.config.set_theme(name);
+        let notice = match self.config_store.as_ref() {
+            Some(store) => match store.save(&self.config) {
+                Ok(()) => super::confirmation::Notice::success(format!(
+                    "Theme changed to {}",
+                    name.display_name()
+                )),
+                Err(error) => super::confirmation::Notice::failure(format!(
+                    "Theme changed to {} for this session; config save failed: {error}",
+                    name.display_name()
+                )),
+            },
+            None => super::confirmation::Notice::success(format!(
+                "Theme changed to {}",
+                name.display_name()
+            )),
+        };
         self.notifications.push(notice.clone());
         self.controls.set_notice(notice);
     }
@@ -505,6 +535,31 @@ fn prepare_tui_with_catalog<R>(
 where
     R: SysfsReader + Clone,
 {
+    let store = AppConfigStore::user_default().ok();
+    let loaded = match store.as_ref() {
+        Some(store) => store.load(),
+        None => Err(ConfigError::ConfigDirectoryUnavailable),
+    };
+    prepare_tui_full(paths, reader, profile_catalog, loaded, store)
+}
+
+/// Full preparation with an explicit config outcome plus an optional
+/// persistence store. Production passes the user-default load result;
+/// tests inject documents or failures deterministically without touching
+/// the real home directory.
+///
+/// A failed load never aborts monitoring: defaults apply and one startup
+/// notice records the safe Display error (path-free by construction).
+fn prepare_tui_full<R>(
+    paths: SystemPaths,
+    reader: R,
+    profile_catalog: ProfileCatalog,
+    loaded: Result<AppConfig, ConfigError>,
+    config_store: Option<AppConfigStore>,
+) -> Result<TuiApp<MsiEcBackend<R>>, TuiError>
+where
+    R: SysfsReader + Clone,
+{
     // Same root for reads and the production executor by construction.
     let executor = SafeTuiExecutor::new(paths.clone());
     let mode = SupportEvaluator::new(paths.clone(), reader.clone()).evaluate();
@@ -520,7 +575,7 @@ where
             }
         }
     };
-    Ok(TuiApp {
+    let mut app = TuiApp {
         state: AppState::default(),
         live: LiveHardware::new(device, mode, backend, SnapshotHistory::default()),
         capabilities,
@@ -532,7 +587,39 @@ where
         notifications: NotificationCenter::new(),
         notifications_open: false,
         theme_name: ThemeName::MsiDark,
-    })
+        config: AppConfig::default(),
+        config_store: None,
+    };
+    apply_loaded_config(&mut app, loaded, config_store);
+    Ok(app)
+}
+
+/// Applies a loaded config outcome to a prepared app: valid configs choose
+/// the initial theme, failures fall back to defaults with one startup
+/// notice. Shared by production preparation and config-injection tests.
+fn apply_loaded_config<B, E>(
+    app: &mut TuiApp<B, E>,
+    loaded: Result<AppConfig, ConfigError>,
+    config_store: Option<AppConfigStore>,
+) where
+    B: EcBackend,
+    E: TuiMutationExecutor,
+{
+    match loaded {
+        Ok(config) => {
+            app.theme_name = config.theme();
+            app.config = config;
+            app.config_store = config_store;
+        }
+        Err(error) => {
+            app.config_store = config_store;
+            let notice = super::confirmation::Notice::failure(format!(
+                "Config load failed (using defaults): {error}"
+            ));
+            app.notifications.push(notice.clone());
+            app.controls.set_notice(notice);
+        }
+    }
 }
 
 /// Launches the TUI only when both standard streams are terminals, so
@@ -619,8 +706,11 @@ fn resolve_outcome(
 pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
     let mut app = prepare_tui(paths, LinuxSysfsReader)?;
     let mut session = TerminalSession::enter().map_err(TuiError::Terminal)?;
-    let mut events = CrosstermEventSource;
-    let timeout = PollInterval::default().as_duration();
+    // The configured interval drives the loop timeout and the configured
+    // vim-keys setting drives input mapping; CLI monitor semantics are
+    // untouched.
+    let timeout = app.poll_timeout();
+    let mut events = CrosstermEventSource::with_vim_keys(app.config().vim_keys());
     let runtime = run_tui_loop(&mut app, &mut events, timeout, |app| {
         session
             .terminal_mut()
@@ -979,6 +1069,8 @@ mod tests {
             notifications: crate::tui::notifications::NotificationCenter::new(),
             notifications_open: false,
             theme_name: crate::tui::theme::ThemeName::MsiDark,
+            config: crate::config::AppConfig::default(),
+            config_store: None,
         }
     }
 
@@ -2610,5 +2702,166 @@ mod tests {
         assert!(!app.palette().is_open());
         assert_eq!(app.theme_name(), before);
         assert!(app.notifications().is_empty());
+    }
+
+    // ---- Task 9: persistent configuration ----
+
+    fn prepared_with_config(
+        loaded: Result<crate::config::AppConfig, crate::config::ConfigError>,
+        store: Option<crate::config::AppConfigStore>,
+    ) -> TuiApp<
+        crate::hardware::MsiEcBackend<crate::hardware::LinuxSysfsReader>,
+        crate::tui::executor::SafeTuiExecutor,
+    > {
+        super::prepare_tui_full(
+            fixture_root("gf63"),
+            crate::hardware::LinuxSysfsReader,
+            crate::tui::ProfileCatalog::empty(),
+            loaded,
+            store,
+        )
+        .expect("fixture preparation succeeds")
+    }
+
+    #[test]
+    fn valid_config_chooses_initial_light() {
+        let config = crate::config::parse_config_text("theme = \"light\"\n").expect("light parses");
+        let app = prepared_with_config(Ok(config), None);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::Light);
+        assert_eq!(app.config().theme(), crate::tui::theme::ThemeName::Light);
+        assert!(app.notifications().is_empty());
+    }
+
+    #[test]
+    fn valid_config_chooses_initial_terminal() {
+        let config =
+            crate::config::parse_config_text("theme = \"terminal\"\n").expect("terminal parses");
+        let app = prepared_with_config(Ok(config), None);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::Terminal);
+    }
+
+    #[test]
+    fn default_config_chooses_msi_dark() {
+        let app = prepared_with_config(Ok(crate::config::AppConfig::default()), None);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
+        assert_eq!(
+            app.poll_timeout(),
+            crate::monitoring::PollInterval::default().as_duration()
+        );
+    }
+
+    #[test]
+    fn configured_refresh_interval_reaches_poll_timeout() {
+        use std::time::Duration;
+        let config =
+            crate::config::parse_config_text("refresh_interval_ms = 2000\n").expect("2000 parses");
+        let app = prepared_with_config(Ok(config), None);
+        // Production run_tui drives the event loop with this timeout.
+        assert_eq!(app.poll_timeout(), Duration::from_secs(2));
+        let config =
+            crate::config::parse_config_text("refresh_interval_ms = 500\n").expect("500 parses");
+        let app = prepared_with_config(Ok(config), None);
+        assert_eq!(app.poll_timeout(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn configured_vim_setting_reaches_event_source() {
+        use crate::tui::CrosstermEventSource;
+        let config = crate::config::parse_config_text("vim_keys = false\n").expect("parses");
+        let app = prepared_with_config(Ok(config), None);
+        assert!(!app.config().vim_keys());
+        // Production run_tui builds the source from this flag.
+        let source = CrosstermEventSource::with_vim_keys(app.config().vim_keys());
+        assert!(!source.vim_keys());
+    }
+
+    #[test]
+    fn palette_theme_change_persists_in_temp_store() {
+        use crate::config::{AppConfigStore, parse_config_text};
+        let dir = tempfile::tempdir().expect("config TempDir constructs");
+        let store = AppConfigStore::new(dir.path().join("mec").join("config.toml"));
+        // Seed refresh/vim settings that must survive the theme save.
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        std::fs::write(
+            store.path(),
+            b"refresh_interval_ms = 2000\ntheme = \"msi-dark\"\nvim_keys = false\n",
+        )
+        .unwrap();
+        let config = store.load().unwrap();
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.config = config;
+        app.config_store = Some(store);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
+        let history_before = app.live().history().len();
+        // Drive the palette to "Theme: Light" (index 13) and activate.
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..13 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::Light);
+        assert_eq!(app.config().theme(), crate::tui::theme::ThemeName::Light);
+        assert!(!app.palette().is_open());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("theme notice");
+        assert!(latest.message().contains("Theme changed to Light"));
+        // The file holds the full normalized current config.
+        let text = std::fs::read_to_string(app.config_store.as_ref().unwrap().path()).unwrap();
+        assert_eq!(
+            text,
+            "refresh_interval_ms = 2000\ntheme = \"light\"\nvim_keys = false\n"
+        );
+        let reloaded = parse_config_text(&text).unwrap();
+        assert_eq!(reloaded, app.config().clone());
+    }
+
+    #[test]
+    fn persistence_failure_keeps_runtime_theme_with_truthful_notice() {
+        use crate::config::AppConfigStore;
+        let dir = tempfile::tempdir().expect("config TempDir constructs");
+        // A regular file where the directory should be: saves fail.
+        let blocker = dir.path().join("mec");
+        std::fs::write(&blocker, b"not a directory\n").unwrap();
+        let store = AppConfigStore::new(blocker.join("config.toml"));
+        let mut app = healthy_control_app(Screen::Dashboard);
+        app.config_store = Some(store);
+        let history_before = app.live().history().len();
+        app.handle_action(AppAction::TogglePalette);
+        for _ in 0..13 {
+            app.handle_action(AppAction::MoveDown);
+        }
+        app.handle_action(AppAction::Activate);
+        // Runtime theme changed despite the failed save.
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::Light);
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        assert_eq!(app.live().history().len(), history_before);
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("truthful notice");
+        assert!(
+            latest
+                .message()
+                .contains("Theme changed to Light for this session")
+        );
+        assert!(latest.message().contains("config save failed"));
+    }
+
+    #[test]
+    fn invalid_config_falls_back_to_defaults_nonfatally() {
+        let app = prepared_with_config(
+            Err(crate::config::ConfigError::Schema("bad = [\n".to_owned())),
+            None,
+        );
+        assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
+        assert_eq!(app.config(), &crate::config::AppConfig::default());
+        // One startup notice, path-free, and monitoring still launched.
+        assert_eq!(app.notifications().len(), 1);
+        let latest = app.notifications().latest().expect("startup notice");
+        assert!(latest.message().contains("using defaults"));
+        assert!(!latest.message().contains("home"));
+        assert!(app.live().device().product_name.contains("GF63"));
     }
 }

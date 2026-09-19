@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod cli;
+pub mod config;
 pub mod diagnostics;
 pub mod hardware;
 pub mod monitoring;
