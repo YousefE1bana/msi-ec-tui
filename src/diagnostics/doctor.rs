@@ -1,14 +1,17 @@
 //! First diagnostic surface: `mec doctor` compatibility reporting.
 //!
-//! Read-only. Composes existing hardware abstractions; the final verdict
-//! always comes from [`SupportEvaluator`]. Formatting lives here, policy
-//! lives in `hardware`.
+//! Read-only. Renders one shared [`CompatibilityEvaluation`]; the support
+//! verdict always comes from [`SupportEvaluator`] via that evaluation.
+//! Formatting lives here, policy lives in `hardware` plus the shared
+//! evaluation composition.
 
 use std::fmt;
 
-use crate::hardware::{
-    CapabilityDetector, CapabilityDiscoveryError, DetectionError, DeviceDetector, LinuxSysfsReader,
-    ReadOnlyReason, SupportEvaluator, SupportMode, SysfsError, SysfsReader, SystemPaths,
+use crate::hardware::{LinuxSysfsReader, ReadOnlyReason, SupportMode, SystemPaths};
+
+use super::evaluation::{
+    CapabilityStatus, CompatibilityEvaluation, IdentityOutcome, InterfaceStatus,
+    evaluate_compatibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,50 +89,64 @@ fn push_feature(report: &mut DoctorReport, present: bool, name: &str) {
 /// Never fails on routine hardware conditions: a READ-ONLY diagnosis is a
 /// successful evaluation, not an error.
 pub fn doctor(paths: SystemPaths, reader: LinuxSysfsReader) -> DoctorReport {
-    let mode = SupportEvaluator::new(paths.clone(), reader).evaluate();
-    let mut report = DoctorReport {
-        mode,
-        lines: Vec::new(),
-    };
+    DoctorReport::from_evaluation(&evaluate_compatibility(paths, reader))
+}
 
-    match DeviceDetector::new(paths.clone(), reader).detect_identity() {
-        Ok(device) => report.push(
-            Verdict::Pass,
-            format!("MSI laptop detected: {}", device.product_name),
-        ),
-        Err(DetectionError::UnsupportedVendor { .. }) => {
-            report.push(Verdict::Fail, "MSI laptop not detected");
-        }
-        Err(_) => report.push(Verdict::Fail, "Hardware identity could not be verified"),
-    }
+impl DoctorReport {
+    /// Renders one prepared compatibility evaluation. Pure formatting over
+    /// shared data: no detection, no discovery, no second evaluation pass.
+    pub fn from_evaluation(evaluation: &CompatibilityEvaluation) -> Self {
+        let mut report = DoctorReport {
+            mode: evaluation.mode.clone(),
+            lines: Vec::new(),
+        };
 
-    if cfg!(target_os = "linux") {
-        report.push(Verdict::Pass, "Linux environment supported");
-    } else {
-        report.push(Verdict::Warn, "Non-Linux environment: unsupported");
-    }
+        match evaluation.identity {
+            IdentityOutcome::Msi => report.push(
+                Verdict::Pass,
+                format!(
+                    "MSI laptop detected: {}",
+                    evaluation
+                        .device
+                        .as_ref()
+                        .map(|device| device.product_name.as_str())
+                        .unwrap_or("unknown product")
+                ),
+            ),
+            IdentityOutcome::NotMsi => {
+                report.push(Verdict::Fail, "MSI laptop not detected");
+            }
+            IdentityOutcome::Unverified => {
+                report.push(Verdict::Fail, "Hardware identity could not be verified");
+            }
+        }
 
-    let root_enumerable = match reader.list_entries(&paths.msi_ec_root()) {
-        Ok(_) => {
-            report.push(Verdict::Pass, "msi-ec interface available");
-            true
+        if cfg!(target_os = "linux") {
+            report.push(Verdict::Pass, "Linux environment supported");
+        } else {
+            report.push(Verdict::Warn, "Non-Linux environment: unsupported");
         }
-        Err(SysfsError::NotFound(_)) => {
-            report.push(Verdict::Fail, "msi-ec interface unavailable");
-            false
-        }
-        Err(_) => {
-            report.push(Verdict::Fail, "msi-ec interface unreadable");
-            false
-        }
-    };
 
-    // Coherence diagnostics require an enumerable root: without one there is
-    // no interface to call coherent, so feature lines are omitted rather
-    // than fabricated. The final mode still comes from `SupportEvaluator`.
-    if root_enumerable {
-        match CapabilityDetector::new(paths.clone(), reader).discover() {
-            Ok(capabilities) => {
+        match evaluation.interface {
+            InterfaceStatus::Available => {
+                report.push(Verdict::Pass, "msi-ec interface available");
+            }
+            InterfaceStatus::Unavailable => {
+                report.push(Verdict::Fail, "msi-ec interface unavailable");
+                return report;
+            }
+            InterfaceStatus::Unreadable => {
+                report.push(Verdict::Fail, "msi-ec interface unreadable");
+                return report;
+            }
+        }
+
+        // Coherence diagnostics require an enumerable root: without one
+        // there is no interface to call coherent, so feature lines are
+        // omitted rather than fabricated. The evaluation guarantees
+        // `NotChecked` exactly in that case.
+        match &evaluation.capabilities {
+            CapabilityStatus::Available(capabilities) => {
                 report.push(Verdict::Pass, "EC interface coherent");
                 push_feature(
                     &mut report,
@@ -154,12 +171,114 @@ pub fn doctor(paths: SystemPaths, reader: LinuxSysfsReader) -> DoctorReport {
                 push_feature(&mut report, capabilities.cpu_temperature, "CPU temperature");
                 push_feature(&mut report, capabilities.gpu_temperature, "GPU temperature");
             }
-            Err(CapabilityDiscoveryError::Read { .. }) => {
+            CapabilityStatus::Unreadable => {
                 report.push(Verdict::Fail, "EC capabilities unreadable");
             }
-            Err(_) => report.push(Verdict::Fail, "EC interface inconsistent"),
+            CapabilityStatus::Inconsistent => {
+                report.push(Verdict::Fail, "EC interface inconsistent");
+            }
+            CapabilityStatus::NotChecked => {}
+        }
+
+        report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_root(name: &str) -> SystemPaths {
+        SystemPaths::new(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join(name),
+        )
+    }
+
+    #[test]
+    fn gf63_output_preserves_established_lines_in_order() {
+        let text = doctor(fixture_root("gf63"), LinuxSysfsReader).to_string();
+        let expected = [
+            "MEC Doctor",
+            "[PASS] MSI laptop detected: GF63 Thin 11UC",
+            "[PASS] Linux environment supported",
+            "[PASS] msi-ec interface available",
+            "[PASS] EC interface coherent",
+            "[PASS] Fan controls available",
+            "[PASS] Shift controls available",
+            "[PASS] Battery thresholds available",
+            "[PASS] Keyboard backlight available",
+            "[PASS] CPU temperature available",
+            "[PASS] GPU temperature available",
+            "Mode: READY",
+        ];
+        let mut cursor = 0;
+        for line in expected {
+            let found = text[cursor..]
+                .find(line)
+                .unwrap_or_else(|| panic!("{line:?} missing from doctor output"));
+            cursor += found + line.len();
         }
     }
 
-    report
+    #[test]
+    fn gf63_output_matches_historical_text_exactly() {
+        let text = doctor(fixture_root("gf63"), LinuxSysfsReader).to_string();
+        assert_eq!(
+            text,
+            "MEC Doctor\n\
+             \n\
+             [PASS] MSI laptop detected: GF63 Thin 11UC\n\
+             [PASS] Linux environment supported\n\
+             [PASS] msi-ec interface available\n\
+             [PASS] EC interface coherent\n\
+             [PASS] Fan controls available\n\
+             [PASS] Shift controls available\n\
+             [PASS] Battery thresholds available\n\
+             [PASS] Keyboard backlight available\n\
+             [PASS] CPU temperature available\n\
+             [PASS] GPU temperature available\n\
+             \n\
+             Mode: READY\n"
+        );
+    }
+
+    #[test]
+    fn broken_fixture_output_matches_historical_text_exactly() {
+        let text = doctor(fixture_root("broken-sysfs"), LinuxSysfsReader).to_string();
+        assert_eq!(
+            text,
+            "MEC Doctor\n\
+             \n\
+             [PASS] MSI laptop detected: Broken Interface Test Fixture\n\
+             [PASS] Linux environment supported\n\
+             [PASS] msi-ec interface available\n\
+             [FAIL] EC interface inconsistent\n\
+             \n\
+             Mode: READ-ONLY\n\
+             Reason: Inconsistent hardware interface\n"
+        );
+    }
+
+    #[test]
+    fn from_evaluation_matches_direct_doctor() {
+        use super::super::evaluation::evaluate_compatibility;
+        for name in ["gf63", "partial-device", "unknown-device", "broken-sysfs"] {
+            let paths = fixture_root(name);
+            let direct = doctor(paths.clone(), LinuxSysfsReader).to_string();
+            let shared =
+                DoctorReport::from_evaluation(&evaluate_compatibility(paths, LinuxSysfsReader))
+                    .to_string();
+            assert_eq!(direct, shared, "{name}");
+        }
+        let missing = SystemPaths::new(PathBuf::from("/nonexistent-mec-fixture-root"));
+        let direct = doctor(missing.clone(), LinuxSysfsReader).to_string();
+        let shared =
+            DoctorReport::from_evaluation(&evaluate_compatibility(missing, LinuxSysfsReader))
+                .to_string();
+        assert_eq!(direct, shared);
+    }
 }

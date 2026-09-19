@@ -1,7 +1,7 @@
 //! Read-only fans screen: current fan telemetry plus capability metadata.
 //!
-//! Fan readings are percentage-style values, never RPM. No editing, no fan
-//! curves, no graphs, no hardware transport here.
+//! Fan readings are percentage-style values, never RPM. Control rows are
+//! selectable drafts; Task 4 creates pending data only and never executes.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -10,21 +10,26 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{Capabilities, EcBackend, HardwareSnapshot};
 
+use crate::tui::controls::control_row_lines;
+use crate::tui::editing::ControlState;
+use crate::tui::history;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
     capability_style, fan_mode_text, fan_text, joined_modes, on_off_text, render_panel,
     render_screen_shell, support_text,
 };
 
-/// Renders current fan telemetry plus fan capability metadata. Fan readings
-/// stay percentage-style; no curves, graphs, or editing.
+/// Renders current fan telemetry plus fan capability metadata with
+/// selectable control rows and labeled history graphs. Fan readings stay
+/// percentage-style; no execution.
 pub fn render_fans<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    controls: &ControlState,
 ) {
-    render_fans_with_theme(frame, area, live, capabilities, &Theme::default());
+    render_fans_with_theme(frame, area, live, capabilities, controls, &Theme::default());
 }
 
 /// Theme-aware fans renderer behind the Task-5 API.
@@ -33,12 +38,33 @@ pub(crate) fn render_fans_with_theme<B: EcBackend>(
     area: Rect,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    controls: &ControlState,
     theme: &Theme,
 ) {
     let content = render_screen_shell(frame, area, "Fans", live, theme);
+    let control_rows = control_row_lines(
+        crate::app::Screen::Fans,
+        live.current_snapshot(),
+        capabilities,
+        live.mode(),
+        controls,
+        theme,
+    );
+    // Glyph budget is the full-width HISTORY inner width: borders consume
+    // two cells. Saturating math keeps narrow panels panic-free.
+    let history_rows: Vec<Line<'static>> =
+        history::fan_history_lines(live.history(), usize::from(content.width.saturating_sub(2)))
+            .into_iter()
+            .map(Line::from)
+            .collect();
     let panels = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(6), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(control_rows.len() as u16 + 2),
+            Constraint::Length(history_rows.len() as u16 + 2),
+            Constraint::Min(0),
+        ])
         .split(content);
     render_panel(
         frame,
@@ -47,9 +73,11 @@ pub(crate) fn render_fans_with_theme<B: EcBackend>(
         current_lines(live.current_snapshot()),
         theme,
     );
+    render_panel(frame, panels[1], " CONTROLS ", control_rows, theme);
+    render_panel(frame, panels[2], " HISTORY ", history_rows, theme);
     render_panel(
         frame,
-        panels[1],
+        panels[3],
         " CAPABILITIES ",
         capability_lines(capabilities, theme),
         theme,
@@ -101,7 +129,13 @@ mod tests {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         screen_text(100, 30, |frame| {
-            render_fans(frame, frame.area(), &live, &capabilities);
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         })
     }
 
@@ -141,7 +175,13 @@ mod tests {
         let mut capabilities = full_capabilities();
         capabilities.gpu_fan = false;
         let text = screen_text(100, 30, |frame| {
-            render_fans(frame, frame.area(), &live, &capabilities);
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         assert!(text.contains("GPU Fan Telemetry: Unavailable"));
     }
@@ -166,11 +206,24 @@ mod tests {
         assert_eq!(live.history().len(), 1);
         let capabilities = full_capabilities();
         let text = screen_text(100, 30, |frame| {
-            render_fans(frame, frame.area(), &live, &capabilities);
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         assert!(text.contains("DEGRADED"));
         assert!(text.contains("CPU Fan: N/A"));
-        assert!(!text.contains("42%"));
+        // The stale sample may remain visible only inside labeled history
+        // rows, never as current telemetry.
+        for line in text.lines() {
+            if line.contains("42%") {
+                assert!(line.contains("History"), "{line:?}");
+            }
+        }
+        assert!(text.lines().any(|line| line.contains("42%")));
     }
 
     #[test]
@@ -185,9 +238,203 @@ mod tests {
         );
         let capabilities = full_capabilities();
         let text = screen_text(100, 30, |frame| {
-            render_fans(frame, frame.area(), &live, &capabilities);
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         assert!(text.contains("CPU Fan Telemetry: Supported"));
         assert!(text.contains("Available Fan Modes: auto, silent, future-mode"));
+    }
+
+    fn text_with_controls(
+        capabilities: &crate::hardware::Capabilities,
+        controls: &crate::tui::editing::ControlState,
+        mode: SupportMode,
+    ) -> String {
+        use crate::tui::screens::support::{healthy_snapshot, live_for};
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], mode, 1);
+        let capabilities = capabilities.clone();
+        screen_text(100, 30, |frame| {
+            render_fans(frame, frame.area(), &live, &capabilities, controls);
+        })
+    }
+
+    #[test]
+    fn controls_panel_renders_with_selection() {
+        let text = text_with_controls(
+            &full_capabilities(),
+            &crate::tui::editing::ControlState::default(),
+            SupportMode::Ready,
+        );
+        assert!(text.contains("CONTROLS"));
+        assert!(text.contains("> Fan Mode"));
+        assert!(!text.contains("RPM"));
+    }
+
+    #[test]
+    fn read_only_controls_show_disabled() {
+        let text = text_with_controls(
+            &full_capabilities(),
+            &crate::tui::editing::ControlState::default(),
+            SupportMode::ReadOnly(crate::hardware::ReadOnlyReason::MsiEcUnavailable),
+        );
+        assert!(text.contains("Disabled (read-only)"));
+    }
+
+    #[test]
+    fn unsupported_fan_shows_unsupported() {
+        let mut caps = full_capabilities();
+        caps.fan_modes.clear();
+        let text = text_with_controls(
+            &caps,
+            &crate::tui::editing::ControlState::default(),
+            SupportMode::Ready,
+        );
+        assert!(text.contains("Unsupported"));
+    }
+
+    #[test]
+    fn editing_and_pending_render_without_rpm() {
+        use crate::tui::editing::ControlState;
+        use crate::tui::screens::support::healthy_snapshot;
+        let mut controls = ControlState::default();
+        assert!(controls.begin_edit(
+            crate::app::Screen::Fans,
+            Some(&healthy_snapshot()),
+            &full_capabilities(),
+            &SupportMode::Ready,
+        ));
+        assert!(controls.confirm(&SupportMode::Ready, &full_capabilities()));
+        let text = text_with_controls(&full_capabilities(), &controls, SupportMode::Ready);
+        assert!(text.contains("Pending confirmation"));
+        assert!(text.contains("NOT applied yet"));
+        assert!(!text.contains("RPM"));
+    }
+
+    #[test]
+    fn zero_area_does_not_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let caps = full_capabilities();
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_fans(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &live,
+                    &caps,
+                    &crate::tui::editing::ControlState::default(),
+                );
+            })
+            .expect("zero-area fans draws");
+    }
+
+    #[test]
+    fn full_shows_fan_history_with_percent_semantics() {
+        let text = text();
+        assert!(text.contains("HISTORY"));
+        assert!(text.contains("CPU Fan History: 42%"));
+        assert!(text.contains("GPU Fan History: 31%"));
+        assert!(text.contains("min 42 / max 42"));
+        assert!(!text.contains("RPM"));
+    }
+
+    #[test]
+    fn cpu_only_fan_does_not_invent_gpu_graph() {
+        use crate::hardware::FanPercent;
+        let snapshot = crate::hardware::HardwareSnapshot {
+            cpu_fan: FanPercent::try_from(55).ok(),
+            ..Default::default()
+        };
+        let (live, _) = live_for(vec![Ok(snapshot)], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let text = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert!(text.contains("CPU Fan History: 55%"));
+        assert!(text.contains("GPU Fan History: No history"));
+    }
+
+    #[test]
+    fn gpu_only_fan_does_not_invent_cpu_graph() {
+        use crate::hardware::FanPercent;
+        let snapshot = crate::hardware::HardwareSnapshot {
+            gpu_fan: FanPercent::try_from(70).ok(),
+            ..Default::default()
+        };
+        let (live, _) = live_for(vec![Ok(snapshot)], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let text = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert!(text.contains("GPU Fan History: 70%"));
+        assert!(text.contains("CPU Fan History: No history"));
+    }
+
+    #[test]
+    fn empty_history_shows_no_history_state() {
+        let (live, _) = live_for(
+            vec![Ok(crate::hardware::HardwareSnapshot::default())],
+            SupportMode::Ready,
+            1,
+        );
+        let capabilities = full_capabilities();
+        let text = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert!(text.contains("CPU Fan History: No history"));
+        assert!(text.contains("GPU Fan History: No history"));
+    }
+
+    #[test]
+    fn history_rendering_performs_zero_backend_calls() {
+        let (live, calls) = live_for(
+            vec![
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+            ],
+            SupportMode::Ready,
+            3,
+        );
+        assert_eq!(calls.get(), 3);
+        assert_eq!(live.history().len(), 3);
+        let capabilities = full_capabilities();
+        let _ = screen_text(100, 30, |frame| {
+            render_fans(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
+        });
+        assert_eq!(calls.get(), 3);
     }
 }

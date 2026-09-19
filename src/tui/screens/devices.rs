@@ -1,8 +1,9 @@
 //! Read-only devices screen: current device state plus capability metadata.
 //!
 //! Fn/Win keys expose capability existence only: the snapshot carries no
-//! runtime Fn/Win values, so no current state is ever invented. No editing,
-//! no hardware transport here.
+//! runtime Fn/Win values, so no current state is ever invented. Control
+//! rows are selectable drafts for webcam/backlight only; Fn/Win stay
+//! informational and Task 4 never executes.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,21 +12,25 @@ use ratatui::text::Line;
 use crate::app::LiveHardware;
 use crate::hardware::{BacklightCapability, Capabilities, EcBackend};
 
+use crate::tui::controls::control_row_lines;
+use crate::tui::editing::ControlState;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
     capability_style, device_lines, render_panel, render_screen_shell, support_text,
 };
 
-/// Renders current device state plus control-interface capabilities. Fn/Win
-/// keys report capability existence only: the snapshot carries no runtime
-/// Fn/Win values, so no current state is invented.
+/// Renders current device state plus control-interface capabilities with
+/// selectable rows. Fn/Win keys report capability existence only: the
+/// snapshot carries no runtime Fn/Win values, so no current state is
+/// invented.
 pub fn render_devices<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    controls: &ControlState,
 ) {
-    render_devices_with_theme(frame, area, live, capabilities, &Theme::default());
+    render_devices_with_theme(frame, area, live, capabilities, controls, &Theme::default());
 }
 
 /// Theme-aware devices renderer behind the Task-5 API.
@@ -34,12 +39,25 @@ pub(crate) fn render_devices_with_theme<B: EcBackend>(
     area: Rect,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
+    controls: &ControlState,
     theme: &Theme,
 ) {
     let content = render_screen_shell(frame, area, "Devices", live, theme);
+    let control_rows = control_row_lines(
+        crate::app::Screen::Devices,
+        live.current_snapshot(),
+        capabilities,
+        live.mode(),
+        controls,
+        theme,
+    );
     let panels = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(control_rows.len() as u16 + 2),
+            Constraint::Min(0),
+        ])
         .split(content);
     render_panel(
         frame,
@@ -48,9 +66,10 @@ pub(crate) fn render_devices_with_theme<B: EcBackend>(
         device_lines(live.current_snapshot()),
         theme,
     );
+    render_panel(frame, panels[1], " CONTROLS ", control_rows, theme);
     render_panel(
         frame,
-        panels[1],
+        panels[2],
         " CAPABILITIES ",
         capability_lines(capabilities, theme),
         theme,
@@ -104,7 +123,13 @@ mod tests {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         screen_text(100, 30, |frame| {
-            render_devices(frame, frame.area(), &live, &capabilities);
+            render_devices(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         })
     }
 
@@ -152,7 +177,13 @@ mod tests {
             capabilities.webcam = webcam;
             capabilities.webcam_block = block;
             let text = screen_text(100, 30, |frame| {
-                render_devices(frame, frame.area(), &live, &capabilities);
+                render_devices(
+                    frame,
+                    frame.area(),
+                    &live,
+                    &capabilities,
+                    &crate::tui::editing::ControlState::default(),
+                );
             });
             assert!(text.contains(expected_webcam), "webcam={webcam}");
             assert!(text.contains(expected_block), "block={block}");
@@ -172,7 +203,13 @@ mod tests {
         let mut capabilities = full_capabilities();
         capabilities.keyboard_backlight = None;
         let text = screen_text(100, 30, |frame| {
-            render_devices(frame, frame.area(), &live, &capabilities);
+            render_devices(
+                frame,
+                frame.area(),
+                &live,
+                &capabilities,
+                &crate::tui::editing::ControlState::default(),
+            );
         });
         assert!(text.contains("Keyboard Backlight: Unavailable"));
     }
@@ -199,5 +236,112 @@ mod tests {
         ] {
             assert!(!text.contains(forbidden), "{forbidden:?} must not appear");
         }
+    }
+
+    fn text_with_controls(
+        capabilities: &crate::hardware::Capabilities,
+        controls: &crate::tui::editing::ControlState,
+        mode: SupportMode,
+    ) -> String {
+        use crate::tui::screens::support::{healthy_snapshot, live_for};
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], mode, 1);
+        let capabilities = capabilities.clone();
+        screen_text(100, 30, |frame| {
+            render_devices(frame, frame.area(), &live, &capabilities, controls);
+        })
+    }
+
+    #[test]
+    fn controls_panel_renders_with_fn_win_informational() {
+        let text = text_with_controls(
+            &full_capabilities(),
+            &crate::tui::editing::ControlState::default(),
+            SupportMode::Ready,
+        );
+        assert!(text.contains("CONTROLS"));
+        assert!(text.contains("> Webcam"));
+        assert!(text.contains("Fn Key"));
+        assert!(text.contains("informational only"));
+        assert!(text.contains("Win Key"));
+    }
+
+    #[test]
+    fn fn_win_never_create_commands() {
+        use crate::tui::editing::{ControlId, ControlState};
+        use crate::tui::screens::support::healthy_snapshot;
+        // Fn/Win initial drafts are always None.
+        assert!(ControlState::default().pending().is_none());
+        let snapshot = healthy_snapshot();
+        for control in [ControlId::FnKeyInfo, ControlId::WinKeyInfo] {
+            assert!(
+                crate::tui::editing::initial_draft(
+                    control,
+                    Some(&snapshot),
+                    &full_capabilities(),
+                    &SupportMode::Ready
+                )
+                .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn backlight_pending_never_exceeds_max() {
+        use crate::tui::editing::ControlState;
+        use crate::tui::screens::support::healthy_snapshot;
+        let mut controls = ControlState::default();
+        // Select backlight row (index 2).
+        controls.move_down(crate::app::Screen::Devices);
+        controls.move_down(crate::app::Screen::Devices);
+        assert!(controls.begin_edit(
+            crate::app::Screen::Devices,
+            Some(&healthy_snapshot()),
+            &full_capabilities(),
+            &SupportMode::Ready,
+        ));
+        for _ in 0..10 {
+            controls.adjust(&full_capabilities(), 1);
+            if let Some(editor) = controls.editor() {
+                match editor.draft() {
+                    crate::hardware::HardwareCommand::SetKeyboardBacklight(level) => {
+                        assert!(*level <= 3, "level {level} exceeds max 3");
+                    }
+                    other => panic!("unexpected draft {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_devices_show_disabled_but_fn_stays_informational() {
+        let text = text_with_controls(
+            &full_capabilities(),
+            &crate::tui::editing::ControlState::default(),
+            SupportMode::ReadOnly(crate::hardware::ReadOnlyReason::MsiEcUnavailable),
+        );
+        assert!(text.contains("Disabled (read-only)"));
+        assert!(text.contains("informational only"));
+    }
+
+    #[test]
+    fn zero_area_does_not_panic() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let caps = full_capabilities();
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_devices(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &live,
+                    &caps,
+                    &crate::tui::editing::ControlState::default(),
+                );
+            })
+            .expect("zero-area devices draws");
     }
 }

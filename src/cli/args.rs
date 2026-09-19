@@ -26,7 +26,13 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Inspect hardware compatibility and report diagnostics.
-    Doctor,
+    Doctor {
+        /// Print only the privacy-conscious compatibility report
+        /// (suitable for pasting into a GitHub issue). No file is
+        /// created; redirect stdout yourself to save it.
+        #[arg(long)]
+        export: bool,
+    },
     /// Show hardware state.
     Status {
         /// Emit machine-readable JSON instead of human-readable text.

@@ -23,6 +23,7 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
+        .style(theme.base_style())
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
             format!(" {HELP_TITLE} "),
@@ -34,6 +35,7 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     frame.render_widget(block, overlay);
     let section = Style::default()
         .fg(theme.secondary)
+        .bg(theme.background)
         .add_modifier(Modifier::BOLD);
     let styled: Vec<Line<'static>> = lines
         .into_iter()
@@ -45,7 +47,10 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
             }
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(styled)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(styled)).style(theme.base_style()),
+        inner,
+    );
 }
 
 /// Centers the overlay with saturating geometry so tiny and zero areas
@@ -63,23 +68,27 @@ fn help_overlay_area(area: Rect, line_count: usize) -> Rect {
 fn help_lines() -> Vec<&'static str> {
     vec![
         "Navigation",
-        "↑ / ←  Previous screen",
-        "↓ / →  Next screen",
-        "h / k  Previous screen",
-        "j / l  Next screen",
-        "Tab  Next screen",
-        "Shift+Tab  Previous screen",
+        "↑ / k  Previous row, else previous screen",
+        "↓ / j  Next row, else next screen",
+        "← / h  Previous value while editing, else previous screen",
+        "→ / l  Next value while editing, else next screen",
+        "Tab / Shift+Tab  Next / previous screen",
         "1 Dashboard",
         "2 Performance",
         "3 Fans",
         "4 Battery",
         "5 Devices",
-        "6 Diagnostics",
+        "6 Profiles",
+        "7 Diagnostics",
+        "Enter  Edit / Accept draft / Confirm once",
+        "Esc  Cancel edit or confirmation",
+        "One confirm executes at most once",
+        "Palette",
+        "P  Command Palette (screens, themes)",
         "General",
         "?  Toggle help",
         "Esc  Close help",
-        "Q / q  Quit",
-        "Ctrl+C  Quit",
+        "Q / q / Ctrl+C  Quit",
     ]
 }
 
@@ -99,7 +108,19 @@ mod tests {
         let mut app = AppState::default();
         app.apply(AppAction::ShowHelp);
         screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
         })
     }
 
@@ -108,7 +129,19 @@ mod tests {
         let capabilities = full_capabilities();
         let app = AppState::default();
         screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
         })
     }
 
@@ -125,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_lists_all_six_screen_mappings() {
+    fn overlay_lists_all_seven_screen_mappings() {
         let text = shown_help();
         for mapping in [
             "1 Dashboard",
@@ -133,7 +166,8 @@ mod tests {
             "3 Fans",
             "4 Battery",
             "5 Devices",
-            "6 Diagnostics",
+            "6 Profiles",
+            "7 Diagnostics",
         ] {
             assert!(text.contains(mapping), "{mapping:?} missing");
         }
@@ -183,13 +217,27 @@ mod tests {
     }
 
     #[test]
-    fn overlay_advertises_no_profiles() {
-        assert!(!shown_help().contains("Profiles"));
+    fn overlay_lists_profiles_mapping() {
+        assert!(shown_help().contains("6 Profiles"));
     }
 
     #[test]
-    fn overlay_advertises_no_command_palette() {
-        assert!(!shown_help().contains("Command Palette"));
+    fn overlay_advertises_palette_with_p() {
+        let text = shown_help();
+        assert!(text.contains("Command Palette"));
+        assert!(text.contains("Palette"));
+        // P opens the palette; it is no longer an unmapped reservation.
+        assert!(text.contains("P  Command Palette"));
+    }
+
+    #[test]
+    fn overlay_describes_editing_without_claiming_execution() {
+        let text = shown_help();
+        assert!(text.contains("Enter"));
+        assert!(text.contains("Esc"));
+        assert!(text.contains("Confirm once"));
+        assert!(text.contains("at most once"));
+        assert!(!text.contains("Applied "));
     }
 
     #[test]
@@ -205,7 +253,19 @@ mod tests {
         app.apply(AppAction::ShowHelp);
         app.apply(AppAction::HideHelp);
         let text = screen_text(100, 30, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
         });
         assert!(!text.contains("MEC Help"));
     }
@@ -275,7 +335,19 @@ mod tests {
         let mut app = AppState::default();
         app.apply(AppAction::ShowHelp);
         let text = screen_text(20, 8, |frame| {
-            render_screen(frame, frame.area(), &app, &live, &capabilities);
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
         });
         assert!(!text.is_empty());
     }
@@ -293,7 +365,19 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
             .draw(|frame| {
-                render_screen(frame, frame.area(), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
+                );
             })
             .expect("minimal help draws");
     }
@@ -312,7 +396,19 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
             .draw(|frame| {
-                render_screen(frame, Rect::new(0, 0, 0, 0), &app, &live, &capabilities);
+                render_screen(
+                    frame,
+                    Rect::new(0, 0, 0, 0),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &crate::tui::editing::ControlState::default(),
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
+                );
             })
             .expect("zero-area help-visible dispatch draws");
     }

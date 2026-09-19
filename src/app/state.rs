@@ -6,7 +6,7 @@
 
 use super::action::AppAction;
 
-/// Read-only TUI screen in canonical navigation order.
+/// Interactive TUI screen in canonical navigation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Screen {
     /// Overview of thermals, performance, battery, and devices.
@@ -20,18 +20,21 @@ pub enum Screen {
     Battery,
     /// Webcam, backlight, function keys.
     Devices,
+    /// Capability-aware built-in profile catalog (read-only).
+    Profiles,
     /// Compatibility and diagnostics report.
     Diagnostics,
 }
 
 impl Screen {
-    /// Canonical PLAN-003 navigation order.
-    pub const ALL: [Screen; 6] = [
+    /// Canonical PLAN-006 navigation order.
+    pub const ALL: [Screen; 7] = [
         Screen::Dashboard,
         Screen::Performance,
         Screen::Fans,
         Screen::Battery,
         Screen::Devices,
+        Screen::Profiles,
         Screen::Diagnostics,
     ];
 
@@ -43,6 +46,7 @@ impl Screen {
             Screen::Fans => "Fans",
             Screen::Battery => "Battery",
             Screen::Devices => "Devices",
+            Screen::Profiles => "Profiles",
             Screen::Diagnostics => "Diagnostics",
         }
     }
@@ -65,7 +69,7 @@ impl Screen {
     }
 }
 
-/// Interaction and navigation state for the read-only TUI.
+/// Interaction and navigation state for the interactive TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AppState {
     current_screen: Screen,
@@ -89,7 +93,13 @@ impl AppState {
         self.should_quit
     }
 
-    /// Applies one terminal-independent action.
+    /// Applies one terminal-independent action. `MoveUp`/`MoveDown` keep
+    /// legacy screen-navigation fallback semantics here; row-driven
+    /// screens are dispatched contextually above this layer. `MoveLeft` /
+    /// `MoveRight` fall back to screen navigation; `Activate` is a no-op
+    /// here and `Cancel` hides help so legacy state tests stay meaningful.
+    /// `TogglePalette` is a no-op here: the palette overlay owns it above
+    /// this layer.
     pub fn apply(&mut self, action: AppAction) {
         match action {
             AppAction::Quit => self.should_quit = true,
@@ -97,10 +107,17 @@ impl AppState {
             AppAction::PreviousScreen => {
                 self.current_screen = self.current_screen.previous();
             }
+            AppAction::MoveUp => self.current_screen = self.current_screen.previous(),
+            AppAction::MoveDown => self.current_screen = self.current_screen.next(),
+            AppAction::MoveLeft => self.current_screen = self.current_screen.previous(),
+            AppAction::MoveRight => self.current_screen = self.current_screen.next(),
+            AppAction::Activate => {}
+            AppAction::Cancel => self.help_visible = false,
             AppAction::GoTo(screen) => self.current_screen = screen,
             AppAction::ToggleHelp => self.help_visible = !self.help_visible,
             AppAction::ShowHelp => self.help_visible = true,
             AppAction::HideHelp => self.help_visible = false,
+            AppAction::TogglePalette => {}
         }
     }
 }
@@ -124,6 +141,7 @@ mod tests {
                 Screen::Fans,
                 Screen::Battery,
                 Screen::Devices,
+                Screen::Profiles,
                 Screen::Diagnostics,
             ]
         );
@@ -136,6 +154,7 @@ mod tests {
         assert_eq!(Screen::Fans.title(), "Fans");
         assert_eq!(Screen::Battery.title(), "Battery");
         assert_eq!(Screen::Devices.title(), "Devices");
+        assert_eq!(Screen::Profiles.title(), "Profiles");
         assert_eq!(Screen::Diagnostics.title(), "Diagnostics");
     }
 
@@ -145,14 +164,16 @@ mod tests {
         assert_eq!(Screen::Performance.next(), Screen::Fans);
         assert_eq!(Screen::Fans.next(), Screen::Battery);
         assert_eq!(Screen::Battery.next(), Screen::Devices);
-        assert_eq!(Screen::Devices.next(), Screen::Diagnostics);
+        assert_eq!(Screen::Devices.next(), Screen::Profiles);
+        assert_eq!(Screen::Profiles.next(), Screen::Diagnostics);
         assert_eq!(Screen::Diagnostics.next(), Screen::Dashboard);
     }
 
     #[test]
     fn previous_walks_reverse_order_with_wrap() {
         assert_eq!(Screen::Dashboard.previous(), Screen::Diagnostics);
-        assert_eq!(Screen::Diagnostics.previous(), Screen::Devices);
+        assert_eq!(Screen::Diagnostics.previous(), Screen::Profiles);
+        assert_eq!(Screen::Profiles.previous(), Screen::Devices);
         assert_eq!(Screen::Devices.previous(), Screen::Battery);
         assert_eq!(Screen::Battery.previous(), Screen::Fans);
         assert_eq!(Screen::Fans.previous(), Screen::Performance);
@@ -189,6 +210,13 @@ mod tests {
     }
 
     #[test]
+    fn goto_selects_profiles_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::GoTo(Screen::Profiles));
+        assert_eq!(state.current_screen(), Screen::Profiles);
+    }
+
+    #[test]
     fn quit_sets_should_quit() {
         let mut state = AppState::default();
         state.apply(AppAction::Quit);
@@ -216,6 +244,59 @@ mod tests {
     }
 
     #[test]
+    fn move_up_falls_back_to_previous_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveUp);
+        assert_eq!(state.current_screen(), Screen::Diagnostics);
+    }
+
+    #[test]
+    fn move_down_falls_back_to_next_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveDown);
+        assert_eq!(state.current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn move_left_falls_back_to_previous_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveLeft);
+        assert_eq!(state.current_screen(), Screen::Diagnostics);
+    }
+
+    #[test]
+    fn move_right_falls_back_to_next_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::MoveRight);
+        assert_eq!(state.current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn activate_is_noop_for_state() {
+        let mut state = AppState::default();
+        state.apply(AppAction::Activate);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+        assert!(!state.should_quit());
+    }
+
+    #[test]
+    fn cancel_hides_help_for_state() {
+        let mut state = AppState::default();
+        state.apply(AppAction::ShowHelp);
+        state.apply(AppAction::Cancel);
+        assert!(!state.help_visible());
+    }
+
+    #[test]
+    fn toggle_palette_is_noop_for_state() {
+        let mut state = AppState::default();
+        state.apply(AppAction::TogglePalette);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+        assert!(!state.help_visible());
+        assert!(!state.should_quit());
+    }
+
+    #[test]
     fn navigation_does_not_mutate_help_visibility() {
         let mut state = AppState::default();
         state.apply(AppAction::ShowHelp);
@@ -231,10 +312,17 @@ mod tests {
         for action in [
             AppAction::NextScreen,
             AppAction::PreviousScreen,
+            AppAction::MoveUp,
+            AppAction::MoveDown,
+            AppAction::MoveLeft,
+            AppAction::MoveRight,
+            AppAction::Activate,
+            AppAction::Cancel,
             AppAction::GoTo(Screen::Fans),
             AppAction::ToggleHelp,
             AppAction::ShowHelp,
             AppAction::HideHelp,
+            AppAction::TogglePalette,
         ] {
             let mut state = AppState::default();
             state.apply(action);

@@ -38,10 +38,14 @@ pub(crate) fn render_diagnostics_with_theme<B: EcBackend>(
     theme: &Theme,
 ) {
     let content = render_screen_shell(frame, area, "Diagnostics", live, theme);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(6)])
+        .split(content);
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(content);
+        .split(rows[0]);
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(7), Constraint::Min(0)])
@@ -67,6 +71,19 @@ pub(crate) fn render_diagnostics_with_theme<B: EcBackend>(
         matrix_lines(capabilities, theme),
         theme,
     );
+    render_panel(frame, rows[1], " EXPORT ", export_lines(), theme);
+}
+
+/// Privacy-conscious export guidance. The renderer never executes doctor
+/// or touches the filesystem: export is explicit and user-controlled via
+/// `mec doctor --export`, whose report omits serials, hostnames, network
+/// data, profile/config contents, and live telemetry.
+pub(crate) fn export_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from("Export: mec doctor --export"),
+        Line::from("Privacy: explicit, user-controlled; paste into an issue"),
+        Line::from("Omits serials, hostnames, network, configs, telemetry"),
+    ]
 }
 
 fn optional_text(value: Option<&String>) -> &str {
@@ -331,5 +348,85 @@ mod tests {
         assert!(!text.contains("FAIL"));
         assert!(!text.contains("PASS"));
         assert!(!text.contains("WARN"));
+    }
+
+    #[test]
+    fn export_panel_names_exact_command() {
+        let text = text();
+        assert!(text.contains("EXPORT"));
+        assert!(text.contains("mec doctor --export"));
+    }
+
+    #[test]
+    fn export_panel_states_privacy_plainly() {
+        let text = text();
+        assert!(text.contains("Privacy"));
+        assert!(text.contains("user-controlled"));
+    }
+
+    #[test]
+    fn export_lines_are_deterministic() {
+        assert_eq!(super::export_lines(), super::export_lines());
+        let joined = super::export_lines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("mec doctor --export"));
+    }
+
+    #[test]
+    fn rendering_performs_zero_backend_calls() {
+        let (live, calls) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        assert_eq!(calls.get(), 1);
+        let capabilities = full_capabilities();
+        let _ = screen_text(100, 30, |frame| {
+            render_diagnostics(frame, frame.area(), &live, &capabilities);
+        });
+        let _ = screen_text(100, 30, |frame| {
+            render_diagnostics(frame, frame.area(), &live, &capabilities);
+        });
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn compact_keeps_export_hint() {
+        use crate::app::{AppAction, AppState};
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let mut app = AppState::default();
+        app.apply(AppAction::GoTo(crate::app::Screen::Diagnostics));
+        let text = screen_text(50, 16, |frame| {
+            super::super::super::responsive::render_compact_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::theme::Theme::default(),
+            );
+        });
+        assert!(text.contains("mec doctor --export"));
+    }
+
+    #[test]
+    fn tiny_and_zero_area_stay_safe() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let tiny = screen_text(20, 8, |frame| {
+            render_diagnostics(frame, frame.area(), &live, &capabilities);
+        });
+        assert!(!tiny.is_empty());
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| render_diagnostics(frame, Rect::new(0, 0, 0, 0), &live, &capabilities))
+            .expect("zero-area diagnostics draws");
     }
 }

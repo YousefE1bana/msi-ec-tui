@@ -243,17 +243,20 @@ pub(crate) fn render_panel(
         ));
     let inner = panel.inner(area);
     frame.render_widget(panel, area);
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(theme.base_style()),
+        inner,
+    );
 }
 
 /// Compact fallback for areas too small for honest panels.
-pub(crate) fn render_compact(frame: &mut Frame, area: Rect) {
+pub(crate) fn render_compact(frame: &mut Frame, area: Rect, theme: &Theme) {
     let text = Text::from(vec![
         Line::from("MEC"),
         Line::from("Terminal too small"),
         Line::from("Q Quit"),
     ]);
-    frame.render_widget(Paragraph::new(text), area);
+    frame.render_widget(Paragraph::new(text).style(theme.base_style()), area);
 }
 
 /// Shared secondary-screen shell: outer block, status header, truthful
@@ -267,7 +270,7 @@ pub(crate) fn render_screen_shell<B: EcBackend>(
     theme: &Theme,
 ) -> Rect {
     if area.width < MIN_SCREEN_WIDTH || area.height < MIN_SCREEN_HEIGHT {
-        render_compact(frame, area);
+        render_compact(frame, area, theme);
         return Rect::new(0, 0, 0, 0);
     }
     let outer = Block::default()
@@ -291,10 +294,13 @@ pub(crate) fn render_screen_shell<B: EcBackend>(
         ])
         .split(inner);
     frame.render_widget(
-        Paragraph::new(Text::from(screen_header_lines(live, theme))),
+        Paragraph::new(Text::from(screen_header_lines(live, theme))).style(theme.base_style()),
         rows[0],
     );
-    frame.render_widget(Paragraph::new(SCREEN_FOOTER), rows[2]);
+    frame.render_widget(
+        Paragraph::new(SCREEN_FOOTER).style(theme.base_style()),
+        rows[2],
+    );
     rows[1]
 }
 
