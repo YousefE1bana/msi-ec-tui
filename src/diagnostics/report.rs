@@ -1,76 +1,42 @@
 //! Privacy-conscious compatibility reporting for `mec doctor --export`.
 //!
-//! [`CompatibilityReport`] is built from an explicitly allowlisted
-//! snapshot: MEC version, OS/arch, hardware identity, support mode, and
-//! capability presence. It never dumps sysfs files, environment, paths,
-//! usernames, hostnames, serials, UUIDs, MACs, IPs, profile/config
-//! contents, notifications, or live telemetry values. Both this report
-//! and `doctor` compose the same evaluators ([`SupportEvaluator`],
-//! [`DeviceDetector`], [`CapabilityDetector`]); no second compatibility
-//! policy engine exists here.
+//! [`CompatibilityReport`] renders one shared [`CompatibilityEvaluation`]
+//! as deterministic Markdown/text. It includes only the allowlist: MEC
+//! version, OS/arch, hardware identity, support mode, and capability
+//! presence. It never dumps sysfs files, environment, paths, usernames,
+//! hostnames, serials, UUIDs, MACs, IPs, profile/config contents,
+//! notifications, or live telemetry values.
 //!
-//! Output is deterministic Markdown/text with no timestamps or random IDs.
+//! Output is deterministic: no timestamps, no random IDs.
 
 use std::fmt;
 
-use crate::hardware::{
-    Capabilities, CapabilityDetector, DeviceDetector, DeviceInfo, LinuxSysfsReader, ReadOnlyReason,
-    SupportEvaluator, SupportMode, SystemPaths,
-};
+use crate::hardware::{DeviceInfo, LinuxSysfsReader, ReadOnlyReason, SupportMode, SystemPaths};
+
+use super::evaluation::{CapabilityStatus, CompatibilityEvaluation, evaluate_compatibility};
 
 /// Maximum displayed characters per hardware text field.
 const MAX_FIELD_CHARS: usize = 128;
 
-/// Evaluated compatibility inputs shared by `doctor` composition and the
-/// export report: identity, verdict, and capability presence only.
-#[derive(Debug, Clone)]
-pub struct CompatibilitySnapshot {
-    /// Hardware identity when detection succeeds.
-    pub device: Option<DeviceInfo>,
-    /// Capability-aware support verdict.
-    pub mode: SupportMode,
-    /// Discovered capabilities when discovery succeeds.
-    pub capabilities: Option<Capabilities>,
-}
-
-/// Evaluates identity, support mode, and capabilities through the same
-/// production evaluators as `doctor`. Best-effort identity keeps EC
-/// firmware enrichment when available; a failed enrichment never hides an
-/// established identity.
-pub fn evaluate_compatibility(
-    paths: SystemPaths,
-    reader: LinuxSysfsReader,
-) -> CompatibilitySnapshot {
-    let mode = SupportEvaluator::new(paths.clone(), reader).evaluate();
-    let detector = DeviceDetector::new(paths.clone(), reader);
-    let device = detector
-        .detect()
-        .or_else(|_| detector.detect_identity())
-        .ok();
-    let capabilities = CapabilityDetector::new(paths, reader).discover().ok();
-    CompatibilitySnapshot {
-        device,
-        mode,
-        capabilities,
-    }
-}
-
 /// Owned, deterministically renderable compatibility report.
 #[derive(Debug, Clone)]
 pub struct CompatibilityReport {
-    snapshot: CompatibilitySnapshot,
+    evaluation: CompatibilityEvaluation,
 }
 
 impl CompatibilityReport {
-    /// Builds a report from an explicitly evaluated snapshot.
-    pub fn from_snapshot(snapshot: CompatibilitySnapshot) -> Self {
-        Self { snapshot }
+    /// Renders one prepared compatibility evaluation. Pure formatting over
+    /// shared data: no detection, no discovery, no second evaluation pass.
+    pub fn from_evaluation(evaluation: &CompatibilityEvaluation) -> Self {
+        Self {
+            evaluation: evaluation.clone(),
+        }
     }
 
-    /// Evaluates hardware through the shared evaluators and builds the
+    /// Evaluates hardware through the shared evaluator and builds the
     /// report. Never fails on routine hardware conditions.
     pub fn evaluate(paths: SystemPaths, reader: LinuxSysfsReader) -> Self {
-        Self::from_snapshot(evaluate_compatibility(paths, reader))
+        Self::from_evaluation(&evaluate_compatibility(paths, reader))
     }
 }
 
@@ -129,9 +95,17 @@ fn reason_text(reason: &ReadOnlyReason) -> &'static str {
 
 impl fmt::Display for CompatibilityReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let snapshot = &self.snapshot;
-        let device = snapshot.device.as_ref();
-        let capabilities = snapshot.capabilities.as_ref();
+        let evaluation = &self.evaluation;
+        let device = evaluation.device.as_ref();
+        // Unchecked, unreadable, or inconsistent discovery renders as
+        // Unknown: the report never pretends capabilities were checked
+        // when the shared evaluation says they were not.
+        let capabilities = match &evaluation.capabilities {
+            CapabilityStatus::Available(caps) => Some(caps),
+            CapabilityStatus::Unreadable
+            | CapabilityStatus::Inconsistent
+            | CapabilityStatus::NotChecked => None,
+        };
         let none_device = DeviceInfo {
             manufacturer: String::new(),
             product_name: String::new(),
@@ -140,7 +114,7 @@ impl fmt::Display for CompatibilityReport {
             ec_firmware_version: None,
         };
         let device = device.unwrap_or(&none_device);
-        let has_device = snapshot.device.is_some();
+        let has_device = evaluation.device.is_some();
 
         writeln!(f, "# MEC Compatibility Report")?;
         writeln!(f)?;
@@ -176,7 +150,7 @@ impl fmt::Display for CompatibilityReport {
         )?;
         writeln!(f)?;
         writeln!(f, "## Support")?;
-        match &snapshot.mode {
+        match &evaluation.mode {
             SupportMode::Ready => writeln!(f, "Mode: READY")?,
             SupportMode::ReadOnly(reason) => {
                 writeln!(f, "Mode: READ-ONLY")?;
@@ -366,12 +340,14 @@ mod tests {
 
     #[test]
     fn fan_shift_modes_follow_driver_order_and_survive() {
-        use crate::hardware::CapabilityDetector;
+        use super::super::evaluation::{CapabilityStatus, evaluate_compatibility};
         let paths = fixture_root("gf63");
-        let caps = CapabilityDetector::new(paths, LinuxSysfsReader)
-            .discover()
-            .unwrap();
-        let fans: Vec<String> = caps
+        let evaluation = evaluate_compatibility(paths, LinuxSysfsReader);
+        let available = match &evaluation.capabilities {
+            CapabilityStatus::Available(caps) => caps.clone(),
+            other => panic!("gf63 capabilities must be available, got {other:?}"),
+        };
+        let fans: Vec<String> = available
             .fan_modes
             .iter()
             .map(|mode| mode.as_str().to_owned())
@@ -456,5 +432,51 @@ mod tests {
         let long = "w".repeat(300);
         assert_eq!(sanitize_field(&long).chars().count(), MAX_FIELD_CHARS);
         assert_eq!(sanitize_field(""), "");
+    }
+
+    #[test]
+    fn export_capability_values_come_from_shared_evaluation() {
+        use super::super::evaluation::{CapabilityStatus, evaluate_compatibility};
+        let paths = fixture_root("gf63");
+        let evaluation = evaluate_compatibility(paths, LinuxSysfsReader);
+        let available = match &evaluation.capabilities {
+            CapabilityStatus::Available(caps) => caps.clone(),
+            other => panic!("gf63 capabilities must be available, got {other:?}"),
+        };
+        let text = CompatibilityReport::from_evaluation(&evaluation).to_string();
+        let fans: Vec<String> = available
+            .fan_modes
+            .iter()
+            .map(|mode| mode.as_str().to_owned())
+            .collect();
+        assert!(text.contains(&format!("Fan modes: {}", fans.join(", "))));
+        assert!(text.contains("CPU temperature: Supported"));
+    }
+
+    #[test]
+    fn unchecked_capabilities_render_as_unknown() {
+        use super::super::evaluation::{CapabilityStatus, evaluate_compatibility};
+        let missing = SystemPaths::new(PathBuf::from("/nonexistent-mec-fixture-root"));
+        let evaluation = evaluate_compatibility(missing, LinuxSysfsReader);
+        assert_eq!(evaluation.capabilities, CapabilityStatus::NotChecked);
+        let text = CompatibilityReport::from_evaluation(&evaluation).to_string();
+        assert!(text.contains("CPU temperature: Unknown"));
+        assert!(text.contains("Fan modes: Unknown"));
+        assert!(text.contains("Mode: READ-ONLY"));
+    }
+
+    #[test]
+    fn from_evaluation_matches_direct_export() {
+        use super::super::evaluation::evaluate_compatibility;
+        for name in ["gf63", "partial-device", "unknown-device", "broken-sysfs"] {
+            let paths = fixture_root(name);
+            let direct = compatibility_report(paths.clone(), LinuxSysfsReader).to_string();
+            let shared = CompatibilityReport::from_evaluation(&evaluate_compatibility(
+                paths,
+                LinuxSysfsReader,
+            ))
+            .to_string();
+            assert_eq!(direct, shared, "{name}");
+        }
     }
 }
