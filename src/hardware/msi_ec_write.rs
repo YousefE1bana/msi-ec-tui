@@ -13,11 +13,22 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::{
     BatteryThreshold, HardwareCommand, HardwareWriteBoundary, SysfsError, SysfsReader, SystemPaths,
     WriteBoundaryError,
 };
+
+/// Delay between readback polls while EC-backed sysfs settles. Physical
+/// measurement (GF63 Thin 11UC): a stale value can persist ~0.4 ms after
+/// the write and converges well within a few milliseconds.
+const VERIFY_RETRY_DELAY: Duration = Duration::from_millis(2);
+
+/// Delayed readback polls after the immediate read. One immediate read
+/// plus up to five delayed reads bound the settling window to
+/// approximately 10 ms.
+const VERIFY_DELAYED_POLLS: usize = 5;
 
 /// Production `msi-ec` sysfs boundary: fixed mapping, existing-node writes
 /// only, mandatory readback. Crate-private; the public abstraction remains
@@ -26,6 +37,9 @@ use super::{
 pub(crate) struct MsiEcSysfsWriteBoundary<R> {
     paths: SystemPaths,
     reader: R,
+    /// Readback settling sleeper. Production uses [`std::thread::sleep`];
+    /// tests substitute a no-op or recording sleeper for determinism.
+    sleeper: fn(Duration),
 }
 
 impl<R> MsiEcSysfsWriteBoundary<R>
@@ -35,7 +49,11 @@ where
     /// Creates a writer over `paths` using `reader` for existence checks
     /// and readback. Stores no commands and no safety verdicts.
     pub(crate) fn new(paths: SystemPaths, reader: R) -> Self {
-        Self { paths, reader }
+        Self {
+            paths,
+            reader,
+            sleeper: std::thread::sleep,
+        }
     }
 
     /// Resolves a hard-coded platform attribute. The literals at the call
@@ -51,8 +69,58 @@ where
             .map_err(|_| WriteBoundaryError::ExecutionFailed(format!("{field} target")))
     }
 
+    /// Bounded readback settling driver. Polls once immediately, then up
+    /// to [`VERIFY_DELAYED_POLLS`] delayed polls spaced by
+    /// [`VERIFY_RETRY_DELAY`]. Only semantic mismatches (`Ok(false)`)
+    /// retry; structural read errors return at once. Never writes: the
+    /// single hardware write always happens before this runs.
+    fn settle_readback(
+        &self,
+        mut settled: impl FnMut() -> Result<bool, WriteBoundaryError>,
+        field: &'static str,
+    ) -> Result<(), WriteBoundaryError> {
+        if settled()? {
+            return Ok(());
+        }
+        for _ in 0..VERIFY_DELAYED_POLLS {
+            (self.sleeper)(VERIFY_RETRY_DELAY);
+            if settled()? {
+                return Ok(());
+            }
+        }
+        Err(WriteBoundaryError::VerificationFailed(field))
+    }
+
+    /// One semantic string poll: `Ok(true)` means settled, `Ok(false)` a
+    /// mismatch worth polling. Structural errors surface at once with the
+    /// existing post-write mapping.
+    fn poll_string(
+        &self,
+        target: &Path,
+        expected: &str,
+        field: &'static str,
+    ) -> Result<bool, WriteBoundaryError> {
+        match self.reader.read_string(target) {
+            Ok(actual) => Ok(actual == expected),
+            Err(error) => Err(map_post_write_read_error(error, field)),
+        }
+    }
+
+    /// One semantic `u8` poll, mirroring [`Self::poll_string`].
+    fn poll_u8(
+        &self,
+        target: &Path,
+        expected: u8,
+        field: &'static str,
+    ) -> Result<bool, WriteBoundaryError> {
+        match self.reader.read_u8(target) {
+            Ok(actual) => Ok(actual == expected),
+            Err(error) => Err(map_post_write_read_error(error, field)),
+        }
+    }
+
     /// Writes one boolean control and verifies the semantic `on`/`off`
-    /// state by readback.
+    /// state by bounded readback polling.
     fn write_bool(
         &self,
         attribute: &'static str,
@@ -62,15 +130,7 @@ where
         let target = self.platform_path(attribute, field)?;
         let expected = if value { "on" } else { "off" };
         write_existing_text(&target, &format!("{expected}\n"), field)?;
-        let actual = self
-            .reader
-            .read_string(&target)
-            .map_err(|error| map_post_write_read_error(error, field))?;
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(WriteBoundaryError::VerificationFailed(field))
-        }
+        self.settle_readback(|| self.poll_string(&target, expected, field), field)
     }
 
     /// Selects the first sorted power-supply entry exposing both threshold
@@ -82,24 +142,28 @@ where
         // attributes: writing the end limit is sufficient and avoids a
         // redundant second EC write.
         let end_target = entry.join("charge_control_end_threshold");
+        let start_target = entry.join("charge_control_start_threshold");
         write_existing_text(
             &end_target,
             &format!("{}\n", threshold.end_percent()),
             FIELD,
         )?;
-        let start = self
-            .reader
-            .read_u8(&entry.join("charge_control_start_threshold"))
-            .map_err(|error| map_post_write_read_error(error, FIELD))?;
-        let end = self
-            .reader
-            .read_u8(&end_target)
-            .map_err(|error| map_post_write_read_error(error, FIELD))?;
-        if start == threshold.start_percent() && end == threshold.end_percent() {
-            Ok(())
-        } else {
-            Err(WriteBoundaryError::VerificationFailed(FIELD))
-        }
+        // The EC state behind both attributes may settle after the single
+        // end-limit write: poll the pair, never re-write.
+        self.settle_readback(
+            || {
+                let start = self
+                    .reader
+                    .read_u8(&start_target)
+                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
+                let end = self
+                    .reader
+                    .read_u8(&end_target)
+                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
+                Ok(start == threshold.start_percent() && end == threshold.end_percent())
+            },
+            FIELD,
+        )
     }
 
     /// Deterministically selects the first sorted entry with a complete
@@ -150,29 +214,13 @@ where
                 const FIELD: &str = "fan mode";
                 let target = self.platform_path("fan_mode", FIELD)?;
                 write_existing_text(&target, &format!("{}\n", mode.as_str()), FIELD)?;
-                let actual = self
-                    .reader
-                    .read_string(&target)
-                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
-                if actual == mode.as_str() {
-                    Ok(())
-                } else {
-                    Err(WriteBoundaryError::VerificationFailed(FIELD))
-                }
+                self.settle_readback(|| self.poll_string(&target, mode.as_str(), FIELD), FIELD)
             }
             HardwareCommand::SetShiftMode(mode) => {
                 const FIELD: &str = "shift mode";
                 let target = self.platform_path("shift_mode", FIELD)?;
                 write_existing_text(&target, &format!("{}\n", mode.as_str()), FIELD)?;
-                let actual = self
-                    .reader
-                    .read_string(&target)
-                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
-                if actual == mode.as_str() {
-                    Ok(())
-                } else {
-                    Err(WriteBoundaryError::VerificationFailed(FIELD))
-                }
+                self.settle_readback(|| self.poll_string(&target, mode.as_str(), FIELD), FIELD)
             }
             HardwareCommand::SetCoolerBoost(value) => {
                 self.write_bool("cooler_boost", "cooler boost", *value)
@@ -192,15 +240,7 @@ where
                     .join("msiacpi::kbd_backlight")
                     .join("brightness");
                 write_existing_text(&target, &format!("{level}\n"), FIELD)?;
-                let actual = self
-                    .reader
-                    .read_u8(&target)
-                    .map_err(|error| map_post_write_read_error(error, FIELD))?;
-                if actual == *level {
-                    Ok(())
-                } else {
-                    Err(WriteBoundaryError::VerificationFailed(FIELD))
-                }
+                self.settle_readback(|| self.poll_u8(&target, *level, FIELD), FIELD)
             }
             HardwareCommand::SetBatteryThreshold(threshold) => self.write_threshold(*threshold),
         }
@@ -280,9 +320,13 @@ fn map_post_write_read_error(error: SysfsError, field: &'static str) -> WriteBou
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::{TempDir, tempdir};
 
@@ -382,6 +426,132 @@ mod tests {
         }
     }
 
+    /// Test-only readback sequencer: every verification read pops the
+    /// front scripted value; an empty queue delegates to the real file.
+    /// Counts each verification read; an optional persistent structural
+    /// failure proves read errors are never retried.
+    struct ScriptedReads<R> {
+        inner: R,
+        strings: RefCell<VecDeque<String>>,
+        levels: RefCell<VecDeque<u8>>,
+        starts: RefCell<VecDeque<u8>>,
+        ends: RefCell<VecDeque<u8>>,
+        failure: Option<ReadFailure>,
+        reads: Rc<Cell<usize>>,
+    }
+
+    impl ScriptedReads<LinuxSysfsReader> {
+        fn sequenced() -> (Self, Rc<Cell<usize>>) {
+            let reads = Rc::new(Cell::new(0));
+            (
+                Self {
+                    inner: LinuxSysfsReader,
+                    strings: RefCell::new(VecDeque::new()),
+                    levels: RefCell::new(VecDeque::new()),
+                    starts: RefCell::new(VecDeque::new()),
+                    ends: RefCell::new(VecDeque::new()),
+                    failure: None,
+                    reads: Rc::clone(&reads),
+                },
+                reads,
+            )
+        }
+    }
+
+    impl<R> ScriptedReads<R> {
+        fn scripted_failure(&self, path: &Path) -> Option<SysfsError> {
+            match self.failure {
+                None => None,
+                Some(ReadFailure::Denied) => Some(SysfsError::PermissionDenied(path.to_path_buf())),
+                Some(ReadFailure::Missing) => Some(SysfsError::NotFound(path.to_path_buf())),
+                Some(ReadFailure::Broken) => Some(SysfsError::InvalidValue {
+                    path: path.to_path_buf(),
+                    value: "junk".to_owned(),
+                }),
+            }
+        }
+    }
+
+    impl<R: SysfsReader> SysfsReader for ScriptedReads<R> {
+        fn exists(&self, path: &Path) -> Result<bool, SysfsError> {
+            self.inner.exists(path)
+        }
+
+        fn read_string(&self, path: &Path) -> Result<String, SysfsError> {
+            self.reads.set(self.reads.get() + 1);
+            if let Some(error) = self.scripted_failure(path) {
+                return Err(error);
+            }
+            if let Some(value) = self.strings.borrow_mut().pop_front() {
+                return Ok(value);
+            }
+            self.inner.read_string(path)
+        }
+
+        fn read_u8(&self, path: &Path) -> Result<u8, SysfsError> {
+            self.reads.set(self.reads.get() + 1);
+            if let Some(error) = self.scripted_failure(path) {
+                return Err(error);
+            }
+            if path.ends_with("charge_control_start_threshold") {
+                if let Some(value) = self.starts.borrow_mut().pop_front() {
+                    return Ok(value);
+                }
+            } else if path.ends_with("charge_control_end_threshold") {
+                if let Some(value) = self.ends.borrow_mut().pop_front() {
+                    return Ok(value);
+                }
+            } else if let Some(value) = self.levels.borrow_mut().pop_front() {
+                return Ok(value);
+            }
+            self.inner.read_u8(path)
+        }
+
+        fn read_u16(&self, path: &Path) -> Result<u16, SysfsError> {
+            self.inner.read_u16(path)
+        }
+
+        fn list_dirs(&self, path: &Path) -> Result<Vec<PathBuf>, SysfsError> {
+            self.inner.list_dirs(path)
+        }
+
+        fn list_entries(&self, path: &Path) -> Result<Vec<PathBuf>, SysfsError> {
+            self.inner.list_entries(path)
+        }
+    }
+
+    /// Deterministic test sleeper: never waits.
+    fn no_op_sleep(_: Duration) {}
+
+    /// Sleep-call counter for proving the bounded retry cadence. Tests
+    /// that assert counts hold [`sleep_guard`] so parallel tests cannot
+    /// pollute the shared counter.
+    static SLEEP_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    static SLEEP_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Recording test sleeper: counts polls without waiting.
+    fn counting_sleep(_: Duration) {
+        SLEEP_CALLS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn reset_sleep_calls() {
+        SLEEP_CALLS.store(0, Ordering::SeqCst);
+    }
+
+    fn sleep_calls() -> usize {
+        SLEEP_CALLS.load(Ordering::SeqCst)
+    }
+
+    /// Holds the sleep-counter guard and resets the count. Every test
+    /// asserting sleep counts must hold the returned guard for the whole
+    /// arrange/act/assert span.
+    fn sleep_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = SLEEP_GUARD.lock().unwrap();
+        reset_sleep_calls();
+        guard
+    }
+
     /// Test-only fake root. Never touches `/sys`; every test builds only
     /// the nodes it needs under a `TempDir`.
     struct Fixture {
@@ -399,14 +569,28 @@ mod tests {
         }
 
         fn writer(&self) -> MsiEcSysfsWriteBoundary<LinuxSysfsReader> {
-            MsiEcSysfsWriteBoundary::new(self.paths.clone(), LinuxSysfsReader)
+            let mut boundary = MsiEcSysfsWriteBoundary::new(self.paths.clone(), LinuxSysfsReader);
+            boundary.sleeper = no_op_sleep;
+            boundary
         }
 
         fn controlled(
             &self,
             reads: ControlledReads<LinuxSysfsReader>,
         ) -> MsiEcSysfsWriteBoundary<ControlledReads<LinuxSysfsReader>> {
-            MsiEcSysfsWriteBoundary::new(self.paths.clone(), reads)
+            let mut boundary = MsiEcSysfsWriteBoundary::new(self.paths.clone(), reads);
+            boundary.sleeper = no_op_sleep;
+            boundary
+        }
+
+        fn settling(
+            &self,
+            reads: ScriptedReads<LinuxSysfsReader>,
+            sleeper: fn(Duration),
+        ) -> MsiEcSysfsWriteBoundary<ScriptedReads<LinuxSysfsReader>> {
+            let mut boundary = MsiEcSysfsWriteBoundary::new(self.paths.clone(), reads);
+            boundary.sleeper = sleeper;
+            boundary
         }
 
         fn ec_file(&self, relative: &str, contents: &[u8]) -> PathBuf {
@@ -1047,5 +1231,216 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(fixture.read_raw(&target), b"never-advertised\n");
+    }
+
+    #[test]
+    fn immediate_match_performs_one_verification_read() {
+        let fixture = Fixture::new();
+        fixture.ec_file("fan_mode", b"silent\n");
+        let _guard = sleep_guard();
+        let (reads, count) = ScriptedReads::sequenced();
+        let result = fixture
+            .settling(reads, counting_sleep)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 1);
+        assert_eq!(sleep_calls(), 0);
+    }
+
+    #[test]
+    fn first_read_stale_second_read_correct_succeeds() {
+        let fixture = Fixture::new();
+        fixture.ec_file("shift_mode", b"eco\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads
+            .strings
+            .borrow_mut()
+            .extend(["eco".to_owned(), "sport".to_owned()]);
+        let _guard = sleep_guard();
+        let result = fixture
+            .settling(reads, counting_sleep)
+            .execute(&HardwareCommand::SetShiftMode(shift("sport")));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 2);
+        assert_eq!(sleep_calls(), 1);
+    }
+
+    #[test]
+    fn multiple_stale_reads_then_correct_succeeds() {
+        let fixture = Fixture::new();
+        fixture.ec_file("fan_mode", b"silent\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads.strings.borrow_mut().extend(
+            ["silent", "silent", "silent", "silent", "auto"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        let _guard = sleep_guard();
+        let result = fixture
+            .settling(reads, counting_sleep)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 5);
+        assert_eq!(sleep_calls(), 4);
+    }
+
+    #[test]
+    fn value_that_never_settles_is_verification_failed() {
+        let fixture = Fixture::new();
+        fixture.ec_file("fan_mode", b"silent\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads
+            .strings
+            .borrow_mut()
+            .extend((0..8).map(|_| "silent".to_owned()));
+        let _guard = sleep_guard();
+        let error = fixture
+            .settling(reads, counting_sleep)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")))
+            .expect_err("unsettled value must fail closed");
+        // One immediate read plus five delayed polls, then failure.
+        assert_eq!(count.get(), 6);
+        assert_eq!(sleep_calls(), 5);
+        assert_eq!(error, WriteBoundaryError::VerificationFailed("fan mode"));
+        assert!(error.may_have_mutated());
+    }
+
+    #[test]
+    fn settling_retries_do_not_repeat_the_write() {
+        // The retry driver receives only a boolean poll closure: it holds
+        // no target, no payload, and no write handle, so it cannot write.
+        // The single `write_existing_text` per arm is the only mutation.
+        let fixture = Fixture::new();
+        let target = fixture.ec_file("fan_mode", b"silent\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads
+            .strings
+            .borrow_mut()
+            .extend(["silent", "silent", "auto"].into_iter().map(str::to_owned));
+        let _guard = sleep_guard();
+        let result = fixture
+            .settling(reads, counting_sleep)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 3);
+        assert_eq!(sleep_calls(), 2);
+        // Exactly the single payload is on disk.
+        assert_eq!(fixture.read_raw(&target), b"auto\n");
+    }
+
+    #[test]
+    fn backlight_delayed_convergence_matches_physical_finding() {
+        // GF63 Thin 11UC finding: after writing 2 over initial 3, the
+        // first readback still shows stale 3 before settling to 2.
+        let fixture = Fixture::new();
+        let target = fixture.backlight_file(b"3\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads.levels.borrow_mut().extend([3, 2]);
+        let _guard = sleep_guard();
+        let result = fixture
+            .settling(reads, counting_sleep)
+            .execute(&HardwareCommand::SetKeyboardBacklight(2));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 2);
+        assert_eq!(sleep_calls(), 1);
+        assert_eq!(fixture.read_raw(&target), b"2\n");
+    }
+
+    #[test]
+    fn boolean_delayed_convergence_is_accepted() {
+        let fixture = Fixture::new();
+        fixture.ec_file("cooler_boost", b"off\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads
+            .strings
+            .borrow_mut()
+            .extend(["off".to_owned(), "on".to_owned()]);
+        let result = fixture
+            .settling(reads, no_op_sleep)
+            .execute(&HardwareCommand::SetCoolerBoost(true));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn fan_mode_delayed_convergence_is_accepted() {
+        let fixture = Fixture::new();
+        fixture.ec_file("fan_mode", b"silent\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads
+            .strings
+            .borrow_mut()
+            .extend(["silent".to_owned(), "auto".to_owned()]);
+        let result = fixture
+            .settling(reads, no_op_sleep)
+            .execute(&HardwareCommand::SetFanMode(fan("auto")));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn shift_mode_delayed_convergence_is_accepted() {
+        let fixture = Fixture::new();
+        fixture.ec_file("shift_mode", b"eco\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        reads
+            .strings
+            .borrow_mut()
+            .extend(["eco".to_owned(), "sport".to_owned()]);
+        let result = fixture
+            .settling(reads, no_op_sleep)
+            .execute(&HardwareCommand::SetShiftMode(shift("sport")));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 2);
+    }
+
+    #[test]
+    fn battery_pair_delayed_convergence_is_accepted() {
+        let fixture = Fixture::new();
+        let entry = fixture.battery_entry("BAT0", b"70\n", b"60\n");
+        let (reads, count) = ScriptedReads::sequenced();
+        // First poll sees the pre-write end limit; the second poll sees
+        // the settled pair. No second write is ever issued.
+        reads.starts.borrow_mut().extend([70]);
+        reads.ends.borrow_mut().extend([60, 80]);
+        let result = fixture
+            .settling(reads, no_op_sleep)
+            .execute(&HardwareCommand::SetBatteryThreshold(threshold()));
+        assert!(result.is_ok());
+        assert_eq!(count.get(), 4);
+        assert_eq!(
+            fixture.read_raw(&entry.join("charge_control_start_threshold")),
+            b"70\n"
+        );
+        assert_eq!(
+            fixture.read_raw(&entry.join("charge_control_end_threshold")),
+            b"80\n"
+        );
+    }
+
+    #[test]
+    fn post_write_read_errors_are_not_retried() {
+        for failure in [
+            ReadFailure::Denied,
+            ReadFailure::Missing,
+            ReadFailure::Broken,
+        ] {
+            let fixture = Fixture::new();
+            fixture.ec_file("fan_mode", b"silent\n");
+            let _guard = sleep_guard();
+            let (mut reads, count) = ScriptedReads::sequenced();
+            reads.failure = Some(failure);
+            let error = fixture
+                .settling(reads, counting_sleep)
+                .execute(&HardwareCommand::SetFanMode(fan("auto")))
+                .expect_err("structural read errors must fail at once");
+            assert!(
+                matches!(error, WriteBoundaryError::WriteFailed(_)),
+                "read errors must not become polling mismatches: {error:?}"
+            );
+            assert_eq!(count.get(), 1);
+            assert_eq!(sleep_calls(), 0);
+            assert!(error.may_have_mutated());
+        }
     }
 }
