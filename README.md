@@ -309,6 +309,15 @@ Read behavior has been manually smoke-tested on real MSI hardware, but
 hardware WRITE behavior has not yet been physically validated; write
 semantics are currently covered by fake/temp sysfs integration tests.
 
+## Installation
+
+Prebuilt `.deb`, `.rpm`, and portable `.tar.gz` artifacts (x86_64 and
+ARM64) plus an AUR binary packaging workflow are documented in:
+
+- [Installation](docs/installation.md)
+- [Upgrade](docs/upgrade.md)
+- [Uninstall](docs/uninstall.md)
+
 ## Building
 
 ```bash
