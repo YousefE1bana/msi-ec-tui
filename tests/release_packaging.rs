@@ -622,10 +622,10 @@ fn generate_aur_fixture(version: &str) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn aur_package_identity_and_payload() {
-    let (_work, out) = generate_aur_fixture("0.9.0");
+    let (_work, out) = generate_aur_fixture(env!("CARGO_PKG_VERSION"));
     let pkgbuild = std::fs::read_to_string(out.join("PKGBUILD")).unwrap();
     assert!(pkgbuild.contains("pkgname=mec-bin"));
-    assert!(pkgbuild.contains("pkgver=0.9.0"));
+    assert!(pkgbuild.contains(&format!("pkgver={}", env!("CARGO_PKG_VERSION"))));
     assert!(pkgbuild.contains("pkgrel=1"));
     assert!(pkgbuild.contains(
         "pkgdesc='A safe capability-aware terminal control center for MSI laptops on Linux'"
@@ -689,7 +689,7 @@ fn aur_rejects_malformed_checksum_and_version() {
         format!("NOT-A-SHA  mec-x86_64-unknown-linux-gnu.tar.gz\n{AUR_ARM_SHA}  mec-aarch64-unknown-linux-gnu.tar.gz\n"),
     )
     .unwrap();
-    let out = run_aur_generator("0.9.0", &bad, &work.path().join("out"));
+    let out = run_aur_generator(env!("CARGO_PKG_VERSION"), &bad, &work.path().join("out"));
     assert!(!out.status.success(), "malformed sha must fail");
     for bad_version in ["v1", "1.0", "abc", "1.0.0.0.0", ""] {
         let sums = write_aur_sums(work.path());
@@ -715,11 +715,15 @@ fn aur_rejects_missing_and_duplicate_checksums() {
         format!("{AUR_X86_SHA}  mec-x86_64-unknown-linux-gnu.tar.gz\n"),
     )
     .unwrap();
-    let out = run_aur_generator("0.9.0", &partial, &work.path().join("out-partial"));
+    let out = run_aur_generator(
+        env!("CARGO_PKG_VERSION"),
+        &partial,
+        &work.path().join("out-partial"),
+    );
     assert!(!out.status.success(), "missing ARM checksum must fail");
     // Missing file entirely.
     let out = run_aur_generator(
-        "0.9.0",
+        env!("CARGO_PKG_VERSION"),
         &work.path().join("does-not-exist"),
         &work.path().join("out-missing"),
     );
@@ -733,7 +737,11 @@ fn aur_rejects_missing_and_duplicate_checksums() {
         ),
     )
     .unwrap();
-    let out = run_aur_generator("0.9.0", &dup, &work.path().join("out-dup"));
+    let out = run_aur_generator(
+        env!("CARGO_PKG_VERSION"),
+        &dup,
+        &work.path().join("out-dup"),
+    );
     assert!(!out.status.success(), "duplicate entry must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("duplicate"));
@@ -745,9 +753,9 @@ fn aur_generated_files_are_deterministic() {
     let sums = write_aur_sums(work.path());
     let first = work.path().join("first");
     let second = work.path().join("second");
-    let a = run_aur_generator("0.9.0", &sums, &first);
+    let a = run_aur_generator(env!("CARGO_PKG_VERSION"), &sums, &first);
     assert!(a.status.success());
-    let b = run_aur_generator("0.9.0", &sums, &second);
+    let b = run_aur_generator(env!("CARGO_PKG_VERSION"), &sums, &second);
     assert!(b.status.success());
     for name in ["PKGBUILD", ".SRCINFO"] {
         let x = std::fs::read(first.join(name)).unwrap();
@@ -758,23 +766,33 @@ fn aur_generated_files_are_deterministic() {
 
 #[test]
 fn aur_srcinfo_matches_pkgbuild() {
-    let (_work, out) = generate_aur_fixture("0.9.0");
+    let version = env!("CARGO_PKG_VERSION");
+    let (_work, out) = generate_aur_fixture(version);
     let pkgbuild = std::fs::read_to_string(out.join("PKGBUILD")).unwrap();
     let srcinfo = std::fs::read_to_string(out.join(".SRCINFO")).unwrap();
+    let expected_versioned = [
+        format!("pkgver = {version}"),
+        format!(
+            "https://github.com/YousefE1bana/msi-ec-tui/releases/download/v{version}/mec-x86_64-unknown-linux-gnu.tar.gz"
+        ),
+        format!(
+            "https://github.com/YousefE1bana/msi-ec-tui/releases/download/v{version}/mec-aarch64-unknown-linux-gnu.tar.gz"
+        ),
+    ];
     for expected in [
         "pkgbase = mec-bin",
         "pkgname = mec-bin",
-        "pkgver = 0.9.0",
         "pkgrel = 1",
         "arch = x86_64",
         "arch = aarch64",
         "provides = mec",
         "conflicts = mec",
-        "https://github.com/YousefE1bana/msi-ec-tui/releases/download/v0.9.0/mec-x86_64-unknown-linux-gnu.tar.gz",
-        "https://github.com/YousefE1bana/msi-ec-tui/releases/download/v0.9.0/mec-aarch64-unknown-linux-gnu.tar.gz",
         AUR_X86_SHA,
         AUR_ARM_SHA,
     ] {
+        assert!(srcinfo.contains(expected), ".SRCINFO missing {expected:?}");
+    }
+    for expected in &expected_versioned {
         assert!(srcinfo.contains(expected), ".SRCINFO missing {expected:?}");
     }
     // No disagreement: every checksum/URL the PKGBUILD pins appears verbatim.
@@ -824,4 +842,117 @@ fn aur_generator_stays_offline_and_unprivileged() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!template_code.contains("cargo"));
+}
+
+fn release_workflow_text() -> String {
+    std::fs::read_to_string(manifest_dir().join(".github/workflows/release-build.yml")).unwrap()
+}
+
+fn publish_job_text() -> String {
+    let text = release_workflow_text();
+    let pos = text.find("publish:").expect("publish job exists");
+    text[pos..].to_owned()
+}
+
+#[test]
+fn release_publish_job_is_tag_gated_and_least_privilege() {
+    let text = release_workflow_text();
+    let publish = publish_job_text();
+    assert!(publish.contains("needs: checksums"));
+    assert!(publish.contains("if: startsWith(github.ref, 'refs/tags/v')"));
+    // Least privilege: only the publish job may write contents.
+    assert_eq!(
+        text.matches("contents: write").count(),
+        1,
+        "exactly one contents: write (the publish job)"
+    );
+    assert!(publish.contains("contents: write"));
+    assert!(text.contains("permissions:\n  contents: read"));
+}
+
+#[test]
+fn release_publish_validates_tag_and_uses_verified_gh_release() {
+    let publish = publish_job_text();
+    assert!(publish.contains("github.ref_name"));
+    assert!(publish.contains("\"v${VERSION}\""));
+    assert!(publish.contains("gh release create"));
+    assert!(publish.contains("--verify-tag"));
+    assert!(!publish.contains("--clobber"));
+    for external in [
+        "softprops",
+        "ncipollo",
+        "marvinpinto",
+        "svenstaro",
+        "actions/create-release",
+    ] {
+        assert!(
+            !publish.to_lowercase().contains(external),
+            "no third-party release action ({external})"
+        );
+    }
+    assert!(!publish.contains("secrets."));
+    assert!(publish.contains("GH_TOKEN: ${{ github.token }}"));
+}
+
+#[test]
+fn release_publish_uploads_exact_artifact_set_with_aur_metadata() {
+    let publish = publish_job_text();
+    for artifact in [
+        "dist/mec-x86_64-unknown-linux-gnu.tar.gz",
+        "dist/mec-aarch64-unknown-linux-gnu.tar.gz",
+        "dist/mec_${VERSION}_amd64.deb",
+        "dist/mec_${VERSION}_arm64.deb",
+        "dist/mec-${VERSION}-1.x86_64.rpm",
+        "dist/mec-${VERSION}-1.aarch64.rpm",
+        "dist/SHA256SUMS",
+        "dist/PKGBUILD",
+        "dist/.SRCINFO",
+    ] {
+        assert!(
+            publish.contains(artifact),
+            "publish job must upload {artifact}"
+        );
+    }
+    // AUR metadata comes from the final checksums, not hand-written values.
+    assert!(publish.contains("generate-aur-package.sh"));
+    assert!(publish.contains("dist/SHA256SUMS"));
+    assert!(publish.contains("sha256sum -c SHA256SUMS"));
+    // Release notes for the Cargo version must exist and be referenced.
+    assert!(publish.contains("docs/releases/v${VERSION}.md"));
+    let notes = manifest_dir().join(format!("docs/releases/v{}.md", env!("CARGO_PKG_VERSION")));
+    assert!(
+        notes.is_file(),
+        "release notes missing: {}",
+        notes.display()
+    );
+}
+
+#[test]
+fn checkout_action_updated_consistently() {
+    for workflow in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/release-build.yml",
+    ] {
+        let text = std::fs::read_to_string(manifest_dir().join(workflow)).unwrap();
+        assert!(
+            !text.contains("checkout@v4"),
+            "{workflow} must not pin the deprecated checkout major"
+        );
+        assert!(
+            text.contains("actions/checkout@v5"),
+            "{workflow} must use checkout v5"
+        );
+    }
+}
+
+#[test]
+fn aur_pkgver_tracks_cargo_version() {
+    let (_work, out) = generate_aur_fixture(env!("CARGO_PKG_VERSION"));
+    let pkgbuild = std::fs::read_to_string(out.join("PKGBUILD")).unwrap();
+    let srcinfo = std::fs::read_to_string(out.join(".SRCINFO")).unwrap();
+    assert!(pkgbuild.contains(&format!("pkgver={}", env!("CARGO_PKG_VERSION"))));
+    assert!(srcinfo.contains(&format!("pkgver = {}", env!("CARGO_PKG_VERSION"))));
+    assert!(!pkgbuild.contains("@VERSION@"));
+    assert!(!pkgbuild.contains("@X86_SHA@"));
+    assert!(!pkgbuild.contains("@AARCH64_SHA@"));
 }

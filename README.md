@@ -8,7 +8,12 @@ safely controlling supported MSI laptops through the
 
 ## Status
 
-PLAN-006 (interactive TUI, v0.9.0 release candidate) is implemented.
+MEC v1.0.0 stable release contents (not yet published: no tag, no GitHub
+Release, no AUR entry yet). PLAN-006 (interactive TUI) is implemented,
+and PLAN-007 release packaging is implemented: x86_64 and ARM64 release
+archives with `SHA256SUMS`, `.deb` and `.rpm` packages built natively
+per architecture, reproducible AUR (`mec-bin`) package generation from
+the released checksums, and install/upgrade/uninstall guides.
 Running `cargo run` with no subcommand launches the interactive TUI when
 both stdin and stdout are terminals:
 
@@ -288,11 +293,12 @@ after an explicit confirmation, while `READ-ONLY` compatibility mode
 prohibits writes entirely. A dedicated privilege/packaging deployment
 model remains future work.
 
-Explicitly NOT implemented yet:
+Explicitly NOT completed yet:
 
 - Automatic privileged helper / privilege deployment integration
 - Physical hardware write validation
-- Packaging/release binaries (PLAN-007)
+- Publishing the v1.0.0 tag / GitHub Release / AUR entry
+  (contents prepared in-tree; release stays a deliberate later step)
 - Optional advanced fan-curve features not representable through the
   safe typed commands
 - GUI, cloud, or telemetry features (out of v1 scope)

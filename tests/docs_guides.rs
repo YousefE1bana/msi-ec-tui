@@ -124,7 +124,9 @@ fn guides_make_no_false_claims() {
             }
         }
     }
-    // Still a pre-stable tree: README must not call this stable v1.0.0.
+    // Stable preparation tree: README names v1.0.0 contents without
+    // claiming publication.
     let readme = read("README.md");
-    assert!(!readme.contains("stable v1.0.0"));
+    assert!(readme.contains("MEC v1.0.0"));
+    assert!(readme.to_lowercase().contains("not yet published"));
 }
