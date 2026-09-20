@@ -1,0 +1,26 @@
+# Binary AUR package for mec.
+# Installs prebuilt GitHub release binaries; the user does not need Rust.
+# Placeholders filled by the generator script (version and both
+# architecture checksums). Passive file payload only.
+
+pkgname=mec-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='A safe capability-aware terminal control center for MSI laptops on Linux'
+arch=('x86_64' 'aarch64')
+url='https://github.com/YousefE1bana/msi-ec-tui'
+license=('MIT')
+provides=('mec')
+conflicts=('mec')
+source_x86_64=("mec-x86_64-unknown-linux-gnu.tar.gz::https://github.com/YousefE1bana/msi-ec-tui/releases/download/v${pkgver}/mec-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('@X86_SHA@')
+source_aarch64=("mec-aarch64-unknown-linux-gnu.tar.gz::https://github.com/YousefE1bana/msi-ec-tui/releases/download/v${pkgver}/mec-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_aarch64=('@AARCH64_SHA@')
+
+package() {
+  local topdir="mec-${pkgver}-${CARCH}-unknown-linux-gnu"
+  install -Dm755 "$srcdir/$topdir/mec" "$pkgdir/usr/bin/mec"
+  install -Dm644 "$srcdir/$topdir/README.md" "$pkgdir/usr/share/doc/mec/README.md"
+  install -Dm644 "$srcdir/$topdir/LICENSE" "$pkgdir/usr/share/doc/mec/LICENSE"
+  install -Dm644 "$srcdir/$topdir/SECURITY.md" "$pkgdir/usr/share/doc/mec/SECURITY.md"
+}

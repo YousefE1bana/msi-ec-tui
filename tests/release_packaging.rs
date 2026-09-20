@@ -571,3 +571,257 @@ fn rpm_builder_queries_native_host_cpu() {
         .join("\n");
     assert!(code.contains("rpm --eval") && code.contains("_host_cpu"));
 }
+
+fn aur_script() -> PathBuf {
+    script("generate-aur-package.sh")
+}
+
+fn aur_template() -> PathBuf {
+    manifest_dir().join("packaging/arch/PKGBUILD.template")
+}
+
+const AUR_X86_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const AUR_ARM_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn write_aur_sums(dir: &std::path::Path) -> PathBuf {
+    let sums = dir.join("SHA256SUMS");
+    std::fs::write(
+        &sums,
+        format!("{AUR_X86_SHA}  mec-x86_64-unknown-linux-gnu.tar.gz\n{AUR_ARM_SHA}  mec-aarch64-unknown-linux-gnu.tar.gz\n"),
+    )
+    .unwrap();
+    sums
+}
+
+fn run_aur_generator(
+    version: &str,
+    sums: &std::path::Path,
+    out: &std::path::Path,
+) -> std::process::Output {
+    Command::new("bash")
+        .arg(aur_script())
+        .arg(version)
+        .arg(sums)
+        .arg(out)
+        .output()
+        .expect("aur generator runs")
+}
+
+fn generate_aur_fixture(version: &str) -> (tempfile::TempDir, PathBuf) {
+    let work = tempfile::tempdir().unwrap();
+    let sums = write_aur_sums(work.path());
+    let out = work.path().join("out");
+    let output = run_aur_generator(version, &sums, &out);
+    assert!(
+        output.status.success(),
+        "generator must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (work, out)
+}
+
+#[test]
+fn aur_package_identity_and_payload() {
+    let (_work, out) = generate_aur_fixture("0.9.0");
+    let pkgbuild = std::fs::read_to_string(out.join("PKGBUILD")).unwrap();
+    assert!(pkgbuild.contains("pkgname=mec-bin"));
+    assert!(pkgbuild.contains("pkgver=0.9.0"));
+    assert!(pkgbuild.contains("pkgrel=1"));
+    assert!(pkgbuild.contains(
+        "pkgdesc='A safe capability-aware terminal control center for MSI laptops on Linux'"
+    ));
+    assert!(pkgbuild.contains("arch=('x86_64' 'aarch64')"));
+    assert!(pkgbuild.contains("license=('MIT')"));
+    assert!(pkgbuild.contains("provides=('mec')"));
+    assert!(pkgbuild.contains("conflicts=('mec')"));
+    // Exact architecture-specific source URLs bound to pkgver.
+    assert!(pkgbuild.contains("https://github.com/YousefE1bana/msi-ec-tui/releases/download/v${pkgver}/mec-x86_64-unknown-linux-gnu.tar.gz"));
+    assert!(pkgbuild.contains("https://github.com/YousefE1bana/msi-ec-tui/releases/download/v${pkgver}/mec-aarch64-unknown-linux-gnu.tar.gz"));
+    // Checksums mapped to the matching archive.
+    let x86_line = pkgbuild
+        .lines()
+        .find(|line| line.starts_with("sha256sums_x86_64"))
+        .expect("x86 sums");
+    assert!(x86_line.contains(AUR_X86_SHA));
+    assert!(!x86_line.contains(AUR_ARM_SHA));
+    let arm_line = pkgbuild
+        .lines()
+        .find(|line| line.starts_with("sha256sums_aarch64"))
+        .expect("arm sums");
+    assert!(arm_line.contains(AUR_ARM_SHA));
+    assert!(!arm_line.contains(AUR_X86_SHA));
+    // Binary model: no build from source, no skipped verification.
+    assert!(!pkgbuild.contains("cargo"));
+    assert!(!pkgbuild.contains("SKIP"));
+    // Passive payload: the installed binary plus docs, nothing else.
+    assert!(pkgbuild.contains("$pkgdir/usr/bin/mec"));
+    assert!(pkgbuild.contains("$pkgdir/usr/share/doc/mec"));
+    let code: String = pkgbuild
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "/etc",
+        "/sys",
+        "systemd",
+        "udev",
+        "sudo",
+        "pkexec",
+        "setuid",
+        "modprobe",
+        "systemctl",
+        "preinst",
+        "postinst",
+        "useradd",
+        "groupadd",
+    ] {
+        assert!(!code.contains(forbidden), "PKGBUILD contains {forbidden:?}");
+    }
+}
+
+#[test]
+fn aur_rejects_malformed_checksum_and_version() {
+    let work = tempfile::tempdir().unwrap();
+    let bad = work.path().join("SHA256SUMS");
+    std::fs::write(
+        &bad,
+        format!("NOT-A-SHA  mec-x86_64-unknown-linux-gnu.tar.gz\n{AUR_ARM_SHA}  mec-aarch64-unknown-linux-gnu.tar.gz\n"),
+    )
+    .unwrap();
+    let out = run_aur_generator("0.9.0", &bad, &work.path().join("out"));
+    assert!(!out.status.success(), "malformed sha must fail");
+    for bad_version in ["v1", "1.0", "abc", "1.0.0.0.0", ""] {
+        let sums = write_aur_sums(work.path());
+        let out = run_aur_generator(
+            bad_version,
+            &sums,
+            &work.path().join(format!("out-{bad_version}")),
+        );
+        assert!(
+            !out.status.success(),
+            "version {bad_version:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn aur_rejects_missing_and_duplicate_checksums() {
+    let work = tempfile::tempdir().unwrap();
+    // Missing ARM entry.
+    let partial = work.path().join("partial-SHA256SUMS");
+    std::fs::write(
+        &partial,
+        format!("{AUR_X86_SHA}  mec-x86_64-unknown-linux-gnu.tar.gz\n"),
+    )
+    .unwrap();
+    let out = run_aur_generator("0.9.0", &partial, &work.path().join("out-partial"));
+    assert!(!out.status.success(), "missing ARM checksum must fail");
+    // Missing file entirely.
+    let out = run_aur_generator(
+        "0.9.0",
+        &work.path().join("does-not-exist"),
+        &work.path().join("out-missing"),
+    );
+    assert!(!out.status.success(), "missing file must fail");
+    // Duplicate x86 entry.
+    let dup = work.path().join("dup-SHA256SUMS");
+    std::fs::write(
+        &dup,
+        format!(
+            "{AUR_X86_SHA}  mec-x86_64-unknown-linux-gnu.tar.gz\n{AUR_X86_SHA}  mec-x86_64-unknown-linux-gnu.tar.gz\n{AUR_ARM_SHA}  mec-aarch64-unknown-linux-gnu.tar.gz\n"
+        ),
+    )
+    .unwrap();
+    let out = run_aur_generator("0.9.0", &dup, &work.path().join("out-dup"));
+    assert!(!out.status.success(), "duplicate entry must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("duplicate"));
+}
+
+#[test]
+fn aur_generated_files_are_deterministic() {
+    let work = tempfile::tempdir().unwrap();
+    let sums = write_aur_sums(work.path());
+    let first = work.path().join("first");
+    let second = work.path().join("second");
+    let a = run_aur_generator("0.9.0", &sums, &first);
+    assert!(a.status.success());
+    let b = run_aur_generator("0.9.0", &sums, &second);
+    assert!(b.status.success());
+    for name in ["PKGBUILD", ".SRCINFO"] {
+        let x = std::fs::read(first.join(name)).unwrap();
+        let y = std::fs::read(second.join(name)).unwrap();
+        assert_eq!(x, y, "{name} must be deterministic");
+    }
+}
+
+#[test]
+fn aur_srcinfo_matches_pkgbuild() {
+    let (_work, out) = generate_aur_fixture("0.9.0");
+    let pkgbuild = std::fs::read_to_string(out.join("PKGBUILD")).unwrap();
+    let srcinfo = std::fs::read_to_string(out.join(".SRCINFO")).unwrap();
+    for expected in [
+        "pkgbase = mec-bin",
+        "pkgname = mec-bin",
+        "pkgver = 0.9.0",
+        "pkgrel = 1",
+        "arch = x86_64",
+        "arch = aarch64",
+        "provides = mec",
+        "conflicts = mec",
+        "https://github.com/YousefE1bana/msi-ec-tui/releases/download/v0.9.0/mec-x86_64-unknown-linux-gnu.tar.gz",
+        "https://github.com/YousefE1bana/msi-ec-tui/releases/download/v0.9.0/mec-aarch64-unknown-linux-gnu.tar.gz",
+        AUR_X86_SHA,
+        AUR_ARM_SHA,
+    ] {
+        assert!(srcinfo.contains(expected), ".SRCINFO missing {expected:?}");
+    }
+    // No disagreement: every checksum/URL the PKGBUILD pins appears verbatim.
+    for line in pkgbuild.lines() {
+        if line.starts_with("sha256sums_") {
+            let sha = line.split('\'').nth(1).expect("quoted sha");
+            assert!(srcinfo.contains(sha), ".SRCINFO must mirror {sha:?}");
+        }
+    }
+    assert!(!srcinfo.contains("SKIP"));
+    assert!(!srcinfo.contains("cargo"));
+}
+
+#[test]
+fn aur_generator_stays_offline_and_unprivileged() {
+    let text = std::fs::read_to_string(aur_script()).unwrap();
+    assert!(text.contains("set -euo pipefail"));
+    let code: String = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "sudo",
+        "curl",
+        "wget",
+        "pkexec",
+        "cargo build",
+        "git clone",
+        "ssh ",
+        "scp ",
+        "modprobe",
+        "systemctl",
+        "udevadm",
+    ] {
+        assert!(
+            !code.contains(forbidden),
+            "generator contains {forbidden:?}"
+        );
+    }
+    let template = std::fs::read_to_string(aur_template()).unwrap();
+    assert!(template.contains("pkgname=mec-bin"));
+    assert!(!template.contains("SKIP"));
+    let template_code: String = template
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!template_code.contains("cargo"));
+}
