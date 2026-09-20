@@ -1,0 +1,178 @@
+# Builds multi-arch release artifacts, validates them, and publishes the
+# GitHub Release for version tags.
+#
+# Artifact builds run for workflow_dispatch (validation only, no release)
+# and for version-tag pushes. The final publish job runs only for tag
+# pushes, only after checksums pass, and only when the tag matches the
+# Cargo package version.
+
+name: Release build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: packages (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            deb_arch: amd64
+            rpm_arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            rpm_arch: aarch64
+    steps:
+      # actions/checkout v5 (major-version pinned upstream action).
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Show pinned toolchain
+        run: rustup show
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install packaging tools
+        # sudo apt on the disposable runner installs distro build tools
+        # only; packaging scripts themselves never use sudo. Each job
+        # already runs natively on its target architecture, so no cross
+        # linker is needed.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev rpm cpio
+      - name: Build release archive
+        run: |
+          chmod +x scripts/build-release-archive.sh
+          ./scripts/build-release-archive.sh ${{ matrix.target }} dist
+      - name: Build deb and rpm from release binary
+        run: |
+          chmod +x scripts/build-deb.sh scripts/build-rpm.sh
+          ./scripts/build-deb.sh \
+            target/${{ matrix.target }}/release/mec \
+            ${{ matrix.target }} dist
+          ./scripts/build-rpm.sh \
+            target/${{ matrix.target }}/release/mec \
+            ${{ matrix.target }} dist
+      - name: Validate target artifacts
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          DEB_ARCH="${{ matrix.deb_arch }}"
+          RPM_ARCH="${{ matrix.rpm_arch }}"
+          test -f "dist/mec-${{ matrix.target }}.tar.gz"
+          test -f "dist/mec_${VERSION}_${DEB_ARCH}.deb"
+          test -f "dist/mec-${VERSION}-1.${RPM_ARCH}.rpm"
+          test "$(dpkg-deb -f "dist/mec_${VERSION}_${DEB_ARCH}.deb" Architecture)" = "$DEB_ARCH"
+          test "$(rpm -qp --queryformat '%{ARCH}\n' "dist/mec-${VERSION}-1.${RPM_ARCH}.rpm")" = "$RPM_ARCH"
+          test "$(tar -tzf "dist/mec-${{ matrix.target }}.tar.gz" | LC_ALL=C sort)" = "$(printf 'mec-%s-%s/\nmec-%s-%s/LICENSE\nmec-%s-%s/README.md\nmec-%s-%s/SECURITY.md\nmec-%s-%s/mec\n' "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}")"
+      - name: Execute native binary
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/mec-validate && mkdir -p /tmp/mec-validate
+          tar -xzf dist/mec-${{ matrix.target }}.tar.gz -C /tmp/mec-validate
+          VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          BIN="/tmp/mec-validate/mec-${VERSION}-${{ matrix.target }}/mec"
+          "$BIN" --help
+          "$BIN" --sys-root tests/fixtures/gf63 status
+      # actions/upload-artifact v4 (major-version pinned upstream action).
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: dist
+          if-no-files-found: error
+
+  checksums:
+    name: checksums
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      # actions/checkout v5 (major-version pinned upstream action).
+      - name: Check out repository
+        uses: actions/checkout@v5
+      # actions/download-artifact v4 (major-version pinned upstream action).
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+      - name: Generate and verify SHA256SUMS
+        run: |
+          chmod +x scripts/generate-checksums.sh
+          VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          ./scripts/generate-checksums.sh dist \
+            mec-x86_64-unknown-linux-gnu.tar.gz \
+            mec-aarch64-unknown-linux-gnu.tar.gz \
+            "mec_${VERSION}_amd64.deb" \
+            "mec_${VERSION}_arm64.deb" \
+            "mec-${VERSION}-1.x86_64.rpm" \
+            "mec-${VERSION}-1.aarch64.rpm"
+          (cd dist && sha256sum -c SHA256SUMS)
+          ls dist
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mec-release-packages
+          path: dist
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs: checksums
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      # actions/checkout v5 (major-version pinned upstream action).
+      - name: Check out repository
+        uses: actions/checkout@v5
+      # actions/download-artifact v4 (major-version pinned upstream action).
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mec-release-packages
+          path: dist
+      - name: Validate tag matches Cargo version
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          if [ "${{ github.ref_name }}" != "v${VERSION}" ]; then
+            echo "error: tag '${{ github.ref_name }}' does not match Cargo version '${VERSION}' (want 'v${VERSION}')" >&2
+            exit 1
+          fi
+      - name: Generate AUR metadata from release checksums
+        run: |
+          set -euo pipefail
+          chmod +x scripts/generate-aur-package.sh
+          VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          ./scripts/generate-aur-package.sh "$VERSION" dist/SHA256SUMS dist
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
+          gh release create "v${VERSION}" \
+            --verify-tag \
+            --title "MEC v${VERSION}" \
+            --notes-file "docs/releases/v${VERSION}.md" \
+            "dist/mec-x86_64-unknown-linux-gnu.tar.gz" \
+            "dist/mec-aarch64-unknown-linux-gnu.tar.gz" \
+            "dist/mec_${VERSION}_amd64.deb" \
+            "dist/mec_${VERSION}_arm64.deb" \
+            "dist/mec-${VERSION}-1.x86_64.rpm" \
+            "dist/mec-${VERSION}-1.aarch64.rpm" \
+            dist/SHA256SUMS \
+            dist/PKGBUILD \
+            dist/.SRCINFO

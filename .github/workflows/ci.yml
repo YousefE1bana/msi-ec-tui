@@ -1,0 +1,43 @@
+# Required quality gate for pull requests and main.
+#
+# Runs the exact canonical commands: fmt, clippy, test, release build.
+# Validation only: no publishing, no hardware writes, no secrets.
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: fmt-clippy-test-release
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v5 (major-version pinned upstream action).
+      - name: Check out repository
+        uses: actions/checkout@v5
+      - name: Show pinned toolchain
+        run: rustup show
+      - name: Ensure fmt and clippy components
+        run: rustup component add rustfmt clippy
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Lint with Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        run: cargo test
+      - name: Release build
+        run: cargo build --release

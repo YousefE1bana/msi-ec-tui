@@ -870,8 +870,8 @@ mod tests {
     }
 
     #[test]
-    fn package_version_is_v09() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.9.0");
+    fn package_version_is_v1_0_0() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.0");
     }
 
     #[test]
