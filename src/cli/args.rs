@@ -12,7 +12,7 @@ use crate::monitoring::PollInterval;
 
 /// MEC command-line interface.
 #[derive(Debug, Parser)]
-#[command(name = "mec", about = "MSI EC Control Center for Linux")]
+#[command(name = "mec", version, about = "MSI EC Control Center for Linux")]
 pub struct Cli {
     /// Alternate system root for hardware inspection (tests and fixtures).
     #[arg(long, global = true, value_name = "PATH", default_value = "/")]
@@ -181,4 +181,35 @@ fn parse_shift_mode(value: &str) -> Result<ShiftMode, ModeValidationError> {
 fn parse_battery_limit(value: &str) -> Result<BatteryThreshold, BatteryLimitParseError> {
     let end: u8 = value.parse()?;
     BatteryThreshold::from_end_percent(end).map_err(BatteryLimitParseError::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_flag_parses_and_reports_cargo_package_version() {
+        let error =
+            Cli::try_parse_from(["mec", "--version"]).expect_err("--version exits via Clap");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = error.to_string();
+        assert!(rendered.contains("mec"));
+        assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn help_flag_remains_intact() {
+        let error = Cli::try_parse_from(["mec", "--help"]).expect_err("--help exits via Clap");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(
+            error.to_string().contains("MSI EC Control Center"),
+            "help text must keep the product description"
+        );
+    }
+
+    #[test]
+    fn bare_invocation_still_selects_no_subcommand() {
+        let cli = Cli::try_parse_from(["mec"]).expect("bare mec parses");
+        assert!(cli.command.is_none());
+    }
 }
