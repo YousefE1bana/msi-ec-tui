@@ -16,8 +16,12 @@
 #
 # Never uses sudo, never installs anything on the host, never downloads
 # anything. Builds inside a temporary rpmbuild topdir (cleaned by trap)
-# using distro rpmbuild. Outputs exactly one .rpm, normalized to
-# mec-<VERSION>-1.<arch>.rpm.
+# using distro rpmbuild, with the intended RPM architecture passed
+# explicitly via --target. Outputs exactly one .rpm, normalized to
+# mec-<VERSION>-1.<arch>.rpm, only after its internal Name, Version,
+# Release, and Architecture metadata verify against expectations (so a
+# filename can never claim an architecture the RPM metadata disagrees
+# with).
 set -euo pipefail
 
 BINARY="${1:?usage: build-rpm.sh <binary> <target> <outdir>}"
@@ -60,13 +64,23 @@ cp "$REPO_DIR/README.md" "$REPO_DIR/LICENSE" "$REPO_DIR/SECURITY.md" "$TOPDIR/SO
 sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${RPM_ARCH}/g" \
   "$REPO_DIR/packaging/rpm/mec.spec" > "$TOPDIR/SPECS/mec.spec"
 
-rpmbuild -bb --define "_topdir $TOPDIR" "$TOPDIR/SPECS/mec.spec"
+rpmbuild -bb --target "$RPM_ARCH" --define "_topdir $TOPDIR" "$TOPDIR/SPECS/mec.spec"
 
 BUILT="$(find "$TOPDIR/RPMS" -name '*.rpm' | LC_ALL=C sort)"
 COUNT="$(printf '%s\n' "$BUILT" | grep -c .)"
 if [ "$COUNT" -ne 1 ]; then
   echo "error: expected exactly one rpm, found $COUNT" >&2
   printf '%s\n' "$BUILT" >&2
+  exit 1
+fi
+
+# Verify internal metadata before emitting the release artifact.
+read -r GOT_NAME GOT_VERSION GOT_RELEASE GOT_ARCH < <(
+  rpm -qp --queryformat '%{NAME} %{VERSION} %{RELEASE} %{ARCH}\n' "$BUILT"
+)
+if [ "$GOT_NAME" != "mec" ] || [ "$GOT_VERSION" != "$VERSION" ] \
+  || [ "$GOT_RELEASE" != "1" ] || [ "$GOT_ARCH" != "$RPM_ARCH" ]; then
+  echo "error: rpm metadata mismatch: got '$GOT_NAME $GOT_VERSION $GOT_RELEASE $GOT_ARCH', want 'mec $VERSION 1 $RPM_ARCH'" >&2
   exit 1
 fi
 

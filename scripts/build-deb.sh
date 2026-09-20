@@ -64,4 +64,16 @@ chmod 644 "$STAGE/usr/share/doc/mec/"*
 mkdir -p "$OUTDIR"
 # --root-owner-group keeps payload ownership neutral for rootless builds.
 dpkg-deb --root-owner-group --build "$STAGE" "$OUTDIR/$DEB"
+
+# Verify internal metadata before reporting success, so the filename can
+# never claim a package/version/architecture the control data disagrees
+# with.
+GOT_PACKAGE="$(dpkg-deb -f "$OUTDIR/$DEB" Package)"
+GOT_VERSION="$(dpkg-deb -f "$OUTDIR/$DEB" Version)"
+GOT_ARCH="$(dpkg-deb -f "$OUTDIR/$DEB" Architecture)"
+if [ "$GOT_PACKAGE" != "mec" ] || [ "$GOT_VERSION" != "$VERSION" ] \
+  || [ "$GOT_ARCH" != "$DEB_ARCH" ]; then
+  echo "error: deb metadata mismatch: got '$GOT_PACKAGE $GOT_VERSION $GOT_ARCH', want 'mec $VERSION $DEB_ARCH'" >&2
+  exit 1
+fi
 echo "wrote $OUTDIR/$DEB"
