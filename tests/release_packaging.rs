@@ -131,7 +131,12 @@ fn checksums_reject_missing_required_artifact() {
 
 #[test]
 fn release_scripts_stay_minimal_and_unprivileged() {
-    for name in ["build-release-archive.sh", "generate-checksums.sh"] {
+    for name in [
+        "build-release-archive.sh",
+        "generate-checksums.sh",
+        "build-deb.sh",
+        "build-rpm.sh",
+    ] {
         let text = std::fs::read_to_string(script(name)).unwrap();
         assert!(text.contains("set -euo pipefail"), "{name}");
         let code: String = text
@@ -139,7 +144,17 @@ fn release_scripts_stay_minimal_and_unprivileged() {
             .filter(|line| !line.trim_start().starts_with('#'))
             .collect::<Vec<_>>()
             .join("\n");
-        for forbidden in ["sudo", "curl", "wget", "pkexec", "chmod /sys", "systemctl"] {
+        for forbidden in [
+            "sudo",
+            "curl",
+            "wget",
+            "pkexec",
+            "modprobe",
+            "chmod /sys",
+            "chown /sys",
+            "systemctl",
+            "udevadm",
+        ] {
             assert!(!code.contains(forbidden), "{name} contains {forbidden:?}");
         }
     }
@@ -147,4 +162,105 @@ fn release_scripts_stay_minimal_and_unprivileged() {
     assert!(archive.contains("--locked"));
     assert!(archive.contains("x86_64-unknown-linux-gnu"));
     assert!(archive.contains("aarch64-unknown-linux-gnu"));
+}
+
+#[test]
+fn package_scripts_reject_unsupported_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake_binary = dir.path().join("mec");
+    std::fs::write(&fake_binary, b"fake").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for name in ["build-deb.sh", "build-rpm.sh"] {
+        let status = Command::new("bash")
+            .arg(script(name))
+            .arg(&fake_binary)
+            .arg("riscv64-unknown-linux-gnu")
+            .arg(dir.path().join("out"))
+            .output()
+            .expect("package script runs");
+        assert!(!status.status.success(), "{name} must reject target");
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        assert!(stderr.contains("unsupported target"), "{name}");
+    }
+}
+
+#[test]
+fn package_scripts_reject_non_executable_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("absent-mec");
+    for name in ["build-deb.sh", "build-rpm.sh"] {
+        let status = Command::new("bash")
+            .arg(script(name))
+            .arg(&missing)
+            .arg("x86_64-unknown-linux-gnu")
+            .arg(dir.path().join("out"))
+            .output()
+            .expect("package script runs");
+        assert!(!status.status.success(), "{name} must reject input");
+    }
+}
+
+#[test]
+fn deb_and_rpm_arch_mappings_are_documented() {
+    let deb = std::fs::read_to_string(script("build-deb.sh")).unwrap();
+    assert!(deb.contains("x86_64-unknown-linux-gnu) DEB_ARCH=amd64"));
+    assert!(deb.contains("aarch64-unknown-linux-gnu) DEB_ARCH=arm64"));
+    let rpm = std::fs::read_to_string(script("build-rpm.sh")).unwrap();
+    assert!(rpm.contains("x86_64-unknown-linux-gnu) RPM_ARCH=x86_64"));
+    assert!(rpm.contains("aarch64-unknown-linux-gnu) RPM_ARCH=aarch64"));
+}
+
+#[test]
+fn package_metadata_has_no_lifecycle_hooks() {
+    let manifest = manifest_dir();
+    let control = std::fs::read_to_string(manifest.join("packaging/deb/control.template")).unwrap();
+    assert!(control.contains("Package: mec"));
+    assert!(control.contains("@VERSION@"));
+    assert!(control.contains("@ARCH@"));
+    let spec = std::fs::read_to_string(manifest.join("packaging/rpm/mec.spec")).unwrap();
+    assert!(spec.contains("Name: mec"));
+    assert!(spec.contains("@VERSION@"));
+    assert!(spec.contains("@ARCH@"));
+    for (label, text) in [("deb", &control), ("rpm", &spec)] {
+        let code: String = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for hook in [
+            "preinst", "postinst", "prerm", "postrm", "%pre", "%post", "%preun", "%postun",
+            "systemd", "udev", "modprobe",
+        ] {
+            assert!(!code.contains(hook), "{label} metadata contains {hook:?}");
+        }
+    }
+    assert!(spec.contains("/usr/bin/mec"));
+}
+
+#[test]
+fn package_metadata_installs_no_config_or_sys_paths() {
+    let manifest = manifest_dir();
+    let control = std::fs::read_to_string(manifest.join("packaging/deb/control.template")).unwrap();
+    let spec = std::fs::read_to_string(manifest.join("packaging/rpm/mec.spec")).unwrap();
+    let deb_script = std::fs::read_to_string(script("build-deb.sh")).unwrap();
+    let rpm_script = std::fs::read_to_string(script("build-rpm.sh")).unwrap();
+    for text in [&control, &spec, &deb_script, &rpm_script] {
+        for forbidden in ["/etc", "/sys", "/usr/local", "/home", "/root"] {
+            let hits: Vec<&str> = text
+                .lines()
+                .filter(|line| {
+                    let body = line.trim_start();
+                    if body.starts_with('#') {
+                        return false;
+                    }
+                    line.contains(forbidden)
+                })
+                .collect();
+            assert!(hits.is_empty(), "forbidden path {forbidden:?} in: {hits:?}");
+        }
+    }
 }
