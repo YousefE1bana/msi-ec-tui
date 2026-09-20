@@ -17,7 +17,8 @@
 # Never uses sudo, never installs anything on the host, never downloads
 # anything. Builds inside a temporary rpmbuild topdir (cleaned by trap)
 # using distro rpmbuild, with the intended RPM architecture passed
-# explicitly via --target. Outputs exactly one .rpm, normalized to
+# explicitly via --target and required to match rpm's native host CPU
+# (cross-RPM generation fails closed). Outputs exactly one .rpm, normalized to
 # mec-<VERSION>-1.<arch>.rpm, only after its internal Name, Version,
 # Release, and Architecture metadata verify against expectations (so a
 # filename can never claim an architecture the RPM metadata disagrees
@@ -63,6 +64,20 @@ chmod 755 "$TOPDIR/SOURCES/mec"
 cp "$REPO_DIR/README.md" "$REPO_DIR/LICENSE" "$REPO_DIR/SECURITY.md" "$TOPDIR/SOURCES/"
 sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${RPM_ARCH}/g" \
   "$REPO_DIR/packaging/rpm/mec.spec" > "$TOPDIR/SPECS/mec.spec"
+
+# Fail closed unless the builder is native for the requested RPM
+# architecture: distro rpmbuild cannot create a foreign-arch RPM here
+# (observed: "No compatible architectures found for build" for aarch64
+# on x86_64). Release CI runs each architecture on its native runner.
+HOST_RPM_ARCH="$(rpm --eval '%{_host_cpu}')"
+case "$HOST_RPM_ARCH" in
+  x86_64|amd64) HOST_RPM_ARCH=x86_64 ;;
+  aarch64|arm64) HOST_RPM_ARCH=aarch64 ;;
+esac
+if [ "$HOST_RPM_ARCH" != "$RPM_ARCH" ]; then
+  echo "error: RPM packaging requires a native $RPM_ARCH builder (rpm host: $HOST_RPM_ARCH)" >&2
+  exit 1
+fi
 
 rpmbuild -bb --target "$RPM_ARCH" --define "_topdir $TOPDIR" "$TOPDIR/SPECS/mec.spec"
 

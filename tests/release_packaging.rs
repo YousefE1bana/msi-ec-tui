@@ -273,7 +273,10 @@ fn archive_script_uses_valid_sort_option() {
         .filter(|line| !line.trim_start().starts_with('#'))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(code.contains("--sort=name"), "must probe real GNU tar option");
+    assert!(
+        code.contains("--sort=name"),
+        "must probe real GNU tar option"
+    );
     assert!(
         !code.contains("--sort-name"),
         "invalid sort flag must not appear in code"
@@ -296,7 +299,10 @@ fn archive_script_probes_full_ownership_set_and_deterministic_gzip() {
         code.contains("--owner=0 --group=0 --numeric-owner)"),
         "probed set must match appended set"
     );
-    assert!(code.contains("gzip -n"), "gzip output must be deterministic");
+    assert!(
+        code.contains("gzip -n"),
+        "gzip output must be deterministic"
+    );
 }
 
 #[test]
@@ -313,7 +319,7 @@ fn package_scripts_verify_internal_metadata() {
     let deb = std::fs::read_to_string(script("build-deb.sh")).unwrap();
     for field in ["Package", "Version", "Architecture"] {
         assert!(
-            deb.contains(&format!("dpkg-deb -f") ) && deb.contains(field),
+            deb.contains("dpkg-deb -f") && deb.contains(field),
             "deb must verify {field}"
         );
     }
@@ -328,11 +334,8 @@ fn staged_payload(root: &std::path::Path, topdir: &str, marker: &[u8]) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            payload.join("mec"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        std::fs::set_permissions(payload.join("mec"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
     }
     std::fs::write(payload.join("README.md"), b"# fake\n").unwrap();
     std::fs::write(payload.join("LICENSE"), b"fake\n").unwrap();
@@ -453,4 +456,118 @@ fn archive_members_are_exact() {
             assert!(perms.starts_with("-rw-"), "docs regular: {perms:?}");
         }
     }
+}
+
+#[test]
+fn release_workflow_builds_each_arch_on_its_native_runner() {
+    let text = std::fs::read_to_string(manifest_dir().join(".github/workflows/release-build.yml"))
+        .unwrap();
+    assert!(text.contains("runs-on: ${{ matrix.runner }}"));
+    assert!(text.contains("runner: ubuntu-24.04"));
+    assert!(text.contains("runner: ubuntu-24.04-arm"));
+    assert!(text.contains("target: x86_64-unknown-linux-gnu"));
+    assert!(text.contains("target: aarch64-unknown-linux-gnu"));
+    assert!(text.contains("deb_arch: amd64"));
+    assert!(text.contains("deb_arch: arm64"));
+    assert!(text.contains("rpm_arch: x86_64"));
+    assert!(text.contains("rpm_arch: aarch64"));
+    // The x86_64 entry must not resolve to the ARM runner and vice versa.
+    let x86_pos = text
+        .find("target: x86_64-unknown-linux-gnu")
+        .expect("x86 entry");
+    let arm_runner = text.find("ubuntu-24.04-arm").expect("arm runner");
+    assert!(x86_pos < arm_runner);
+}
+
+#[test]
+fn release_workflow_needs_no_cross_linker() {
+    let text = std::fs::read_to_string(manifest_dir().join(".github/workflows/release-build.yml"))
+        .unwrap();
+    assert!(!text.contains("gcc-aarch64-linux-gnu"));
+    assert!(!text.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER"));
+}
+
+#[test]
+fn release_workflow_executes_both_binaries_natively() {
+    let text = std::fs::read_to_string(manifest_dir().join(".github/workflows/release-build.yml"))
+        .unwrap();
+    assert!(text.contains("Execute native binary"));
+    assert!(!text.contains("x86_64 only"));
+    assert!(!text.contains("x86-only"));
+    // Validation consumes matrix metadata instead of a second mapping.
+    assert!(text.contains("${{ matrix.deb_arch }}"));
+    assert!(text.contains("${{ matrix.rpm_arch }}"));
+}
+
+#[test]
+fn rpm_builder_fails_closed_on_foreign_host_arch() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Hermetic rpm double: claims an ARM host regardless of hardware.
+    let fake_rpm = bin.join("rpm");
+    std::fs::write(&fake_rpm, "#!/bin/bash\necho aarch64\n").unwrap();
+    std::fs::set_permissions(&fake_rpm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_binary = dir.path().join("mec");
+    std::fs::write(&fake_binary, b"fake").unwrap();
+    std::fs::set_permissions(&fake_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let status = Command::new("bash")
+        .arg(script("build-rpm.sh"))
+        .arg(&fake_binary)
+        .arg("x86_64-unknown-linux-gnu")
+        .arg(dir.path().join("out"))
+        .env("PATH", path)
+        .output()
+        .expect("package script runs");
+    assert!(!status.status.success());
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("requires a native x86_64 builder"),
+        "unexpected stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn rpm_builder_guard_passes_through_on_matching_host() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Hermetic rpm double: claims the requested host; the script must get
+    // past the guard (it then fails later for unrelated local reasons,
+    // but never with the native-builder error).
+    let fake_rpm = bin.join("rpm");
+    std::fs::write(&fake_rpm, "#!/bin/bash\necho x86_64\n").unwrap();
+    std::fs::set_permissions(&fake_rpm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_binary = dir.path().join("mec");
+    std::fs::write(&fake_binary, b"fake").unwrap();
+    std::fs::set_permissions(&fake_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let status = Command::new("bash")
+        .arg(script("build-rpm.sh"))
+        .arg(&fake_binary)
+        .arg("x86_64-unknown-linux-gnu")
+        .arg(dir.path().join("out"))
+        .env("PATH", path)
+        .output()
+        .expect("package script runs");
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        !stderr.contains("requires a native") && !stdout.contains("requires a native"),
+        "guard must pass on matching host: {stderr:?}"
+    );
+}
+
+#[test]
+fn rpm_builder_queries_native_host_cpu() {
+    let text = std::fs::read_to_string(script("build-rpm.sh")).unwrap();
+    let code: String = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(code.contains("rpm --eval") && code.contains("_host_cpu"));
 }

@@ -18,10 +18,18 @@ permissions:
 jobs:
   build:
     name: packages (${{ matrix.target }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            deb_arch: amd64
+            rpm_arch: x86_64
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            rpm_arch: aarch64
     steps:
       # actions/checkout v4 (major-version pinned upstream action).
       - name: Check out repository
@@ -30,15 +38,15 @@ jobs:
         run: rustup show
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
-      - name: Install cross linker and packaging tools
+      - name: Install packaging tools
         # sudo apt on the disposable runner installs distro build tools
-        # only; packaging scripts themselves never use sudo.
+        # only; packaging scripts themselves never use sudo. Each job
+        # already runs natively on its target architecture, so no cross
+        # linker is needed.
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu dpkg-dev rpm cpio
+          sudo apt-get install -y dpkg-dev rpm cpio
       - name: Build release archive
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: |
           chmod +x scripts/build-release-archive.sh
           ./scripts/build-release-archive.sh ${{ matrix.target }} dist
@@ -55,25 +63,21 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
-          case "${{ matrix.target }}" in
-            x86_64-unknown-linux-gnu) DEB_ARCH=amd64; RPM_ARCH=x86_64 ;;
-            aarch64-unknown-linux-gnu) DEB_ARCH=arm64; RPM_ARCH=aarch64 ;;
-            *) echo "unknown target" >&2; exit 1 ;;
-          esac
+          DEB_ARCH="${{ matrix.deb_arch }}"
+          RPM_ARCH="${{ matrix.rpm_arch }}"
           test -f "dist/mec-${{ matrix.target }}.tar.gz"
           test -f "dist/mec_${VERSION}_${DEB_ARCH}.deb"
           test -f "dist/mec-${VERSION}-1.${RPM_ARCH}.rpm"
           test "$(dpkg-deb -f "dist/mec_${VERSION}_${DEB_ARCH}.deb" Architecture)" = "$DEB_ARCH"
           test "$(rpm -qp --queryformat '%{ARCH}\n' "dist/mec-${VERSION}-1.${RPM_ARCH}.rpm")" = "$RPM_ARCH"
           test "$(tar -tzf "dist/mec-${{ matrix.target }}.tar.gz" | LC_ALL=C sort)" = "$(printf 'mec-%s-%s/\nmec-%s-%s/LICENSE\nmec-%s-%s/README.md\nmec-%s-%s/SECURITY.md\nmec-%s-%s/mec\n' "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}")"
-      - name: Execute native binary (x86_64 only)
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Execute native binary
         run: |
           set -euo pipefail
           rm -rf /tmp/mec-validate && mkdir -p /tmp/mec-validate
-          tar -xzf dist/mec-x86_64-unknown-linux-gnu.tar.gz -C /tmp/mec-validate
+          tar -xzf dist/mec-${{ matrix.target }}.tar.gz -C /tmp/mec-validate
           VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
-          BIN="/tmp/mec-validate/mec-${VERSION}-x86_64-unknown-linux-gnu/mec"
+          BIN="/tmp/mec-validate/mec-${VERSION}-${{ matrix.target }}/mec"
           "$BIN" --help
           "$BIN" --sys-root tests/fixtures/gf63 status
       # actions/upload-artifact v4 (major-version pinned upstream action).
