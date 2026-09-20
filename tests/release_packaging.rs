@@ -494,6 +494,10 @@ fn release_workflow_executes_both_binaries_natively() {
     assert!(text.contains("Execute native binary"));
     assert!(!text.contains("x86_64 only"));
     assert!(!text.contains("x86-only"));
+    // Native validation covers help, version, and fixture status.
+    assert!(text.contains("\"$BIN\" --help"));
+    assert!(text.contains("\"$BIN\" --version"));
+    assert!(text.contains("--sys-root tests/fixtures/gf63 status"));
     // Validation consumes matrix metadata instead of a second mapping.
     assert!(text.contains("${{ matrix.deb_arch }}"));
     assert!(text.contains("${{ matrix.rpm_arch }}"));
@@ -906,13 +910,20 @@ fn release_publish_uploads_exact_artifact_set_with_aur_metadata() {
         "dist/mec-${VERSION}-1.aarch64.rpm",
         "dist/SHA256SUMS",
         "dist/PKGBUILD",
-        "dist/.SRCINFO",
+        "dist/mec-bin.SRCINFO",
     ] {
         assert!(
             publish.contains(artifact),
             "publish job must upload {artifact}"
         );
     }
+    // The canonical local .SRCINFO stays generator-owned; the publish job
+    // exposes the same bytes under a visible asset name and validates
+    // both are non-empty.
+    assert!(publish.contains("dist/.SRCINFO"));
+    assert!(publish.contains("cp dist/.SRCINFO dist/mec-bin.SRCINFO"));
+    assert!(publish.contains("test -s dist/.SRCINFO"));
+    assert!(publish.contains("test -s dist/mec-bin.SRCINFO"));
     // AUR metadata comes from the final checksums, not hand-written values.
     assert!(publish.contains("generate-aur-package.sh"));
     assert!(publish.contains("dist/SHA256SUMS"));
