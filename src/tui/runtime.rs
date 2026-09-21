@@ -41,6 +41,9 @@ where
         match events.next_event(timeout)? {
             TuiEvent::Action(action) => state.apply(action),
             TuiEvent::Tick => on_tick(),
+            // The area-less loop cannot hit-test mouse coordinates, so
+            // mouse stays inert here; the viewport loop maps it instead.
+            TuiEvent::Mouse(_) => {}
             TuiEvent::Resize { .. } | TuiEvent::Ignored => {}
         }
     }

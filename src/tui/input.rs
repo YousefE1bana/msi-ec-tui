@@ -49,7 +49,7 @@ pub fn action_for_key_with_options(key: KeyEvent, vim_keys: bool) -> Option<AppA
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
         KeyCode::Char('p') if key.modifiers.is_empty() => Some(AppAction::TogglePalette),
         KeyCode::Char('P') if allows_only_shift(key.modifiers) => Some(AppAction::TogglePalette),
-        KeyCode::Char(digit @ '1'..='7') if key.modifiers.is_empty() => {
+        KeyCode::Char(digit @ '1'..='8') if key.modifiers.is_empty() => {
             Some(AppAction::GoTo(screen_for_digit(digit)))
         }
         _ => None,
@@ -70,6 +70,9 @@ fn screen_for_digit(digit: char) -> Screen {
         '4' => Screen::Battery,
         '5' => Screen::Devices,
         '6' => Screen::Profiles,
+        // Production owns seven screens; the approved menu's eighth row
+        // is Settings, which lands on Diagnostics (closest existing
+        // read-only surface) in P1. Digit and click share this mapping.
         _ => Screen::Diagnostics,
     }
 }
@@ -180,6 +183,10 @@ mod tests {
             ('5', Screen::Devices),
             ('6', Screen::Profiles),
             ('7', Screen::Diagnostics),
+            // The approved menu's eighth row is Settings; production has
+            // no Settings screen, so 8 lands on Diagnostics (closest
+            // existing read-only surface), matching the mouse mapping.
+            ('8', Screen::Diagnostics),
         ];
         for (digit, screen) in cases {
             assert_eq!(
@@ -192,9 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn digit_eight_is_unmapped() {
+    fn digit_nine_is_unmapped() {
         assert_eq!(
-            action_for_key(press(KeyCode::Char('8'), KeyModifiers::empty())),
+            action_for_key(press(KeyCode::Char('9'), KeyModifiers::empty())),
             None
         );
     }

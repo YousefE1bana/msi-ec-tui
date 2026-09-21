@@ -41,4 +41,8 @@ pub enum AppAction {
     HideHelp,
     /// Toggle the non-mutating command palette overlay.
     TogglePalette,
+    /// Focus a dashboard card by index (0-5). Presentation only: updates
+    /// the focused-card highlight, never touches hardware or selection.
+    /// Produced by mouse clicks; keyboard has no binding.
+    FocusDashboardCard(usize),
 }

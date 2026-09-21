@@ -61,15 +61,23 @@ impl ThemeName {
 ///
 /// Roles name meaning, never widgets: READY/LIVE resolve to `success`,
 /// READ-ONLY to `warning`, DEGRADED to `danger`, waiting states to `muted`,
-/// and the active navigation entry to `primary` plus bold.
+/// and the active navigation entry to `primary` plus bold. Dashboard card
+/// titles, telemetry headings, and focus accents resolve to `accent`;
+/// card interiors resolve to `surface`; telemetry meters resolve to
+/// `meter_fill` on `meter_track`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     /// Default terminal background.
     pub background: Color,
+    /// Card interior surface. Dark themes separate cards from the root;
+    /// reset/background themes let borders define cards.
+    pub surface: Color,
     /// Default terminal foreground.
     pub foreground: Color,
     /// Active navigation entry, screen titles, help chrome.
     pub primary: Color,
+    /// Dashboard card titles, telemetry headings, focus accents.
+    pub accent: Color,
     /// Secondary informational labels.
     pub secondary: Color,
     /// Healthy states: READY, LIVE, Supported.
@@ -82,6 +90,10 @@ pub struct Theme {
     pub muted: Color,
     /// Panel and shell borders.
     pub border: Color,
+    /// Telemetry meter fill (approved cool cyan, all themes).
+    pub meter_fill: Color,
+    /// Telemetry meter track (approved dark slate, all themes).
+    pub meter_track: Color,
 }
 
 impl Default for Theme {
@@ -98,36 +110,48 @@ impl Theme {
         match name {
             ThemeName::MsiDark => Self {
                 background: Color::Black,
+                surface: Color::Rgb(17, 19, 24),
                 foreground: Color::White,
                 primary: Color::Red,
+                accent: Color::Rgb(94, 197, 222),
                 secondary: Color::Magenta,
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::LightRed,
                 muted: Color::Gray,
                 border: Color::DarkGray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
             },
             ThemeName::Terminal => Self {
                 background: Color::Reset,
+                surface: Color::Reset,
                 foreground: Color::Reset,
                 primary: Color::Cyan,
+                accent: Color::Cyan,
                 secondary: Color::Blue,
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::Red,
                 muted: Color::Gray,
                 border: Color::DarkGray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
             },
             ThemeName::Light => Self {
                 background: Color::White,
+                surface: Color::White,
                 foreground: Color::Black,
                 primary: Color::Blue,
+                accent: Color::Blue,
                 secondary: Color::Magenta,
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::Red,
                 muted: Color::DarkGray,
                 border: Color::Gray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
             },
         }
     }
@@ -160,6 +184,24 @@ mod tests {
         let _ = theme.danger;
         let _ = theme.muted;
         let _ = theme.border;
+    }
+
+    #[test]
+    fn dashboard_roles_cover_surface_accent_and_meters() {
+        use ratatui::style::Color;
+        for name in super::ThemeName::all() {
+            let theme = Theme::for_name(name);
+            // Meter colors are the approved locked pair in every theme.
+            assert_eq!(theme.meter_fill, Color::Rgb(79, 159, 173), "{name:?}");
+            assert_eq!(theme.meter_track, Color::Rgb(34, 50, 56), "{name:?}");
+            let _ = theme.surface;
+            let _ = theme.accent;
+        }
+        // The dark session separates cards from the root background.
+        assert_ne!(
+            Theme::for_name(super::ThemeName::MsiDark).surface,
+            Theme::for_name(super::ThemeName::MsiDark).background
+        );
     }
 
     #[test]

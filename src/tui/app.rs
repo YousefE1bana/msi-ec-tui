@@ -74,6 +74,9 @@ pub struct TuiApp<B, E = SafeTuiExecutor> {
     theme_name: ThemeName,
     config: AppConfig,
     config_store: Option<AppConfigStore>,
+    /// Last drawn frame area for mouse hit-testing. Updated on every
+    /// draw; zero until the first frame so early mouse input stays inert.
+    viewport: ratatui::layout::Rect,
 }
 
 impl<B, E> TuiApp<B, E>
@@ -168,6 +171,17 @@ where
     /// out and the event loop reads the interval and vim-keys setting.
     pub fn config(&self) -> &AppConfig {
         &self.config
+    }
+
+    /// Last drawn frame area. Mouse coordinates hit-test against this so
+    /// regions always match the visible grid.
+    pub fn viewport(&self) -> ratatui::layout::Rect {
+        self.viewport
+    }
+
+    /// Records the drawn frame area. Called once per draw by the runtime.
+    pub fn set_viewport(&mut self, viewport: ratatui::layout::Rect) {
+        self.viewport = viewport;
     }
 
     /// Event-loop poll timeout derived from the configured interval.
@@ -589,6 +603,7 @@ where
         theme_name: ThemeName::MsiDark,
         config: AppConfig::default(),
         config_store: None,
+        viewport: ratatui::layout::Rect::default(),
     };
     apply_loaded_config(&mut app, loaded, config_store);
     Ok(app)
@@ -674,6 +689,21 @@ where
                 draw(app)?;
             }
         }
+        // Mouse maps through the same semantic actions as the keyboard:
+        // menu clicks navigate, card clicks focus, wheel rows move, and
+        // anything unmapped stays inert. Modal precedence in
+        // `handle_action` drops navigations that must not bypass it, so a
+        // click can never jump screens or quit past a confirmation.
+        TuiEvent::Mouse(mouse) => {
+            if let Some(action) =
+                super::mouse::action_for_mouse(app.viewport(), app.state().current_screen(), mouse)
+            {
+                app.handle_action(action);
+                if !app.state().should_quit() {
+                    draw(app)?;
+                }
+            }
+        }
         TuiEvent::Tick => {
             app.refresh();
             draw(app)?;
@@ -715,6 +745,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
         session
             .terminal_mut()
             .draw(|frame| {
+                app.set_viewport(frame.area());
                 render_screen_with_theme(
                     frame,
                     frame.area(),
@@ -1071,6 +1102,7 @@ mod tests {
             theme_name: crate::tui::theme::ThemeName::MsiDark,
             config: crate::config::AppConfig::default(),
             config_store: None,
+            viewport: ratatui::layout::Rect::default(),
         }
     }
 
@@ -1259,6 +1291,184 @@ mod tests {
             vec![TuiEvent::Action(AppAction::Quit)],
         );
         assert_eq!(harness.draws.get(), 1);
+    }
+
+    // ---- P1: mouse loop integration (non-mutating only) ----
+
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect as LoopRect;
+
+    const LOOP_VIEWPORT: LoopRect = LoopRect {
+        x: 0,
+        y: 0,
+        width: 160,
+        height: 50,
+    };
+
+    fn mouse_click(col: u16, row: u16) -> TuiEvent {
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    }
+
+    fn mouse_wheel_down(col: u16, row: u16) -> TuiEvent {
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    }
+
+    /// Menu row rect for `index` on the 160x50 dashboard grid.
+    fn menu_row_rect(index: usize) -> LoopRect {
+        crate::tui::mouse::dashboard_regions(LOOP_VIEWPORT)
+            .expect("loop viewport maps")
+            .menu_rows[index]
+    }
+
+    /// Runs the loop with every draw recording the production viewport,
+    /// mirroring `run_tui`.
+    fn run_loop_with_viewport(
+        script: Vec<Result<HardwareSnapshot, BackendError>>,
+        events: Vec<TuiEvent>,
+    ) -> (
+        TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor>,
+        LoopHarness,
+    ) {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(script, Rc::clone(&log));
+        let mut source = LoopSource::events(events, Rc::clone(&log));
+        let draws = Rc::new(Cell::new(0));
+        let harness = LoopHarness {
+            draws: Rc::clone(&draws),
+            degraded_at_draw: Rc::new(RefCell::new(Vec::new())),
+            current_at_draw: Rc::new(RefCell::new(Vec::new())),
+        };
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |app| {
+            app.set_viewport(LOOP_VIEWPORT);
+            draws.set(draws.get() + 1);
+            Ok(())
+        })
+        .expect("scripted mouse loop succeeds");
+        (app, harness)
+    }
+
+    #[test]
+    fn mouse_menu_click_navigates_and_redraws() {
+        let row = menu_row_rect(2);
+        let (app, harness) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_click(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        assert_eq!(harness.draws.get(), 2);
+    }
+
+    #[test]
+    fn mouse_wheel_over_menu_moves_like_arrows() {
+        let row = menu_row_rect(0);
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_wheel_down(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn mouse_card_click_focuses_without_navigating() {
+        let regions = crate::tui::mouse::dashboard_regions(LOOP_VIEWPORT).expect("maps");
+        let card = &regions.cards[1];
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_click(card.x + 2, card.y + card.height - 2),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert_eq!(app.state().dashboard_focus(), 1);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+    }
+
+    #[test]
+    fn mouse_exit_row_quits_without_final_redraw() {
+        let row = menu_row_rect(8);
+        let (app, harness) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![mouse_click(row.x + 1, row.y)],
+        );
+        assert!(app.state().should_quit());
+        assert_eq!(harness.draws.get(), 1);
+    }
+
+    #[test]
+    fn mouse_before_any_draw_stays_inert() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        let row = menu_row_rect(2);
+        let mut source = LoopSource::events(
+            vec![
+                mouse_click(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .expect("zero-viewport loop succeeds");
+        // Zero viewport maps nothing: only the initial draw runs and the
+        // screen never changes.
+        assert_eq!(draws, 1);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+    }
+
+    #[test]
+    fn mouse_navigation_dropped_while_palette_open() {
+        let row = menu_row_rect(2);
+        let (app, harness) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                TuiEvent::Action(AppAction::TogglePalette),
+                mouse_click(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Cancel),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        // The click maps to GoTo(Fans) but palette precedence drops it.
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        // Initial + palette-open + dropped click (harmless redraw, no
+        // state change) + cancel; quit draws nothing.
+        assert_eq!(harness.draws.get(), 4);
+    }
+
+    #[test]
+    fn mouse_path_executes_zero_hardware_commands() {
+        let regions = crate::tui::mouse::dashboard_regions(LOOP_VIEWPORT).expect("maps");
+        let menu = &regions.menu_rows[1];
+        let card = &regions.cards[3];
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_click(menu.x + 1, menu.y),
+                mouse_click(card.x + 2, card.y + card.height - 2),
+                mouse_wheel_down(menu.x + 1, menu.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert!(app.executor().received_commands().is_empty());
+        assert!(app.executor().received_profiles().is_empty());
     }
 
     #[test]

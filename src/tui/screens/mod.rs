@@ -166,7 +166,7 @@ fn render_active_screen<B: EcBackend>(
 ) {
     match app.current_screen() {
         Screen::Dashboard => {
-            dashboard::render_dashboard_with_theme(frame, area, live, theme);
+            dashboard::render_dashboard_with_theme(frame, area, app, live, theme);
         }
         Screen::Performance => {
             performance::render_performance_with_theme(
@@ -1853,7 +1853,9 @@ mod tests {
         )
         .expect("body text present");
         assert_eq!(fg, Color::White);
-        assert_eq!(bg, Color::Black);
+        // Dashboard card interiors use the surface role (charcoal on the
+        // dark session); the root background still owns untouched cells.
+        assert_eq!(bg, dark.surface);
         // Tiny fallback leaves most cells untouched: base fill owns them.
         assert_eq!(empty_cell_bg(20, 8, 19, 7, &dark), Color::Black);
     }
@@ -2086,7 +2088,8 @@ mod tests {
             &after,
         )
         .expect("body present");
-        assert_eq!(bg_before, Color::Black);
+        // Card interiors repaint with the destination surface role.
+        assert_eq!(bg_before, before.surface);
         assert_eq!(bg_after, Color::White);
     }
 

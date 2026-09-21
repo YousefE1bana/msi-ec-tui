@@ -75,7 +75,15 @@ pub struct AppState {
     current_screen: Screen,
     help_visible: bool,
     should_quit: bool,
+    /// Focused dashboard card (0-5) for the mouse-driven focus
+    /// highlight. Presentation only; never affects hardware.
+    dashboard_focus: usize,
 }
+
+/// Dashboard card count backing `dashboard_focus`. Matches the approved
+/// six-card dashboard grid (control, thermals, cooling, power,
+/// performance, device) in focus order.
+pub const DASHBOARD_CARD_COUNT: usize = 6;
 
 impl AppState {
     /// Screen currently displayed.
@@ -91,6 +99,11 @@ impl AppState {
     /// Whether the application should exit.
     pub fn should_quit(&self) -> bool {
         self.should_quit
+    }
+
+    /// Focused dashboard card index (0-5). Defaults to the control card.
+    pub fn dashboard_focus(&self) -> usize {
+        self.dashboard_focus
     }
 
     /// Applies one terminal-independent action. `MoveUp`/`MoveDown` keep
@@ -118,6 +131,9 @@ impl AppState {
             AppAction::ShowHelp => self.help_visible = true,
             AppAction::HideHelp => self.help_visible = false,
             AppAction::TogglePalette => {}
+            AppAction::FocusDashboardCard(index) => {
+                self.dashboard_focus = index.min(DASHBOARD_CARD_COUNT - 1);
+            }
         }
     }
 }
@@ -323,10 +339,33 @@ mod tests {
             AppAction::ShowHelp,
             AppAction::HideHelp,
             AppAction::TogglePalette,
+            AppAction::FocusDashboardCard(3),
         ] {
             let mut state = AppState::default();
             state.apply(action);
             assert!(!state.should_quit());
         }
+    }
+
+    #[test]
+    fn dashboard_focus_defaults_to_control_card() {
+        assert_eq!(AppState::default().dashboard_focus(), 0);
+    }
+
+    #[test]
+    fn focus_dashboard_card_updates_highlight_only() {
+        let mut state = AppState::default();
+        state.apply(AppAction::FocusDashboardCard(4));
+        assert_eq!(state.dashboard_focus(), 4);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+        assert!(!state.help_visible());
+        assert!(!state.should_quit());
+    }
+
+    #[test]
+    fn dashboard_focus_clamps_to_last_card() {
+        let mut state = AppState::default();
+        state.apply(AppAction::FocusDashboardCard(99));
+        assert_eq!(state.dashboard_focus(), DASHBOARD_CARD_COUNT - 1);
     }
 }

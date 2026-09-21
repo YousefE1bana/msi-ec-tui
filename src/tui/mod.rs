@@ -12,6 +12,7 @@ pub mod executor;
 mod help;
 mod history;
 mod input;
+mod mouse;
 mod notifications;
 mod palette;
 mod profile_catalog;
