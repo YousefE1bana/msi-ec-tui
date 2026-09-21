@@ -17,7 +17,7 @@ Install the new `.deb` for your architecture with your normal package
 tool, for example:
 
 ```sh
-sudo apt install ./mec_0.9.0_amd64.deb
+sudo apt install ./mec_1.0.1_amd64.deb
 ```
 
 The package manager replaces `/usr/bin/mec` and the documentation
@@ -29,7 +29,7 @@ Install the new `.rpm` for your architecture with your normal package
 tool, for example:
 
 ```sh
-sudo dnf install ./mec-0.9.0-1.x86_64.rpm
+sudo dnf install ./mec-1.0.1-1.x86_64.rpm
 ```
 
 Same guarantee: system payload is replaced, `~/.config/mec/` is left
@@ -44,7 +44,7 @@ for your architecture, and use the new `mec` binary:
 ```sh
 sha256sum -c SHA256SUMS
 tar -xzf mec-x86_64-unknown-linux-gnu.tar.gz
-./mec-0.9.0-x86_64-unknown-linux-gnu/mec --version
+./mec-1.0.1-x86_64-unknown-linux-gnu/mec --version
 ```
 
 Your config and profiles stay where they were; only the binary you run

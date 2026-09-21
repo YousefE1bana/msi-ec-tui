@@ -124,9 +124,10 @@ fn guides_make_no_false_claims() {
             }
         }
     }
-    // Stable preparation tree: README names v1.0.0 contents without
-    // claiming publication.
+    // Published stable tree: README names v1.0.0 as published and tracks
+    // the current 1.0.1 line without unpublished-release claims.
     let readme = read("README.md");
     assert!(readme.contains("MEC v1.0.0"));
-    assert!(readme.to_lowercase().contains("not yet published"));
+    assert!(readme.contains("1.0.1"));
+    assert!(!readme.to_lowercase().contains("not yet published"));
 }

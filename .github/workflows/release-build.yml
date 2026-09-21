@@ -81,6 +81,7 @@ jobs:
           VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
           BIN="/tmp/mec-validate/mec-${VERSION}-${{ matrix.target }}/mec"
           "$BIN" --help
+          "$BIN" --version
           "$BIN" --sys-root tests/fixtures/gf63 status
       # actions/upload-artifact v4 (major-version pinned upstream action).
       - name: Upload packages
@@ -157,6 +158,13 @@ jobs:
           VERSION="$(grep '^version = ' Cargo.toml | head -1 | cut -d'"' -f2)"
           ./scripts/generate-aur-package.sh "$VERSION" dist/SHA256SUMS dist
           (cd dist && sha256sum -c SHA256SUMS)
+          # The generator writes the canonical local .SRCINFO; expose the
+          # same content under a visible asset name because a dotfile
+          # surfaces as default.SRCINFO on the release page.
+          cp dist/.SRCINFO dist/mec-bin.SRCINFO
+          test -s dist/.SRCINFO
+          test -s dist/mec-bin.SRCINFO
+          cmp dist/.SRCINFO dist/mec-bin.SRCINFO
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -175,4 +183,4 @@ jobs:
             "dist/mec-${VERSION}-1.aarch64.rpm" \
             dist/SHA256SUMS \
             dist/PKGBUILD \
-            dist/.SRCINFO
+            dist/mec-bin.SRCINFO

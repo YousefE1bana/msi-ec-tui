@@ -4,14 +4,14 @@ MEC is distributed as prebuilt release artifacts plus an AUR binary
 packaging workflow. Release binaries need no Rust toolchain; only
 building from source does.
 
-Release artifacts for each version (example `0.9.0`):
+Release artifacts for each version (example `1.0.1`):
 
 - `mec-x86_64-unknown-linux-gnu.tar.gz` (portable, x86_64)
 - `mec-aarch64-unknown-linux-gnu.tar.gz` (portable, ARM64)
-- `mec_0.9.0_amd64.deb` (Debian/Ubuntu family, x86_64)
-- `mec_0.9.0_arm64.deb` (Debian/Ubuntu family, ARM64)
-- `mec-0.9.0-1.x86_64.rpm` (RPM family, x86_64)
-- `mec-0.9.0-1.aarch64.rpm` (RPM family, ARM64)
+- `mec_1.0.1_amd64.deb` (Debian/Ubuntu family, x86_64)
+- `mec_1.0.1_arm64.deb` (Debian/Ubuntu family, ARM64)
+- `mec-1.0.1-1.x86_64.rpm` (RPM family, x86_64)
+- `mec-1.0.1-1.aarch64.rpm` (RPM family, ARM64)
 - `SHA256SUMS` (checksums covering all six files above)
 
 Pick the install path that matches your system. The three paths are
@@ -37,10 +37,10 @@ Install the package matching your architecture with your normal package
 tool, for example:
 
 ```sh
-sudo apt install ./mec_0.9.0_amd64.deb
+sudo apt install ./mec_1.0.1_amd64.deb
 ```
 
-(ARM64 systems use `mec_0.9.0_arm64.deb` instead.)
+(ARM64 systems use `mec_1.0.1_arm64.deb` instead.)
 
 This installs `/usr/bin/mec` plus documentation under
 `/usr/share/doc/mec/`. The package is a passive file payload: it does
@@ -60,10 +60,10 @@ Install the package matching your architecture with your normal package
 tool, for example:
 
 ```sh
-sudo dnf install ./mec-0.9.0-1.x86_64.rpm
+sudo dnf install ./mec-1.0.1-1.x86_64.rpm
 ```
 
-(ARM64 systems use `mec-0.9.0-1.aarch64.rpm` instead.)
+(ARM64 systems use `mec-1.0.1-1.aarch64.rpm` instead.)
 
 This installs the same `/usr/bin/mec` plus documentation under
 `/usr/share/doc/mec/`, with the same passive-payload guarantees as the
@@ -88,8 +88,8 @@ archive for your architecture and run the binary directly:
 
 ```sh
 tar -xzf mec-x86_64-unknown-linux-gnu.tar.gz
-./mec-0.9.0-x86_64-unknown-linux-gnu/mec --help
-./mec-0.9.0-x86_64-unknown-linux-gnu/mec --sys-root tests/fixtures/gf63 status
+./mec-1.0.1-x86_64-unknown-linux-gnu/mec --help
+./mec-1.0.1-x86_64-unknown-linux-gnu/mec --sys-root tests/fixtures/gf63 status
 ```
 
 Each archive contains exactly one top-level directory
@@ -147,5 +147,7 @@ Privilege model, as implemented:
 - Packages do not change `/sys` permissions and do not install
   permission workarounds.
 
-Physical write behavior has not been completed through physical
-validation yet; writes are covered by fake sysfs integration tests.
+Physical write validation has been completed on MSI GF63 Thin 11UC for
+keyboard backlight, webcam, webcam block, and Cooler Boost; other write
+paths remain covered by fake sysfs integration tests and await physical
+validation.

@@ -8,12 +8,14 @@ safely controlling supported MSI laptops through the
 
 ## Status
 
-MEC v1.0.0 stable release contents (not yet published: no tag, no GitHub
-Release, no AUR entry yet). PLAN-006 (interactive TUI) is implemented,
-and PLAN-007 release packaging is implemented: x86_64 and ARM64 release
-archives with `SHA256SUMS`, `.deb` and `.rpm` packages built natively
-per architecture, reproducible AUR (`mec-bin`) package generation from
-the released checksums, and install/upgrade/uninstall guides.
+MEC v1.0.0 is the first published stable release. The current
+package/release line is 1.0.1, a patch release fixing false hardware
+verification failures and the `mec --version` flag. PLAN-006
+(interactive TUI) is implemented, and PLAN-007 release packaging is
+implemented: x86_64 and ARM64 release archives with `SHA256SUMS`, `.deb`
+and `.rpm` packages built natively per architecture, reproducible AUR
+(`mec-bin`) package generation from the released checksums, and
+install/upgrade/uninstall guides.
 Running `cargo run` with no subcommand launches the interactive TUI when
 both stdin and stdout are terminals:
 
@@ -296,9 +298,8 @@ model remains future work.
 Explicitly NOT completed yet:
 
 - Automatic privileged helper / privilege deployment integration
-- Physical hardware write validation
-- Publishing the v1.0.0 tag / GitHub Release / AUR entry
-  (contents prepared in-tree; release stays a deliberate later step)
+- Physical validation of the remaining write paths (battery threshold,
+  shift mode, fan mode, profile transaction, TUI mutation)
 - Optional advanced fan-curve features not representable through the
   safe typed commands
 - GUI, cloud, or telemetry features (out of v1 scope)
@@ -311,9 +312,11 @@ See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
 - Primary physical test target: MSI GF series laptops
 - Other MSI laptops through capabilities exposed by the `msi-ec` kernel module
 
-Read behavior has been manually smoke-tested on real MSI hardware, but
-hardware WRITE behavior has not yet been physically validated; write
-semantics are currently covered by fake/temp sysfs integration tests.
+Read behavior has been manually smoke-tested on real MSI hardware.
+Physical write validation has been completed on MSI GF63 Thin 11UC for
+keyboard backlight, webcam, webcam block, and Cooler Boost; other write
+paths remain covered by fake/temp sysfs integration tests and await
+physical validation.
 
 ## Installation
 
