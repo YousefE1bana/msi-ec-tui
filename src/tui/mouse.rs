@@ -68,18 +68,11 @@ fn contains(area: Rect, col: u16, row: u16) -> bool {
     col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
 }
 
-/// Dashboard content area: the full frame minus the one-row navigation
-/// chrome owned by the screen dispatcher.
+/// Dashboard content area: the v1.1 dashboard owns the full frame (the
+/// legacy navigation row stays hidden there), so hit-testing uses the
+/// frame area directly.
 pub fn dashboard_area(full: Rect) -> Rect {
-    if full.height < 2 {
-        return Rect::new(full.x, full.y, full.width, 0);
-    }
-    Rect {
-        x: full.x,
-        y: full.y + 1,
-        width: full.width,
-        height: full.height - 1,
-    }
+    full
 }
 
 /// Splits the dashboard area into top strip, workspace, and footer.
@@ -561,10 +554,11 @@ mod tests {
 
     #[test]
     fn clicks_outside_regions_are_inert() {
+        // The top strip carries state but no actions in P1.
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, click(0, 0)),
+            action_for_mouse(FULL, Screen::Dashboard, click(150, 0)),
             None,
-            "navigation row must be inert in P1"
+            "top strip must stay inert in P1"
         );
     }
 
@@ -588,10 +582,10 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_area_drops_navigation_row() {
-        let area = dashboard_area(FULL);
-        assert_eq!(area.y, 1);
-        assert_eq!(area.height, FULL.height - 1);
+    fn dashboard_area_is_the_full_frame() {
+        // The legacy navigation row stays hidden on the dashboard, so the
+        // approved shell (and hit-testing) starts at the first frame row.
+        assert_eq!(dashboard_area(FULL), FULL);
     }
 
     #[test]

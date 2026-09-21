@@ -286,7 +286,10 @@ mod tests {
 
     #[test]
     fn full_navigation_labels_at_reference_size() {
-        let text = rendered(Screen::Dashboard, 100, 30);
+        // Secondary screens keep the legacy navigation row in P1; the
+        // dashboard owns the approved menu instead (see
+        // `dashboard_hides_legacy_navigation_chrome`).
+        let text = rendered(Screen::Fans, 100, 30);
         for label in [
             "1 Dashboard",
             "2 Performance",
@@ -302,7 +305,7 @@ mod tests {
 
     #[test]
     fn medium_terminal_navigation_stays_meaningful() {
-        let text = rendered(Screen::Dashboard, 72, 20);
+        let text = rendered(Screen::Fans, 72, 20);
         assert!(text.contains("1 Dash"));
         assert!(text.contains("6 Prof"));
         assert!(text.contains("7 Diag"));
@@ -310,7 +313,7 @@ mod tests {
 
     #[test]
     fn medium_terminal_uses_abbreviated_navigation() {
-        let text = rendered(Screen::Dashboard, 56, 16);
+        let text = rendered(Screen::Fans, 56, 16);
         let nav: Vec<&str> = text.lines().collect();
         assert_eq!(
             nav[0],

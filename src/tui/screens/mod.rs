@@ -97,17 +97,27 @@ pub fn render_screen_with_theme<B: EcBackend>(
     if !area.is_empty() {
         frame.render_widget(Block::default().style(theme.base_style()), area);
     }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
-    render_navigation(frame, rows[0], app, theme);
+    // The v1.1 dashboard owns its approved shell (top strip, MEC CONTROL
+    // menu, cards, footer): the legacy navigation row stays hidden there
+    // so navigation is never duplicated. Secondary screens keep the
+    // legacy row until P2 migrates them. No second navigation state:
+    // both chromes drive the same `AppState` screens and actions.
+    let content = if app.current_screen() == Screen::Dashboard {
+        area
+    } else {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        render_navigation(frame, rows[0], app, theme);
+        rows[1]
+    };
     let tier = layout_tier(area);
     match tier {
         LayoutTier::Full => {
             render_active_screen(
                 frame,
-                rows[1],
+                content,
                 app,
                 live,
                 capabilities,
@@ -120,7 +130,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
         LayoutTier::Compact => {
             render_compact_screen(
                 frame,
-                rows[1],
+                content,
                 app,
                 live,
                 capabilities,
@@ -130,7 +140,7 @@ pub fn render_screen_with_theme<B: EcBackend>(
                 theme,
             );
         }
-        LayoutTier::Tiny => render_compact(frame, rows[1], theme),
+        LayoutTier::Tiny => render_compact(frame, content, theme),
     }
     if !matches!(tier, LayoutTier::Tiny) {
         render_overlays(
@@ -438,7 +448,8 @@ mod tests {
 
     #[test]
     fn navigation_renders_all_seven_screen_names() {
-        let text = dispatched(Screen::Dashboard);
+        // Secondary screens keep the legacy navigation row in P1.
+        let text = dispatched(Screen::Fans);
         for name in [
             "Dashboard",
             "Performance",
@@ -454,7 +465,7 @@ mod tests {
 
     #[test]
     fn navigation_renders_digits() {
-        let text = dispatched(Screen::Dashboard);
+        let text = dispatched(Screen::Fans);
         for digit in ["1", "2", "3", "4", "5", "6", "7"] {
             assert!(text.contains(digit), "{digit:?} missing from navigation");
         }
@@ -462,7 +473,7 @@ mod tests {
 
     #[test]
     fn navigation_follows_canonical_order() {
-        let text = dispatched(Screen::Dashboard);
+        let text = dispatched(Screen::Fans);
         let mut positions = Vec::new();
         for name in [
             "1 Dashboard",
@@ -479,12 +490,60 @@ mod tests {
     }
 
     #[test]
-    fn active_dashboard_entry_uses_primary_style() {
+    fn dashboard_hides_legacy_navigation_chrome() {
+        // Regression: the v1.1 dashboard must not duplicate navigation.
+        // The first application row is the MEC top strip, never the
+        // legacy "1 Dashboard ..." row; the MEC CONTROL menu owns
+        // navigation with bracketed digits instead.
+        let text = dashboard_frame(160, 50);
+        let first = text.lines().next().unwrap_or_default();
+        assert!(
+            first.starts_with(" MEC "),
+            "first row must be the top strip, got {first:?}"
+        );
+        assert!(
+            !text.contains("1 Dashboard"),
+            "legacy navigation row must stay hidden on the dashboard"
+        );
+        assert!(text.contains("[1]"), "approved menu keeps digit shortcuts");
+        assert!(text.contains("[9]"), "approved menu keeps Exit row");
+        // Secondary screens still carry the legacy row until P2.
+        let fans = dispatched(Screen::Fans);
+        assert!(fans.contains("1 Dashboard"));
+    }
+
+    /// Dashboard frame at a fixed size for chrome-level assertions.
+    fn dashboard_frame(width: u16, height: u16) -> String {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        screen_text(width, height, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
+        })
+    }
+
+    #[test]
+    fn dashboard_menu_marks_active_screen() {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
-        let (foreground, modifier) = first_cell_style(100, 30, "1 Dashboard", |frame| {
+        // Trailing padding keeps the needle inside the menu name span:
+        // the top strip ("Dashboard Test Fixture") and the footer
+        // ("Current: ...") never carry it.
+        let (foreground, modifier) = first_cell_style(160, 50, "ashboard   ", |frame| {
             render_screen_with_theme(
                 frame,
                 frame.area(),
@@ -500,13 +559,17 @@ mod tests {
                 &theme,
             );
         })
-        .expect("navigation entry present");
-        assert_eq!(foreground, theme.primary);
+        .expect("menu entry present");
+        // The approved menu highlights the active screen in the primary
+        // text role plus bold.
+        assert_eq!(foreground, theme.foreground);
         assert!(modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn goto_fans_marks_fans_entry_active() {
+    fn goto_fans_keeps_legacy_nav_marking_fans_active() {
+        // Secondary screens keep the legacy navigation row in P1: it
+        // still marks the current screen with the primary role.
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(Screen::Fans);
@@ -550,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn goto_profiles_marks_profiles_entry_active() {
+    fn goto_profiles_keeps_legacy_nav_marking_profiles_active() {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(Screen::Profiles);
@@ -577,7 +640,9 @@ mod tests {
     }
 
     #[test]
-    fn only_one_entry_is_styled_active() {
+    fn only_one_legacy_entry_is_styled_active() {
+        // The legacy row (secondary screens) still marks exactly one
+        // entry; the dashboard menu carries its own single marker.
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(Screen::Battery);
@@ -614,6 +679,11 @@ mod tests {
             }
         }
         assert_eq!(active, 1);
+        // And the dashboard menu marks exactly one row on its own shell.
+        let text = dashboard_frame(160, 50);
+        let marked: Vec<&str> = text.lines().filter(|line| line.contains("▸")).collect();
+        assert_eq!(marked.len(), 1);
+        assert!(marked[0].contains("Dashboard"), "{:?}", marked[0]);
     }
 
     #[test]
@@ -1351,11 +1421,13 @@ mod tests {
         screen: Screen,
         theme: &Theme,
         needle: &str,
+        width: u16,
+        height: u16,
     ) -> Option<(ratatui::style::Color, Modifier)> {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(screen);
-        first_cell_style(100, 30, needle, |frame| {
+        first_cell_style(width, height, needle, |frame| {
             render_screen_with_theme(
                 frame,
                 frame.area(),
@@ -1379,10 +1451,12 @@ mod tests {
         use ratatui::style::Color;
         let light = Theme::for_name(ThemeName::Light);
         assert_eq!(light.primary, Color::Blue);
-        let (foreground, modifier) = themed_style(Screen::Dashboard, &light, "1 Dashboard")
-            .expect("navigation entry present");
+        // The approved menu digits use the accent role, which the Light
+        // theme maps to Blue: the session theme flows into navigation.
+        // Full width keeps every menu row visible.
+        let (foreground, _) =
+            themed_style(Screen::Dashboard, &light, "[1]", 160, 50).expect("menu digit present");
         assert_eq!(foreground, Color::Blue);
-        assert!(modifier.contains(Modifier::BOLD));
         // Default terminal theme differs, proving the session theme flows.
         assert_ne!(Theme::default().primary, Color::Blue);
     }
