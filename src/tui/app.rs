@@ -522,6 +522,16 @@ where
     pub fn refresh(&mut self) {
         self.live.refresh();
     }
+
+    /// Dismisses an expired transient result band, if any. Called on
+    /// every event-loop step (ticks and activity) so bands vanish
+    /// without blocking, sleeping, or extra refreshes. Expiry only hides
+    /// an already-produced notice: zero hardware commands, zero profile
+    /// applies.
+    pub fn expire_transient_notice(&mut self) {
+        self.controls
+            .expire_notice_if_due(std::time::Instant::now());
+    }
 }
 
 /// Composes the hardware layer once: support verdict, device identity,
@@ -703,6 +713,7 @@ where
 {
     match events.next_event(timeout)? {
         TuiEvent::Action(action) => {
+            app.expire_transient_notice();
             app.handle_action(action);
             if !app.state().should_quit() {
                 draw(app)?;
@@ -727,6 +738,7 @@ where
                 app.profile_row_count(),
                 mouse,
             ) {
+                app.expire_transient_notice();
                 app.handle_action(action);
                 if !app.state().should_quit() {
                     draw(app)?;
@@ -735,9 +747,11 @@ where
         }
         TuiEvent::Tick => {
             app.refresh();
+            app.expire_transient_notice();
             draw(app)?;
         }
         TuiEvent::Resize { .. } => {
+            app.expire_transient_notice();
             draw(app)?;
         }
         TuiEvent::Ignored => {}
@@ -1525,6 +1539,107 @@ mod tests {
         assert!(app.controls().pending().is_none());
         assert!(app.executor().received_commands().is_empty());
         assert!(app.executor().received_profiles().is_empty());
+    }
+
+    #[test]
+    fn verified_success_creates_visible_notice() {
+        use crate::tui::screens::support::healthy_snapshot;
+        // Full keyboard flow with real capabilities: select, stage,
+        // confirm, execute. The band appears only after the executor
+        // reports success.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        let mut source = LoopSource::events(
+            vec![
+                TuiEvent::Action(AppAction::GoTo(Screen::Fans)),
+                TuiEvent::Action(AppAction::Activate),
+                TuiEvent::Action(AppAction::Activate),
+                TuiEvent::Action(AppAction::Activate),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .expect("success flow succeeds");
+        assert_eq!(draws, 5);
+        let notice = app.notice().expect("success band visible");
+        assert!(notice.message().contains("Applied"));
+        assert!(!notice.is_expired(std::time::Instant::now()));
+        assert_eq!(app.executor.command_calls(), 1);
+        assert_eq!(app.executor.profile_calls(), 0);
+    }
+
+    #[test]
+    fn tick_expires_aged_band_without_hardware() {
+        use crate::tui::confirmation::Notice;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![Ok(temperature(60)), Ok(temperature(60))],
+            Rc::clone(&log),
+        );
+        let old = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .expect("past constructs");
+        app.controls
+            .set_notice(Notice::success_at("old success".to_owned(), old));
+        let mut source = LoopSource::events(
+            vec![TuiEvent::Tick, TuiEvent::Action(AppAction::Quit)],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .expect("expiry loop succeeds");
+        assert!(app.notice().is_none());
+        assert_eq!(draws, 2);
+        assert!(app.executor().received_commands().is_empty());
+        assert!(app.executor().received_profiles().is_empty());
+    }
+
+    #[test]
+    fn fresh_band_survives_tick_and_action() {
+        use crate::tui::confirmation::Notice;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![Ok(temperature(60)), Ok(temperature(60))],
+            Rc::clone(&log),
+        );
+        app.controls.set_notice(Notice::success("fresh".to_owned()));
+        let mut source = LoopSource::events(
+            vec![TuiEvent::Tick, TuiEvent::Action(AppAction::Quit)],
+            Rc::clone(&log),
+        );
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| Ok(())).expect("loop succeeds");
+        assert!(app.notice().is_some());
+    }
+
+    #[test]
+    fn starting_edit_clears_stale_notice() {
+        use crate::tui::confirmation::Notice;
+        use crate::tui::screens::support::healthy_snapshot;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(healthy_snapshot())], Rc::clone(&log));
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.refresh();
+        app.controls.set_notice(Notice::success("stale".to_owned()));
+        app.handle_action(AppAction::GoTo(Screen::Fans));
+        app.handle_action(AppAction::Activate);
+        assert!(app.notice().is_none());
+        assert!(app.controls().is_editing());
     }
 
     #[test]

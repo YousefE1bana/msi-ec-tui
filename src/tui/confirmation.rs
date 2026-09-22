@@ -87,11 +87,23 @@ pub enum PendingMutation {
 }
 
 /// Minimal post-attempt banner.
+///
+/// Notices are transient UI state: each carries its creation instant and
+/// an expiry deadline (success ~3s, failure ~6s). The event loop
+/// dismisses expired notices on tick/activity; expiry never implies
+/// execution and never touches hardware.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notice {
     kind: NoticeKind,
     message: String,
+    created: std::time::Instant,
 }
+
+/// How long a success band stays visible before auto-dismissal.
+pub const SUCCESS_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a failure band stays visible before auto-dismissal. Errors
+/// persist longer than success so details can be read.
+pub const FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(6);
 
 /// Success vs failure styling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,19 +115,37 @@ pub enum NoticeKind {
 }
 
 impl Notice {
-    /// Success banner.
+    /// Success banner, stamped now. Callers must only build this after
+    /// the executor reports verified success: the stamp controls
+    /// visibility lifetime, never truth.
     pub fn success(message: String) -> Self {
-        Self {
-            kind: NoticeKind::Success,
-            message,
-        }
+        Self::stamped(NoticeKind::Success, message, std::time::Instant::now())
     }
 
-    /// Failure banner with a Display-rendered safe error.
+    /// Failure banner with a Display-rendered safe error, stamped now.
     pub fn failure(message: String) -> Self {
+        Self::stamped(NoticeKind::Failure, message, std::time::Instant::now())
+    }
+
+    /// Success banner with an explicit creation instant. Test seam for
+    /// deterministic expiry without sleeping.
+    #[cfg(test)]
+    pub(crate) fn success_at(message: String, created: std::time::Instant) -> Self {
+        Self::stamped(NoticeKind::Success, message, created)
+    }
+
+    /// Failure banner with an explicit creation instant. Test seam for
+    /// deterministic expiry without sleeping.
+    #[cfg(test)]
+    pub(crate) fn failure_at(message: String, created: std::time::Instant) -> Self {
+        Self::stamped(NoticeKind::Failure, message, created)
+    }
+
+    fn stamped(kind: NoticeKind, message: String, created: std::time::Instant) -> Self {
         Self {
-            kind: NoticeKind::Failure,
+            kind,
             message,
+            created,
         }
     }
 
@@ -127,6 +157,26 @@ impl Notice {
     /// Banner text (Display only, never Debug).
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// Creation instant driving the visibility deadline.
+    pub fn created_at(&self) -> std::time::Instant {
+        self.created
+    }
+
+    /// Visibility deadline: success ~3s, failure ~6s.
+    pub fn expires_at(&self) -> std::time::Instant {
+        self.created
+            + match self.kind {
+                NoticeKind::Success => SUCCESS_TTL,
+                NoticeKind::Failure => FAILURE_TTL,
+            }
+    }
+
+    /// True once the visibility deadline has passed. Timeout only hides
+    /// an already-produced notice; it never creates or verifies one.
+    pub fn is_expired(&self, now: std::time::Instant) -> bool {
+        now >= self.expires_at()
     }
 }
 
@@ -471,6 +521,117 @@ mod tests {
             rows.iter()
                 .any(|row| row.setting == "Fan Mode" && row.requested == "silent" && row.changed)
         );
+    }
+
+    #[test]
+    fn success_deadline_is_three_seconds() {
+        let created = std::time::Instant::now();
+        let notice = Notice::success_at("Applied X".to_owned(), created);
+        assert_eq!(notice.expires_at(), created + SUCCESS_TTL);
+        assert_eq!(SUCCESS_TTL, std::time::Duration::from_secs(3));
+        // Still visible before expiry.
+        assert!(!notice.is_expired(created + std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn success_expires_after_deadline() {
+        let created = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(4))
+            .expect("recent past constructs");
+        let notice = Notice::success_at("Applied X".to_owned(), created);
+        assert!(notice.is_expired(std::time::Instant::now()));
+    }
+
+    #[test]
+    fn error_deadline_is_six_seconds() {
+        let created = std::time::Instant::now();
+        let notice = Notice::failure_at("Action failed: x".to_owned(), created);
+        assert_eq!(notice.expires_at(), created + FAILURE_TTL);
+        assert_eq!(FAILURE_TTL, std::time::Duration::from_secs(6));
+    }
+
+    #[test]
+    fn error_persists_longer_than_success() {
+        // Four seconds in: a success band is gone, an error band stays.
+        let created = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(4))
+            .expect("recent past constructs");
+        let now = std::time::Instant::now();
+        assert!(Notice::success_at("ok".to_owned(), created).is_expired(now));
+        assert!(!Notice::failure_at("bad".to_owned(), created).is_expired(now));
+    }
+
+    #[test]
+    fn error_expires_after_its_deadline() {
+        let created = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(7))
+            .expect("recent past constructs");
+        let notice = Notice::failure_at("Action failed: x".to_owned(), created);
+        assert!(notice.is_expired(std::time::Instant::now()));
+    }
+
+    #[test]
+    fn constructors_stamp_now() {
+        let before = std::time::Instant::now();
+        let success = Notice::success("ok".to_owned());
+        let failure = Notice::failure("bad".to_owned());
+        assert!(success.created_at() >= before);
+        assert!(failure.created_at() >= before);
+        assert!(!success.is_expired(std::time::Instant::now()));
+        assert!(!failure.is_expired(std::time::Instant::now()));
+    }
+
+    #[test]
+    fn band_renders_while_visible_and_reclaims_after_expiry() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let theme = crate::tui::theme::Theme::default();
+        let draw = |notice: Option<&Notice>| {
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+            terminal
+                .draw(|frame| {
+                    if let Some(notice) = notice {
+                        render_notice(frame, frame.area(), notice, &theme);
+                    }
+                })
+                .expect("notice draws");
+            let mut text = String::new();
+            for y in 0..30 {
+                let mut line = String::new();
+                for x in 0..100 {
+                    line.push_str(terminal.backend().buffer()[(x, y)].symbol());
+                }
+                text.push_str(line.trim_end());
+                text.push('\n');
+            }
+            text
+        };
+        // During: the approved band shows the actual message.
+        let visible = Notice::success("Applied Fan Mode: silent".to_owned());
+        let text = draw(Some(&visible));
+        assert!(text.contains("Applied Fan Mode: silent"));
+        assert!(text.contains("Result"));
+        // After simulated expiry the caller renders nothing: no reserved
+        // panel, no stale text.
+        let text = draw(None);
+        assert!(!text.contains("Applied Fan Mode: silent"));
+    }
+
+    #[test]
+    fn band_zero_area_stays_safe() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use ratatui::layout::Rect;
+        let theme = crate::tui::theme::Theme::default();
+        let notice = Notice::failure("Action failed: gone".to_owned());
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal constructs");
+        terminal
+            .draw(|frame| {
+                render_notice(frame, Rect::new(0, 0, 0, 0), &notice, &theme);
+            })
+            .expect("zero-area notice draws");
     }
 
     #[test]
