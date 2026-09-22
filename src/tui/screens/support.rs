@@ -28,10 +28,6 @@ pub(crate) struct CountingBackend {
 }
 
 impl CountingBackend {
-    pub(crate) fn scripted(script: Vec<Result<HardwareSnapshot, BackendError>>) -> Self {
-        Self::counted(script, Rc::new(Cell::new(0)))
-    }
-
     pub(crate) fn counted(
         script: Vec<Result<HardwareSnapshot, BackendError>>,
         snapshot_calls: Rc<Cell<usize>>,

@@ -8,22 +8,22 @@
 //! navigation all ride the production [`AppState`].
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::app::{AppState, LiveHardware};
 use crate::hardware::{EcBackend, SupportMode};
 
 use crate::tui::history;
 use crate::tui::mouse;
+use crate::tui::shell;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
     MIN_SCREEN_HEIGHT, MIN_SCREEN_WIDTH, ac_text, backlight_text, battery_status_text,
     fan_mode_text, fan_text, on_off_text, percent_text, read_only_reason_text, render_compact,
-    shift_mode_text, support_mode_style, support_mode_text, telemetry_state_text, telemetry_style,
-    temperature_text,
+    shift_mode_text, support_mode_style, support_mode_text, telemetry_state_text, temperature_text,
 };
 
 /// Conservative fallback threshold: below this the dashboard cannot show
@@ -94,124 +94,10 @@ pub(crate) fn render_dashboard_with_theme<B: EcBackend>(
         return;
     }
     frame.render_widget(Block::default().style(theme.base_style()), area);
-    let (top, workspace, footer) = shell_rows(area);
-    render_top_strip(frame, top, live, theme);
+    let (top, workspace, footer) = shell::shell_split(area);
+    shell::render_top_strip(frame, top, live, theme);
     render_grid(frame, workspace, app, live, theme);
-    render_bottom_strip(frame, footer, live, theme);
-}
-
-/// Shell rows: one-row status strip, flexible workspace, one-row footer.
-/// Mirrors [`mouse::dashboard_shell`] over the same area.
-fn shell_rows(area: Rect) -> (Rect, Rect, Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    (rows[0], rows[1], rows[2])
-}
-
-/// Thin full-width top strip:
-/// `MEC | device | READY/READ-ONLY | EC firmware | LIVE/... | clock`.
-fn render_top_strip<B: EcBackend>(
-    frame: &mut Frame,
-    area: Rect,
-    live: &LiveHardware<B>,
-    theme: &Theme,
-) {
-    let firmware = live
-        .device()
-        .ec_firmware_version
-        .as_deref()
-        .unwrap_or("N/A");
-    let line = Line::from(vec![
-        Span::styled(
-            " MEC ",
-            Style::default()
-                .fg(theme.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("│ ", Style::default().fg(theme.muted)),
-        Span::styled(
-            live.device().product_name.clone(),
-            Style::default().fg(theme.foreground),
-        ),
-        Span::styled(" │ ", Style::default().fg(theme.muted)),
-        Span::styled(
-            support_mode_text(live.mode()).to_owned(),
-            support_mode_style(live.mode(), theme).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │ ", Style::default().fg(theme.muted)),
-        Span::styled(format!("EC {firmware}"), Style::default().fg(theme.muted)),
-        Span::styled(" │ ", Style::default().fg(theme.muted)),
-        Span::styled(
-            telemetry_state_text(live.is_degraded(), live.current_snapshot().is_some()).to_owned(),
-            telemetry_style(live.is_degraded(), live.current_snapshot().is_some(), theme)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │ ", Style::default().fg(theme.muted)),
-        Span::styled(clock(), Style::default().fg(theme.muted)),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme.base_style()), area);
-}
-
-/// UTC clock for the top strip, std only.
-fn clock() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!(
-        "{:02}:{:02}:{:02}",
-        (secs / 3600) % 24,
-        (secs / 60) % 60,
-        secs % 60
-    )
-}
-
-/// Approved footer. Span order and widths match [`mouse::footer_regions`]
-/// exactly; the status segment follows the real support verdict.
-fn render_bottom_strip<B: EcBackend>(
-    frame: &mut Frame,
-    area: Rect,
-    live: &LiveHardware<B>,
-    theme: &Theme,
-) {
-    let ready = !matches!(live.mode(), SupportMode::ReadOnly(_));
-    let status = if ready {
-        " ✓ READY  "
-    } else {
-        " ✓ READ-ONLY  "
-    };
-    let status_style = if ready {
-        Style::default()
-            .fg(theme.success)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD)
-    };
-    let key = |k: &str| Span::styled(format!(" [{k}] "), Style::default().fg(theme.accent));
-    let what = |w: &str| Span::styled(format!("{w} "), Style::default().fg(theme.muted));
-    let line = Line::from(vec![
-        Span::styled(status.to_owned(), status_style),
-        Span::styled("│ ", Style::default().fg(theme.muted)),
-        key("1-9"),
-        what("Select"),
-        key("↑↓"),
-        what("Navigate"),
-        key("Enter"),
-        what("Open"),
-        key("?"),
-        what("Help"),
-        key("Q"),
-        what("Quit"),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme.base_style()), area);
+    shell::render_bottom_strip(frame, footer, live, theme);
 }
 
 /// Approved six-card grid. Geometry comes from the shared hit-test
@@ -230,7 +116,7 @@ fn render_grid<B: EcBackend>(
     if cards.len() != 6 {
         return;
     }
-    let focus = app.dashboard_focus();
+    let focus = app.focused_card();
     render_control_card(frame, cards[0], app, theme);
     render_thermals_card(frame, cards[1], live, focus == 1, theme);
     render_cooling_card(frame, cards[2], live, focus == 2, theme);
@@ -239,73 +125,11 @@ fn render_grid<B: EcBackend>(
     render_device_card(frame, cards[5], live, focus == 5, theme);
 }
 
-/// Card shell: thin border (accent when focused), charcoal surface, cyan
-/// title. Returns the inner content area.
-fn card(frame: &mut Frame, area: Rect, title: &str, focused: bool, theme: &Theme) -> Rect {
-    let border = if focused {
-        Style::default().fg(theme.accent).bg(theme.surface)
-    } else {
-        Style::default().fg(theme.border).bg(theme.surface)
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border)
-        .style(Style::default().bg(theme.surface))
-        .title(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    inner
-}
-
-/// Cool telemetry meter: approved fill on a dark track.
-fn bar_line(frac: f64, width: usize, theme: &Theme) -> Line<'static> {
-    let frac = frac.clamp(0.0, 1.0);
-    let n = (frac * width as f64).round() as usize;
-    Line::from(vec![
-        Span::styled("█".repeat(n), Style::default().fg(theme.meter_fill)),
-        Span::styled(
-            "░".repeat(width.saturating_sub(n)),
-            Style::default().fg(theme.meter_track),
-        ),
-    ])
-}
-
-/// Charge-window range track over 0-100 with the cool meter fill.
-fn window_bar(start: u8, end: u8, width: usize, theme: &Theme) -> Line<'static> {
-    let a = (f64::from(start) / 100.0 * width as f64).round() as usize;
-    let b = (f64::from(end) / 100.0 * width as f64).round() as usize;
-    let mut spans = Vec::new();
-    for i in 0..width {
-        let (ch, color) = if i >= a && i < b {
-            ("█", theme.meter_fill)
-        } else {
-            ("─", theme.meter_track)
-        };
-        spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
-    }
-    Line::from(spans)
-}
-
-fn sep(width: usize, theme: &Theme) -> Line<'static> {
-    Line::styled("─".repeat(width.max(4)), Style::default().fg(theme.muted))
-}
-
 /// Original-project identity plus the approved numeric menu. The active
 /// row follows the production screen; Settings and Exit complete the
 /// nine approved entries.
 fn render_control_card(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
-    let inner = card(
-        frame,
-        area,
-        "MEC CONTROL",
-        app.dashboard_focus() == 0,
-        theme,
-    );
+    let inner = shell::card(frame, area, "MEC CONTROL", app.focused_card() == 0, theme);
     let w = inner.width as usize;
     let mut lines = vec![
         Line::from(vec![
@@ -326,7 +150,7 @@ fn render_control_card(frame: &mut Frame, area: Rect, app: &AppState, theme: &Th
             "    github.com/YousefE1bana",
             Style::default().fg(theme.muted),
         ),
-        sep(w, theme),
+        shell::sep(w, theme),
         Line::from(vec![
             Span::styled("[+] ", Style::default().fg(theme.accent)),
             Span::styled("Available Options:", Style::default().fg(theme.foreground)),
@@ -355,7 +179,7 @@ fn render_control_card(frame: &mut Frame, area: Rect, app: &AppState, theme: &Th
     }
     // Debug anchor: keep every menu label identical to the shared map.
     debug_assert!(MENU_ORDER.map(MenuRow::label) == mouse::MENU_LABELS);
-    lines.push(sep(w, theme));
+    lines.push(shell::sep(w, theme));
     lines.push(Line::from(vec![
         Span::styled("[+] Select Option > ", Style::default().fg(theme.accent)),
         Span::styled("1-9", Style::default().fg(theme.accent)),
@@ -367,7 +191,7 @@ fn render_control_card(frame: &mut Frame, area: Rect, app: &AppState, theme: &Th
             Style::default().fg(theme.success),
         ),
     ]));
-    let style = Style::default().fg(theme.foreground).bg(theme.surface);
+    let style = shell::card_style(theme);
     frame.render_widget(Paragraph::new(Text::from(lines)).style(style), inner);
 }
 
@@ -381,7 +205,7 @@ fn render_thermals_card<B: EcBackend>(
     theme: &Theme,
 ) {
     // Focus state is read by the shared shell; keep the call local.
-    let inner = card(frame, area, "THERMALS", focused, theme);
+    let inner = shell::card(frame, area, "THERMALS", focused, theme);
     let snapshot = live.current_snapshot();
     let bar_w = (inner.width as usize).saturating_sub(2).clamp(8, 56);
     let mut lines = vec![
@@ -390,7 +214,7 @@ fn render_thermals_card<B: EcBackend>(
             "CPU Temperature: {}",
             temperature_text(snapshot.and_then(|s| s.cpu_temperature))
         )),
-        bar_line(
+        shell::bar_line(
             temp_frac(snapshot.and_then(|s| s.cpu_temperature)),
             bar_w,
             theme,
@@ -400,7 +224,7 @@ fn render_thermals_card<B: EcBackend>(
             "GPU Temperature: {}",
             temperature_text(snapshot.and_then(|s| s.gpu_temperature))
         )),
-        bar_line(
+        shell::bar_line(
             temp_frac(snapshot.and_then(|s| s.gpu_temperature)),
             bar_w,
             theme,
@@ -412,7 +236,7 @@ fn render_thermals_card<B: EcBackend>(
             .into_iter()
             .map(Line::from),
     );
-    let style = Style::default().fg(theme.foreground).bg(theme.surface);
+    let style = shell::card_style(theme);
     frame.render_widget(Paragraph::new(Text::from(lines)).style(style), inner);
 }
 
@@ -424,7 +248,7 @@ fn render_cooling_card<B: EcBackend>(
     focused: bool,
     theme: &Theme,
 ) {
-    let inner = card(frame, area, "COOLING", focused, theme);
+    let inner = shell::card(frame, area, "COOLING", focused, theme);
     let snapshot = live.current_snapshot();
     let bar_w = (inner.width as usize).saturating_sub(2).clamp(8, 48);
     let mut lines = vec![
@@ -433,13 +257,13 @@ fn render_cooling_card<B: EcBackend>(
             "CPU Fan: {}",
             fan_text(snapshot.and_then(|s| s.cpu_fan))
         )),
-        bar_line(fan_frac(snapshot.and_then(|s| s.cpu_fan)), bar_w, theme),
+        shell::bar_line(fan_frac(snapshot.and_then(|s| s.cpu_fan)), bar_w, theme),
         Line::styled("GPU Fan", Style::default().fg(theme.accent)),
         Line::from(format!(
             "GPU Fan: {}",
             fan_text(snapshot.and_then(|s| s.gpu_fan))
         )),
-        bar_line(fan_frac(snapshot.and_then(|s| s.gpu_fan)), bar_w, theme),
+        shell::bar_line(fan_frac(snapshot.and_then(|s| s.gpu_fan)), bar_w, theme),
     ];
     let budget = usize::from(inner.width.saturating_sub(2));
     lines.extend(
@@ -447,7 +271,7 @@ fn render_cooling_card<B: EcBackend>(
             .into_iter()
             .map(Line::from),
     );
-    let style = Style::default().fg(theme.foreground).bg(theme.surface);
+    let style = shell::card_style(theme);
     frame.render_widget(Paragraph::new(Text::from(lines)).style(style), inner);
 }
 
@@ -459,7 +283,7 @@ fn render_power_card<B: EcBackend>(
     focused: bool,
     theme: &Theme,
 ) {
-    let inner = card(frame, area, "POWER", focused, theme);
+    let inner = shell::card(frame, area, "POWER", focused, theme);
     let snapshot = live.current_snapshot();
     let bar_w = (inner.width as usize).saturating_sub(2).clamp(8, 48);
     let charge = snapshot.and_then(|s| s.battery_percentage);
@@ -468,7 +292,7 @@ fn render_power_card<B: EcBackend>(
     let mut lines = vec![
         Line::styled("Battery", Style::default().fg(theme.accent)),
         Line::from(format!("Charge: {}", percent_text(charge))),
-        bar_line(charge_frac(charge), bar_w, theme),
+        shell::bar_line(charge_frac(charge), bar_w, theme),
         Line::from(format!(
             "State: {}",
             battery_status_text(snapshot.and_then(|s| s.battery_status.as_ref()))
@@ -485,9 +309,9 @@ fn render_power_card<B: EcBackend>(
         )),
     ];
     if let (Some(a), Some(b)) = (start, end) {
-        lines.push(window_bar(a, b, bar_w.min(40), theme));
+        lines.push(shell::window_bar(a, b, bar_w.min(40), theme));
     }
-    let style = Style::default().fg(theme.foreground).bg(theme.surface);
+    let style = shell::card_style(theme);
     frame.render_widget(Paragraph::new(Text::from(lines)).style(style), inner);
 }
 
@@ -499,7 +323,7 @@ fn render_performance_card<B: EcBackend>(
     focused: bool,
     theme: &Theme,
 ) {
-    let inner = card(frame, area, "PERFORMANCE", focused, theme);
+    let inner = shell::card(frame, area, "PERFORMANCE", focused, theme);
     let snapshot = live.current_snapshot();
     let shift = snapshot.and_then(|s| s.shift_mode.as_ref());
     let fan = snapshot.and_then(|s| s.fan_mode.as_ref());
@@ -522,7 +346,7 @@ fn render_performance_card<B: EcBackend>(
             Style::default().fg(theme.muted),
         ),
     ];
-    let style = Style::default().fg(theme.foreground).bg(theme.surface);
+    let style = shell::card_style(theme);
     frame.render_widget(Paragraph::new(Text::from(lines)).style(style), inner);
 }
 
@@ -534,7 +358,7 @@ fn render_device_card<B: EcBackend>(
     focused: bool,
     theme: &Theme,
 ) {
-    let inner = card(frame, area, "DEVICE / SYSTEM", focused, theme);
+    let inner = shell::card(frame, area, "DEVICE / SYSTEM", focused, theme);
     let snapshot = live.current_snapshot();
     let firmware = live
         .device()
@@ -574,7 +398,7 @@ fn render_device_card<B: EcBackend>(
             Style::default().fg(theme.danger),
         ));
     }
-    let style = Style::default().fg(theme.foreground).bg(theme.surface);
+    let style = shell::card_style(theme);
     frame.render_widget(Paragraph::new(Text::from(lines)).style(style), inner);
 }
 
@@ -1339,7 +1163,7 @@ mod tests {
 
     #[test]
     fn clock_renders_eight_char_time() {
-        let clock = super::clock();
+        let clock = crate::tui::shell::clock();
         assert_eq!(clock.len(), 8);
         assert_eq!(clock.chars().filter(|c| *c == ':').count(), 2);
     }

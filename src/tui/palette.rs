@@ -38,6 +38,8 @@ pub enum PaletteCommand {
     GoProfiles,
     /// Jump to Diagnostics (same as `7`).
     GoDiagnostics,
+    /// Jump to Settings (same as `8`).
+    GoSettings,
     /// Open the read-only notification history overlay.
     Notifications,
     /// Clear notification history and close the palette.
@@ -56,7 +58,7 @@ pub enum PaletteCommand {
 
 impl PaletteCommand {
     /// All commands in stable display order.
-    pub const ALL: [PaletteCommand; 14] = [
+    pub const ALL: [PaletteCommand; 15] = [
         PaletteCommand::GoDashboard,
         PaletteCommand::GoPerformance,
         PaletteCommand::GoFans,
@@ -64,6 +66,7 @@ impl PaletteCommand {
         PaletteCommand::GoDevices,
         PaletteCommand::GoProfiles,
         PaletteCommand::GoDiagnostics,
+        PaletteCommand::GoSettings,
         PaletteCommand::Notifications,
         PaletteCommand::ClearNotifications,
         PaletteCommand::Help,
@@ -83,6 +86,7 @@ impl PaletteCommand {
             PaletteCommand::GoDevices => "Devices",
             PaletteCommand::GoProfiles => "Profiles",
             PaletteCommand::GoDiagnostics => "Diagnostics",
+            PaletteCommand::GoSettings => "Settings",
             PaletteCommand::Notifications => "Notifications",
             PaletteCommand::ClearNotifications => "Clear Notifications",
             PaletteCommand::Help => "Help",
@@ -113,6 +117,7 @@ impl PaletteCommand {
             PaletteCommand::GoDevices => Some(Screen::Devices),
             PaletteCommand::GoProfiles => Some(Screen::Profiles),
             PaletteCommand::GoDiagnostics => Some(Screen::Diagnostics),
+            PaletteCommand::GoSettings => Some(Screen::Settings),
             PaletteCommand::Notifications
             | PaletteCommand::ClearNotifications
             | PaletteCommand::Help
@@ -167,11 +172,18 @@ impl CommandPalette {
     pub fn move_up(&mut self) {
         self.selected = (self.selected + PaletteCommand::ALL.len() - 1) % PaletteCommand::ALL.len();
     }
+
+    /// Jumps to an absolute row, wrapping into range. Produced by mouse
+    /// clicks; enters the same selection state as keyboard movement.
+    pub fn select_index(&mut self, index: usize) {
+        self.selected = index % PaletteCommand::ALL.len();
+    }
 }
 
 /// Centered overlay geometry with saturating math so tiny and zero areas
-/// stay panic-free.
-fn overlay_area(area: Rect, line_count: usize) -> Rect {
+/// stay panic-free. Shared with mouse hit-testing so clicks always land
+/// on the drawn rows.
+pub(crate) fn overlay_area(area: Rect, line_count: usize) -> Rect {
     let width = area.width.saturating_sub(4).min(48);
     let height = area.height.saturating_sub(2).min(line_count as u16 + 2);
     let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
@@ -182,8 +194,8 @@ fn overlay_area(area: Rect, line_count: usize) -> Rect {
 }
 
 /// Renders the palette above the underlying screen. The selected row uses
-/// the semantic primary role plus bold with a `>` marker. Safe for tiny
-/// and zero areas.
+/// the accent role plus bold with a `>` marker. Safe for tiny and zero
+/// areas.
 pub(crate) fn render_palette(
     frame: &mut Frame,
     area: Rect,
@@ -199,7 +211,7 @@ pub(crate) fn render_palette(
                 Line::styled(
                     format!("> {text}"),
                     Style::default()
-                        .fg(theme.primary)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
@@ -211,18 +223,19 @@ pub(crate) fn render_palette(
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
-        .style(theme.base_style())
-        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.surface))
+        .border_style(Style::default().fg(theme.border).bg(theme.surface))
         .title(Line::styled(
             " Command Palette ".to_owned(),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
     frame.render_widget(
-        Paragraph::new(Text::from(rows)).style(theme.base_style()),
+        Paragraph::new(Text::from(rows))
+            .style(Style::default().fg(theme.foreground).bg(theme.surface)),
         inner,
     );
 }
@@ -289,6 +302,7 @@ mod tests {
                 "Devices",
                 "Profiles",
                 "Diagnostics",
+                "Settings",
                 "Notifications",
                 "Clear Notifications",
                 "Help",
@@ -310,6 +324,7 @@ mod tests {
             (PaletteCommand::GoDevices, Screen::Devices),
             (PaletteCommand::GoProfiles, Screen::Profiles),
             (PaletteCommand::GoDiagnostics, Screen::Diagnostics),
+            (PaletteCommand::GoSettings, Screen::Settings),
         ];
         for (command, screen) in cases {
             assert_eq!(command.screen(), Some(screen));

@@ -52,6 +52,7 @@ pub fn action_for_key_with_options(key: KeyEvent, vim_keys: bool) -> Option<AppA
         KeyCode::Char(digit @ '1'..='8') if key.modifiers.is_empty() => {
             Some(AppAction::GoTo(screen_for_digit(digit)))
         }
+        KeyCode::Char('9') if key.modifiers.is_empty() => Some(AppAction::Quit),
         _ => None,
     }
 }
@@ -70,10 +71,10 @@ fn screen_for_digit(digit: char) -> Screen {
         '4' => Screen::Battery,
         '5' => Screen::Devices,
         '6' => Screen::Profiles,
-        // Production owns seven screens; the approved menu's eighth row
-        // is Settings, which lands on Diagnostics (closest existing
-        // read-only surface) in P1. Digit and click share this mapping.
-        _ => Screen::Diagnostics,
+        '7' => Screen::Diagnostics,
+        // Digit and mouse click share this mapping: the approved menu's
+        // eighth row is the real Settings screen.
+        _ => Screen::Settings,
     }
 }
 
@@ -183,10 +184,7 @@ mod tests {
             ('5', Screen::Devices),
             ('6', Screen::Profiles),
             ('7', Screen::Diagnostics),
-            // The approved menu's eighth row is Settings; production has
-            // no Settings screen, so 8 lands on Diagnostics (closest
-            // existing read-only surface), matching the mouse mapping.
-            ('8', Screen::Diagnostics),
+            ('8', Screen::Settings),
         ];
         for (digit, screen) in cases {
             assert_eq!(
@@ -199,10 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn digit_nine_is_unmapped() {
+    fn digit_nine_quits_like_menu_exit_row() {
+        // The approved menu advertises [9] Exit: keyboard and mouse agree.
         assert_eq!(
             action_for_key(press(KeyCode::Char('9'), KeyModifiers::empty())),
-            None
+            Some(AppAction::Quit)
         );
     }
 

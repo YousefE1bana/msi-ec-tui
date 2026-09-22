@@ -40,7 +40,7 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
     let styled: Vec<Line<'static>> = lines
         .into_iter()
         .map(|line| {
-            if line == "Navigation" || line == "General" {
+            if line == "NAVIGATION" || line == "ACTIONS" || line == "TOOLS" || line == "MOUSE" {
                 Line::styled(line, section)
             } else {
                 Line::from(line)
@@ -67,28 +67,23 @@ fn help_overlay_area(area: Rect, line_count: usize) -> Rect {
 
 fn help_lines() -> Vec<&'static str> {
     vec![
-        "Navigation",
-        "↑ / k  Previous row, else previous screen",
-        "↓ / j  Next row, else next screen",
-        "← / h  Previous value while editing, else previous screen",
-        "→ / l  Next value while editing, else next screen",
-        "Tab / Shift+Tab  Next / previous screen",
-        "1 Dashboard",
-        "2 Performance",
-        "3 Fans",
-        "4 Battery",
-        "5 Devices",
-        "6 Profiles",
-        "7 Diagnostics",
-        "Enter  Edit / Accept draft / Confirm once",
-        "Esc  Cancel edit or confirmation",
+        "NAVIGATION",
+        "1 Dashboard · 2 Performance · 3 Fans · 4 Battery",
+        "5 Devices · 6 Profiles · 7 Diagnostics · 8 Settings",
+        "↑↓←→ / hjkl move · Tab / Shift+Tab cycle",
+        "ACTIONS",
+        "Enter Edit / Accept draft / Confirm once",
+        "Esc Cancel edit or confirmation",
         "One confirm executes at most once",
-        "Palette",
+        "TOOLS",
         "P  Command Palette (screens, themes)",
-        "General",
         "?  Toggle help",
         "Esc  Close help",
         "Q / q / Ctrl+C  Quit",
+        "MOUSE",
+        "Click menu row or card to select and focus",
+        "Click control row to select · wheel moves rows",
+        "Clicks never confirm, apply, or execute",
     ]
 }
 
@@ -158,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_lists_all_seven_screen_mappings() {
+    fn overlay_lists_all_eight_screen_mappings() {
         let text = shown_help();
         for mapping in [
             "1 Dashboard",
@@ -168,9 +163,25 @@ mod tests {
             "5 Devices",
             "6 Profiles",
             "7 Diagnostics",
+            "8 Settings",
         ] {
             assert!(text.contains(mapping), "{mapping:?} missing");
         }
+    }
+
+    #[test]
+    fn overlay_groups_match_approved_layout() {
+        let text = shown_help();
+        for group in ["NAVIGATION", "ACTIONS", "TOOLS", "MOUSE"] {
+            assert!(text.contains(group), "{group:?} missing");
+        }
+    }
+
+    #[test]
+    fn overlay_documents_mouse_without_promising_mutation() {
+        let text = shown_help();
+        assert!(text.contains("Click"));
+        assert!(text.contains("never confirm"));
     }
 
     #[test]

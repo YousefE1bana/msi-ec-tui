@@ -12,7 +12,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::hardware::{Capabilities, HardwareCommand, HardwareSnapshot, SupportMode};
@@ -138,57 +138,6 @@ pub(crate) fn confirmation_title(pending: &PendingMutation) -> &'static str {
     }
 }
 
-/// Pure dialog content: exact typed request plus current state for commands,
-/// retained name/slug/source plus pure preview for profiles. Preview is
-/// presentation only, never authorization. No paths, no RPM.
-pub(crate) fn confirmation_lines(
-    pending: &PendingMutation,
-    snapshot: Option<&HardwareSnapshot>,
-    mode: &SupportMode,
-    capabilities: &Capabilities,
-) -> Vec<String> {
-    match pending {
-        PendingMutation::Command(command) => {
-            vec![
-                format!("Requested: {}", super::controls::command_text(command)),
-                format!(
-                    "Current: {}",
-                    super::controls::current_text(command, snapshot)
-                ),
-                "Enter Confirm once / Esc Cancel".to_owned(),
-                "One confirm executes at most once.".to_owned(),
-            ]
-        }
-        PendingMutation::Profile(request) => {
-            let mut lines = vec![
-                format!(
-                    "Profile: {} ({})",
-                    request.profile().name(),
-                    request.source().as_str()
-                ),
-                format!("Slug: {}", request.slug()),
-                format!("Source: {}", request.source().as_str()),
-            ];
-            let preview = ProfilePlanner::preview(request.profile(), mode, capabilities);
-            lines.push("Preview:".to_owned());
-            for entry in preview.entries() {
-                let status = match entry.status() {
-                    crate::profiles::ProfilePreviewStatus::Applicable => "Applicable".to_owned(),
-                    crate::profiles::ProfilePreviewStatus::Rejected(error) => {
-                        format!("Rejected: {error}")
-                    }
-                };
-                lines.push(format!(
-                    "{} — {status}",
-                    super::controls::command_text(entry.command())
-                ));
-            }
-            lines.push("Enter Confirm once / Esc Cancel".to_owned());
-            lines
-        }
-    }
-}
-
 /// Centered dialog geometry with saturating math so tiny and zero areas
 /// stay panic-free.
 fn overlay_area(area: Rect, line_count: usize) -> Rect {
@@ -201,8 +150,80 @@ fn overlay_area(area: Rect, line_count: usize) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-/// Renders the modal confirmation above the underlying screen. Safe for
-/// tiny and zero areas.
+/// One review table row: setting, current, requested, and whether the
+/// requested value differs. Presentation only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRow {
+    /// Setting name (e.g. "Fan Mode").
+    pub setting: String,
+    /// Current snapshot value (or "unknown").
+    pub current: String,
+    /// Requested value.
+    pub requested: String,
+    /// True when requested differs from current.
+    pub changed: bool,
+}
+
+/// Pure review table for one pending mutation, derived from the same
+/// typed request/current helpers as before plus the existing profile
+/// preview. No paths, no RPM.
+pub(crate) fn review_rows(
+    pending: &PendingMutation,
+    snapshot: Option<&HardwareSnapshot>,
+    mode: &SupportMode,
+    capabilities: &Capabilities,
+) -> Vec<ReviewRow> {
+    match pending {
+        PendingMutation::Command(command) => {
+            let requested_full = super::controls::command_text(command);
+            let (setting, requested) = requested_full
+                .split_once(": ")
+                .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                .unwrap_or((requested_full.clone(), requested_full));
+            let current = super::controls::current_text(command, snapshot);
+            vec![ReviewRow {
+                changed: current != requested,
+                setting,
+                current,
+                requested,
+            }]
+        }
+        PendingMutation::Profile(request) => {
+            let preview = ProfilePlanner::preview(request.profile(), mode, capabilities);
+            preview
+                .entries()
+                .iter()
+                .filter_map(|entry| {
+                    let applicable = matches!(
+                        entry.status(),
+                        crate::profiles::ProfilePreviewStatus::Applicable
+                    );
+                    if !applicable {
+                        return None;
+                    }
+                    let requested_full = super::controls::command_text(entry.command());
+                    let (setting, requested) = requested_full
+                        .split_once(": ")
+                        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+                        .unwrap_or((requested_full.clone(), requested_full));
+                    let current = super::controls::current_text(entry.command(), snapshot);
+                    Some(ReviewRow {
+                        changed: current != requested,
+                        setting,
+                        current,
+                        requested,
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+/// Renders the modal confirmation as the approved review workspace:
+/// REVIEW CHANGES with a SETTING/CURRENT/REQUESTED/RESULT table, change
+/// counts, an explicit nothing-applied statement, and Cancel/Apply
+/// actions. Keyboard semantics are unchanged: Enter applies once, Esc
+/// cancels. Safe for tiny and zero areas.
 pub(crate) fn render_confirmation(
     frame: &mut Frame,
     area: Rect,
@@ -212,53 +233,153 @@ pub(crate) fn render_confirmation(
     capabilities: &Capabilities,
     theme: &Theme,
 ) {
-    let lines = confirmation_lines(pending, snapshot, mode, capabilities);
-    let overlay = overlay_area(area, lines.len());
+    let rows = review_rows(pending, snapshot, mode, capabilities);
+    let changed = rows.iter().filter(|row| row.changed).count();
+    let mut lines = vec![
+        Line::styled(
+            confirmation_title(pending).trim().to_owned(),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                format!("{:<18}", "SETTING"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<14}", "CURRENT"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:<14}", "REQUESTED"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "RESULT",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+    for row in &rows {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<18}", row.setting),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                format!("{:<14}", row.current),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                format!("{:<14}", row.requested),
+                if row.changed {
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.muted)
+                },
+            ),
+            Span::styled(
+                if row.changed { "CHANGE" } else { "SAME" }.to_owned(),
+                if row.changed {
+                    Style::default().fg(theme.warning)
+                } else {
+                    Style::default().fg(theme.muted)
+                },
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        format!(
+            "{} will change · {} already matches",
+            match changed {
+                1 => "1 setting".to_owned(),
+                n => format!("{n} settings"),
+            },
+            rows.len() - changed,
+        ),
+        Style::default().fg(theme.foreground),
+    ));
+    lines.push(Line::styled(
+        "Nothing has been applied yet.",
+        Style::default()
+            .fg(theme.warning)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("[Esc] ", Style::default().fg(theme.accent)),
+        Span::styled("Cancel  ", Style::default().fg(theme.muted)),
+        Span::styled("[Enter] ", Style::default().fg(theme.accent)),
+        Span::styled("Apply", Style::default().fg(theme.muted)),
+    ]));
+    let overlay = overlay_area(area, lines.len().max(8));
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
         .style(theme.base_style())
         .border_style(Style::default().fg(theme.warning))
         .title(Line::styled(
-            confirmation_title(pending).to_owned(),
+            " REVIEW CHANGES ".to_owned(),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
-    let text: Vec<Line<'static>> = lines.into_iter().map(Line::from).collect();
+    let text: Vec<Line<'static>> = lines;
     frame.render_widget(
         Paragraph::new(Text::from(text)).style(theme.base_style()),
         inner,
     );
 }
 
-/// Renders the post-attempt banner. Success uses the success role, failure
-/// uses danger. Safe for tiny and zero areas.
+/// Renders the post-attempt result as a full-width band: green for
+/// success, red for failure, with the actual result or error detail.
+/// Safe for tiny and zero areas.
 pub(crate) fn render_notice(frame: &mut Frame, area: Rect, notice: &Notice, theme: &Theme) {
-    let style = match notice.kind() {
-        NoticeKind::Success => Style::default()
-            .fg(theme.success)
-            .add_modifier(Modifier::BOLD),
-        NoticeKind::Failure => Style::default()
-            .fg(theme.danger)
-            .add_modifier(Modifier::BOLD),
+    if area.is_empty() {
+        return;
+    }
+    let (edge, glyph) = match notice.kind() {
+        NoticeKind::Success => (theme.success, "✓"),
+        NoticeKind::Failure => (theme.danger, "✕"),
     };
-    let overlay = overlay_area(area, 1);
-    frame.render_widget(Clear, overlay);
+    let style = Style::default().fg(edge).add_modifier(Modifier::BOLD);
+    let band = Rect {
+        x: area.x,
+        y: area.y.saturating_add(1),
+        width: area.width,
+        height: 3.min(area.height.saturating_sub(1).max(1)),
+    };
+    if band.is_empty() {
+        return;
+    }
+    frame.render_widget(Clear, band);
     let block = Block::default()
         .borders(Borders::ALL)
         .style(theme.base_style())
         .border_style(style)
         .title(" Result ");
-    let inner = block.inner(overlay);
-    frame.render_widget(block, overlay);
+    let inner = block.inner(band);
+    frame.render_widget(block, band);
     frame.render_widget(
-        Paragraph::new(Text::from(vec![Line::styled(
-            notice.message().to_owned(),
-            style,
-        )]))
+        Paragraph::new(Text::from(vec![Line::from(vec![
+            Span::styled(format!("{glyph} "), style),
+            Span::styled(notice.message().to_owned(), style),
+        ])]))
         .style(theme.base_style()),
         inner,
     );
@@ -295,53 +416,65 @@ mod tests {
     }
 
     #[test]
-    fn command_dialog_shows_exact_request_and_current() {
+    fn review_rows_split_setting_current_requested() {
         use crate::hardware::SupportMode;
         let snapshot = crate::tui::screens::support::healthy_snapshot();
         let capabilities = crate::tui::screens::support::full_capabilities();
-        let lines = confirmation_lines(
+        let rows = review_rows(
             &PendingMutation::Command(command()),
             Some(&snapshot),
             &SupportMode::Ready,
             &capabilities,
         );
-        let text = lines.join("\n");
-        assert!(text.contains("Requested: Fan Mode: silent"));
-        assert!(text.contains("Current: auto"));
-        assert!(text.contains("Confirm once"));
-        assert!(!text.contains("RPM"));
-        assert!(!text.contains("/sys"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].setting, "Fan Mode");
+        assert_eq!(rows[0].current, "auto");
+        assert_eq!(rows[0].requested, "silent");
+        assert!(rows[0].changed);
     }
 
     #[test]
-    fn profile_dialog_shows_retained_metadata_and_preview() {
+    fn review_rows_mark_same_values() {
+        use crate::hardware::SupportMode;
+        let snapshot = crate::tui::screens::support::healthy_snapshot();
+        let capabilities = crate::tui::screens::support::full_capabilities();
+        let same = PendingMutation::Command(HardwareCommand::SetFanMode(
+            FanMode::try_from("auto").unwrap(),
+        ));
+        let rows = review_rows(&same, Some(&snapshot), &SupportMode::Ready, &capabilities);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].changed);
+    }
+
+    #[test]
+    fn review_rows_cover_profile_preview() {
         use crate::hardware::SupportMode;
         use crate::profiles::BuiltinPreset;
         let capabilities = crate::tui::screens::support::full_capabilities();
-        let profile = BuiltinPreset::Balanced
+        let profile = BuiltinPreset::Silent
             .resolve(&capabilities)
             .expect("resolves");
         let pending = PendingMutation::Profile(ProfilePending::new(
             profile,
-            "balanced".to_owned(),
+            "silent".to_owned(),
             ProfileSource::Builtin,
         ));
         let snapshot = crate::tui::screens::support::healthy_snapshot();
-        let lines = confirmation_lines(
+        let rows = review_rows(
             &pending,
             Some(&snapshot),
             &SupportMode::Ready,
             &capabilities,
         );
-        let text = lines.join("\n");
-        assert!(text.contains("balanced"));
-        assert!(text.contains("built-in"));
-        assert!(text.contains("Preview:"));
-        assert!(!text.contains("/sys"));
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .any(|row| row.setting == "Fan Mode" && row.requested == "silent" && row.changed)
+        );
     }
 
     #[test]
-    fn dialog_never_mentions_paths_or_shell() {
+    fn review_rows_never_mention_paths_or_shell() {
         use crate::hardware::SupportMode;
         let snapshot = crate::tui::screens::support::healthy_snapshot();
         let capabilities = crate::tui::screens::support::full_capabilities();
@@ -355,14 +488,17 @@ mod tests {
                 ProfileSource::Builtin,
             )),
         ] {
-            let text = confirmation_lines(
+            let text = review_rows(
                 &pending,
                 Some(&snapshot),
                 &SupportMode::Ready,
                 &capabilities,
             )
+            .iter()
+            .map(|row| format!("{} {} {}", row.setting, row.current, row.requested))
+            .collect::<Vec<_>>()
             .join("\n");
-            for forbidden in ["/sys", "/bin/sh", "sh -c", "sudo", "pkexec"] {
+            for forbidden in ["/sys", "/bin/sh", "sh -c", "sudo", "pkexec", "RPM"] {
                 assert!(!text.contains(forbidden), "{forbidden:?}");
             }
         }

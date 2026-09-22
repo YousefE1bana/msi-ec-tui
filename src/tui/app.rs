@@ -272,6 +272,10 @@ where
                 A::MoveUp => self.palette.move_up(),
                 A::MoveDown => self.palette.move_down(),
                 A::Activate => self.activate_palette(),
+                A::ActivatePaletteRow(index) => {
+                    self.palette.select_index(index);
+                    self.activate_palette();
+                }
                 A::Cancel | A::TogglePalette => self.palette.close(),
                 _ => {}
             }
@@ -281,6 +285,19 @@ where
         match action {
             A::MoveUp if self.controls.is_editing() => {}
             A::MoveDown if self.controls.is_editing() => {}
+            // Mouse row selection enters the same selection state as
+            // keyboard movement. Ignored while editing so a draft is
+            // never disturbed, and profiles only accept their own rows.
+            A::SelectControlRow(_) if self.controls.is_editing() => {}
+            A::SelectControlRow(index) if is_interactive_screen(screen) => {
+                self.controls.select_index(screen, index);
+            }
+            A::SelectControlRow(_) => {}
+            A::SelectProfileRow(_) if screen != Screen::Profiles => {}
+            A::SelectProfileRow(index) => {
+                self.profile_selection
+                    .set_index(index, self.profile_row_count());
+            }
             A::MoveUp if screen == Screen::Profiles => {
                 self.profile_selection.move_up(self.profile_row_count());
             }
@@ -335,10 +352,12 @@ where
             A::NextScreen | A::PreviousScreen | A::GoTo(_) => {
                 self.state.apply(action);
                 self.controls.on_screen_change();
+                self.state.apply(crate::app::AppAction::FocusCard(0));
             }
             A::MoveLeft | A::MoveRight => {
                 self.state.apply(action);
                 self.controls.on_screen_change();
+                self.state.apply(crate::app::AppAction::FocusCard(0));
             }
             _ => self.state.apply(action),
         }
@@ -695,9 +714,19 @@ where
         // `handle_action` drops navigations that must not bypass it, so a
         // click can never jump screens or quit past a confirmation.
         TuiEvent::Mouse(mouse) => {
-            if let Some(action) =
-                super::mouse::action_for_mouse(app.viewport(), app.state().current_screen(), mouse)
-            {
+            // Mouse maps through the same semantic actions as the
+            // keyboard: row clicks select, card clicks focus, palette
+            // clicks use the existing palette path, and anything unmapped
+            // stays inert. Modal precedence in `handle_action` drops
+            // anything that must not bypass confirmation, so a click can
+            // never stage, confirm, apply, or execute.
+            if let Some(action) = super::mouse::action_for_mouse(
+                app.viewport(),
+                app.state().current_screen(),
+                app.palette().is_open(),
+                app.profile_row_count(),
+                mouse,
+            ) {
                 app.handle_action(action);
                 if !app.state().should_quit() {
                     draw(app)?;
@@ -759,6 +788,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.notifications(),
                     app.notifications_open(),
                     &app.theme(),
+                    app.config(),
                 );
             })
             .map(|_| ())
@@ -1395,7 +1425,7 @@ mod tests {
                 TuiEvent::Action(AppAction::Quit),
             ],
         );
-        assert_eq!(app.state().dashboard_focus(), 1);
+        assert_eq!(app.state().focused_card(), 1);
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
     }
 
@@ -1467,6 +1497,32 @@ mod tests {
                 TuiEvent::Action(AppAction::Quit),
             ],
         );
+        assert!(app.executor().received_commands().is_empty());
+        assert!(app.executor().received_profiles().is_empty());
+    }
+
+    #[test]
+    fn mouse_row_selection_never_stages_or_applies() {
+        use crate::tui::shell;
+        let workspace = shell::shell_split(LOOP_VIEWPORT).1;
+        let fans_rows = crate::tui::screens::fans::hit_regions(workspace).rows;
+        let profile_rows = crate::tui::screens::profiles::hit_regions(workspace, 5).rows;
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                TuiEvent::Action(AppAction::GoTo(Screen::Fans)),
+                mouse_click(fans_rows[1].x + 1, fans_rows[1].y),
+                TuiEvent::Action(AppAction::GoTo(Screen::Profiles)),
+                mouse_click(profile_rows[2].x + 1, profile_rows[2].y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        // Selection follows the clicks through keyboard-identical state.
+        assert_eq!(app.controls().selected_index(Screen::Fans), 1);
+        assert_eq!(app.profile_selection().index(), 2);
+        // Nothing staged, nothing pending, nothing executed.
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
         assert!(app.executor().received_commands().is_empty());
         assert!(app.executor().received_profiles().is_empty());
     }
@@ -1677,8 +1733,8 @@ mod tests {
         // Dashboard has no control rows: vertical moves fall back to screens.
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.state().current_screen(), Screen::Diagnostics);
-        // Diagnostics also has no rows.
+        assert_eq!(app.state().current_screen(), Screen::Settings);
+        // Settings also has no rows.
         app.handle_action(AppAction::MoveDown);
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
         // Interactive screens consume vertical moves as row navigation.
@@ -2304,6 +2360,7 @@ mod tests {
             (4, Screen::Devices),
             (5, Screen::Profiles),
             (6, Screen::Diagnostics),
+            (7, Screen::Settings),
         ];
         for (steps, screen) in cases {
             let mut app = healthy_control_app(Screen::Dashboard);
@@ -2325,7 +2382,7 @@ mod tests {
     fn palette_notifications_opens_overlay() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..7 {
+        for _ in 0..8 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2343,7 +2400,7 @@ mod tests {
         assert_eq!(app.notifications().len(), 1);
         assert!(app.notice().is_some());
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..8 {
+        for _ in 0..9 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2356,7 +2413,7 @@ mod tests {
     fn palette_help_opens_help() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..9 {
+        for _ in 0..10 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2368,7 +2425,7 @@ mod tests {
     fn palette_quit_requests_quit() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..10 {
+        for _ in 0..11 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2512,7 +2569,7 @@ mod tests {
     fn notifications_overlay_gates_input_deterministically() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..7 {
+        for _ in 0..8 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2526,7 +2583,7 @@ mod tests {
         app.handle_action(AppAction::TogglePalette);
         assert!(!app.notifications_open());
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..7 {
+        for _ in 0..8 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2854,9 +2911,9 @@ mod tests {
     fn selecting_each_theme_switches_palette_closed_with_one_notification() {
         use crate::tui::theme::ThemeName;
         let cases = [
-            (11, ThemeName::MsiDark, "MSI Dark"),
-            (12, ThemeName::Terminal, "Terminal"),
-            (13, ThemeName::Light, "Light"),
+            (12, ThemeName::MsiDark, "MSI Dark"),
+            (13, ThemeName::Terminal, "Terminal"),
+            (14, ThemeName::Light, "Light"),
         ];
         for (steps, name, display) in cases {
             let mut app = healthy_control_app(Screen::Dashboard);
@@ -2886,13 +2943,13 @@ mod tests {
     fn reselecting_active_theme_is_harmless() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..11 {
+        for _ in 0..12 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
         // Selection persists across opens: reopening lands back on the
         // theme row, so Activate reselects it directly.
-        assert_eq!(app.palette().selected_index(), 11);
+        assert_eq!(app.palette().selected_index(), 12);
         app.handle_action(AppAction::TogglePalette);
         app.handle_action(AppAction::Activate);
         assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
@@ -3003,9 +3060,9 @@ mod tests {
         app.config_store = Some(store);
         assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
         let history_before = app.live().history().len();
-        // Drive the palette to "Theme: Light" (index 13) and activate.
+        // Drive the palette to "Theme: Light" (index 14) and activate.
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..13 {
+        for _ in 0..14 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -3040,7 +3097,7 @@ mod tests {
         app.config_store = Some(store);
         let history_before = app.live().history().len();
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..13 {
+        for _ in 0..14 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);

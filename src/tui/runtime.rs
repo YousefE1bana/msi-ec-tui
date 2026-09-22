@@ -111,12 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn previous_screen_then_quit_wraps_to_diagnostics() {
+    fn previous_screen_then_quit_wraps_to_settings() {
         let (state, _) = run(vec![
             TuiEvent::Action(AppAction::PreviousScreen),
             TuiEvent::Action(AppAction::Quit),
         ]);
-        assert_eq!(state.current_screen(), Screen::Diagnostics);
+        assert_eq!(state.current_screen(), Screen::Settings);
     }
 
     #[test]

@@ -41,8 +41,22 @@ pub enum AppAction {
     HideHelp,
     /// Toggle the non-mutating command palette overlay.
     TogglePalette,
-    /// Focus a dashboard card by index (0-5). Presentation only: updates
-    /// the focused-card highlight, never touches hardware or selection.
-    /// Produced by mouse clicks; keyboard has no binding.
-    FocusDashboardCard(usize),
+    /// Focus a card/panel by index on the current screen. Presentation
+    /// only: updates the focused-card highlight, never touches hardware
+    /// or selection. Produced by mouse clicks; keyboard has no binding.
+    FocusCard(usize),
+    /// Select an interactive control row by index on the current screen.
+    /// Enters the same selection state as keyboard row movement without
+    /// starting an edit. Produced by mouse clicks; dropped while an
+    /// editor, confirmation, or overlay owns input.
+    SelectControlRow(usize),
+    /// Select a profile row by index on the Profiles screen. Enters the
+    /// same selection state as keyboard row movement without staging or
+    /// applying anything. Produced by mouse clicks.
+    SelectProfileRow(usize),
+    /// Jump the command palette selection to a row and activate it
+    /// through the existing palette path (navigation, overlays, themes,
+    /// quit only: never a hardware mutation). Produced by mouse clicks
+    /// while the palette is open.
+    ActivatePaletteRow(usize),
 }

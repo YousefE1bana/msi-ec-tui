@@ -388,6 +388,17 @@ impl ControlState {
         }
     }
 
+    /// Jumps to an absolute row, clamping into the screen's rows.
+    /// Produced by mouse clicks; enters the same selection state as
+    /// keyboard movement without starting an edit.
+    pub fn select_index(&mut self, screen: Screen, index: usize) {
+        let len = control_rows(screen).len();
+        if len == 0 {
+            return;
+        }
+        self.set_index(screen, index.min(len - 1));
+    }
+
     /// Clamps stale indices after capability changes.
     pub fn clamp(&mut self) {
         for screen in [

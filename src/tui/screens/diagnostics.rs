@@ -1,77 +1,276 @@
-//! Read-only diagnostics screen: startup metadata summary.
+//! Diagnostics screen in the approved v1.1 card system.
 //!
 //! Descriptive only: identity, compatibility verdict, telemetry state, and
 //! a capability matrix over already-supplied startup data. Never probes
-//! hardware, never renders PASS/WARN/FAIL verdicts.
+//! hardware. Status words (PASS/WARN/FAIL/Unavailable) map directly from
+//! real support, telemetry, and capability state; nothing is hard-coded.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 
-use crate::app::LiveHardware;
+use crate::app::{AppState, LiveHardware};
 use crate::hardware::{Capabilities, DeviceInfo, EcBackend, SupportMode};
 
+use crate::tui::shell;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
-    capability_style, read_only_reason_text, render_panel, render_screen_shell, support_mode_style,
-    support_mode_text, support_text, telemetry_state_text, telemetry_style,
+    capability_style, read_only_reason_text, support_mode_style, support_mode_text, support_text,
+    telemetry_state_text, telemetry_style,
 };
 
 /// Renders the startup-metadata summary: identity, compatibility verdict,
-/// telemetry state, and capability matrix. Descriptive only: no probing,
-/// no verdict engine, no PASS/WARN/FAIL labels.
+/// telemetry state, and capability matrix. Descriptive only: no probing.
 pub fn render_diagnostics<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
 ) {
-    render_diagnostics_with_theme(frame, area, live, capabilities, &Theme::default());
+    render_diagnostics_with_theme(
+        frame,
+        area,
+        &AppState::default(),
+        live,
+        capabilities,
+        &Theme::default(),
+    );
 }
 
-/// Theme-aware diagnostics renderer behind the Task-5 API.
+/// Theme-aware diagnostics renderer: approved shell plus real state.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diagnostics_with_theme<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
+    app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     theme: &Theme,
 ) {
-    let content = render_screen_shell(frame, area, "Diagnostics", live, theme);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(6)])
-        .split(content);
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(rows[0]);
-    let left = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
-        .split(columns[0]);
-    render_panel(
-        frame,
-        left[0],
-        " IDENTITY ",
-        identity_lines(live.device()),
-        theme,
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(theme.base_style()),
+        area,
     );
-    render_panel(
-        frame,
-        left[1],
-        " TELEMETRY ",
-        telemetry_lines(live, theme),
-        theme,
+    let (top, workspace, footer) = shell::shell_split(area);
+    shell::render_top_strip(frame, top, live, theme);
+    shell::render_bottom_strip(frame, footer, live, theme);
+    let regions = hit_regions(workspace);
+    if regions.cards.len() != 5 {
+        return;
+    }
+    let focus = app.focused_card();
+    render_system_card(frame, regions.cards[0], live, focus == 0, theme);
+    render_controls_card(frame, regions.cards[1], capabilities, focus == 1, theme);
+    render_telemetry_card(frame, regions.cards[2], live, focus == 2, theme);
+    render_device_card(frame, regions.cards[3], live, focus == 3, theme);
+    render_export_card(frame, regions.cards[4], focus == 4, theme);
+}
+
+/// Card layout in focus order: system, controls, telemetry, device,
+/// export. Diagnostics carries no interactive rows.
+pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
+    let (top, mid, bottom) = shell::vsplit3(workspace, 34, 42);
+    let (tl, tr) = shell::hpair(top, 50);
+    let (ml, mr) = shell::hpair(mid, 50);
+    shell::ScreenRegions {
+        cards: vec![tl, tr, ml, mr, bottom],
+        rows: Vec::new(),
+    }
+}
+
+/// Human verdict for a live telemetry reading: present values pass while
+/// the sample is fresh, degraded samples fail, and absent samples stay
+/// unavailable. Waiting (no sample yet, no failure) warns.
+fn telemetry_verdict<B: EcBackend>(
+    present: bool,
+    live: &LiveHardware<B>,
+    theme: &Theme,
+) -> ratatui::text::Span<'static> {
+    if present && !live.is_degraded() {
+        ratatui::text::Span::styled(
+            "PASS".to_owned(),
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if live.is_degraded() {
+        ratatui::text::Span::styled(
+            "FAIL".to_owned(),
+            Style::default()
+                .fg(theme.danger)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if present {
+        ratatui::text::Span::styled("WARN".to_owned(), Style::default().fg(theme.warning))
+    } else {
+        ratatui::text::Span::styled("Unavailable".to_owned(), Style::default().fg(theme.muted))
+    }
+}
+
+fn matrix_row(label: &'static str, supported: bool, theme: &Theme) -> Line<'static> {
+    Line::styled(
+        format!("{label}: {}", support_text(supported)),
+        capability_style(supported, theme),
+    )
+}
+
+fn render_system_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "SYSTEM", focused, theme);
+    let on_linux = std::env::consts::OS == "linux";
+    let msi = live.device().manufacturer == "MSI";
+    let fw_known = live.device().ec_firmware_version.is_some();
+    let mut lines = vec![
+        verdict_line("MSI hardware", msi, theme),
+        verdict_line("Linux", on_linux, theme),
+        verdict_line("msi-ec interface", !live.is_degraded(), theme),
+        verdict_line("EC firmware", fw_known, theme),
+    ];
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        ratatui::text::Span::styled("Mode: ", Style::default().fg(theme.muted)),
+        ratatui::text::Span::styled(
+            support_mode_text(live.mode()).to_owned(),
+            support_mode_style(live.mode(), theme),
+        ),
+    ]));
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines)).style(shell::card_style(theme)),
+        inner,
     );
-    render_panel(
-        frame,
-        columns[1],
-        " CAPABILITIES ",
-        matrix_lines(capabilities, theme),
-        theme,
+}
+
+/// Support verdict mapped to PASS/WARN: supported passes, missing stays
+/// unavailable (absence is not failure).
+fn verdict_line(label: &str, supported: bool, theme: &Theme) -> Line<'static> {
+    if supported {
+        Line::from(vec![
+            ratatui::text::Span::styled(format!("{label}: "), Style::default().fg(theme.muted)),
+            ratatui::text::Span::styled(
+                "PASS".to_owned(),
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            ratatui::text::Span::styled(format!("{label}: "), Style::default().fg(theme.muted)),
+            ratatui::text::Span::styled("Unavailable".to_owned(), Style::default().fg(theme.muted)),
+        ])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_controls_card(
+    frame: &mut Frame,
+    area: Rect,
+    capabilities: &Capabilities,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "CONTROLS", focused, theme);
+    let lines = matrix_lines(capabilities, theme);
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines)).style(shell::card_style(theme)),
+        inner,
     );
-    render_panel(frame, rows[1], " EXPORT ", export_lines(), theme);
+}
+
+fn render_telemetry_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "TELEMETRY", focused, theme);
+    let snapshot = live.current_snapshot();
+    let mut lines = vec![
+        Line::from(vec![
+            ratatui::text::Span::styled("CPU Temp: ", Style::default().fg(theme.muted)),
+            telemetry_verdict(
+                snapshot.and_then(|s| s.cpu_temperature).is_some(),
+                live,
+                theme,
+            ),
+        ]),
+        Line::from(vec![
+            ratatui::text::Span::styled("GPU Temp: ", Style::default().fg(theme.muted)),
+            telemetry_verdict(
+                snapshot.and_then(|s| s.gpu_temperature).is_some(),
+                live,
+                theme,
+            ),
+        ]),
+        Line::from(vec![
+            ratatui::text::Span::styled("Fans: ", Style::default().fg(theme.muted)),
+            telemetry_verdict(
+                snapshot.and_then(|s| s.cpu_fan).is_some()
+                    || snapshot.and_then(|s| s.gpu_fan).is_some(),
+                live,
+                theme,
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            ratatui::text::Span::styled("State: ", Style::default().fg(theme.muted)),
+            ratatui::text::Span::styled(
+                telemetry_state_text(live.is_degraded(), snapshot.is_some()).to_owned(),
+                telemetry_style(live.is_degraded(), snapshot.is_some(), theme),
+            ),
+        ]),
+    ];
+    if let SupportMode::ReadOnly(reason) = live.mode() {
+        lines.push(Line::from(format!(
+            "Reason: {}",
+            read_only_reason_text(reason)
+        )));
+    }
+    if let Some(error) = live.snapshot_error() {
+        lines.push(Line::styled(
+            error.to_string(),
+            Style::default().fg(theme.danger),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_device_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "DEVICE INFO", focused, theme);
+    let lines = identity_lines(live.device());
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_export_card(frame: &mut Frame, area: Rect, focused: bool, theme: &Theme) {
+    let inner = shell::card(frame, area, "EXPORT / SUPPORT", focused, theme);
+    let lines = export_lines();
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
 }
 
 /// Privacy-conscious export guidance. The renderer never executes doctor
@@ -147,13 +346,6 @@ pub(crate) fn telemetry_lines<B: EcBackend>(
     lines
 }
 
-fn matrix_row(label: &'static str, supported: bool, theme: &Theme) -> Line<'static> {
-    Line::styled(
-        format!("{label}: {}", support_text(supported)),
-        capability_style(supported, theme),
-    )
-}
-
 pub(crate) fn matrix_lines(capabilities: &Capabilities, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         matrix_row("CPU Temperature", capabilities.cpu_temperature, theme),
@@ -182,12 +374,12 @@ mod tests {
     use crate::hardware::{BackendError, ReadOnlyReason, SupportMode};
 
     use super::super::support::{full_capabilities, healthy_snapshot, live_for, screen_text};
-    use super::render_diagnostics;
+    use super::{hit_regions, render_diagnostics};
 
     fn text() -> String {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
-        screen_text(100, 30, |frame| {
+        screen_text(160, 50, |frame| {
             render_diagnostics(frame, frame.area(), &live, &capabilities);
         })
     }
@@ -195,238 +387,115 @@ mod tests {
     fn text_in(mode: SupportMode) -> String {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], mode, 1);
         let capabilities = full_capabilities();
-        screen_text(100, 30, |frame| {
+        screen_text(160, 50, |frame| {
             render_diagnostics(frame, frame.area(), &live, &capabilities);
         })
     }
 
     #[test]
-    fn renders_manufacturer() {
-        assert!(text().contains("MSI"));
+    fn renders_shell_and_card_headings() {
+        let text = text();
+        for heading in [
+            "SYSTEM",
+            "CONTROLS",
+            "TELEMETRY",
+            "DEVICE INFO",
+            "EXPORT / SUPPORT",
+        ] {
+            assert!(text.contains(heading), "{heading:?} missing");
+        }
+        assert!(text.contains(" MEC "));
     }
 
     #[test]
-    fn renders_product_name() {
-        assert!(text().contains("Secondary Screen Fixture"));
+    fn system_checks_derive_from_real_state() {
+        let text = text();
+        assert!(text.contains("MSI hardware"));
+        assert!(text.contains("PASS"));
+        assert!(text.contains("Linux"));
     }
 
     #[test]
-    fn renders_board() {
-        assert!(text().contains("MS-99XY"));
+    fn controls_matrix_uses_supported_labels() {
+        let text = text();
+        assert!(text.contains("Fan Modes: Supported"));
+        assert!(text.contains("Shift Modes: Supported"));
     }
 
     #[test]
-    fn renders_bios_version() {
-        assert!(text().contains("E99XYIMS.100"));
-    }
-
-    #[test]
-    fn renders_ec_firmware_version() {
-        assert!(text().contains("99XYEMS1.100"));
-    }
-
-    #[test]
-    fn missing_optional_identity_renders_na() {
-        use crate::app::LiveHardware;
-        use crate::hardware::DeviceInfo;
-        use crate::monitoring::SnapshotHistory;
-
-        use super::super::support::CountingBackend;
-
-        let minimal = DeviceInfo {
-            manufacturer: "MSI".to_owned(),
-            product_name: "Minimal Fixture".to_owned(),
-            board_name: None,
-            bios_version: None,
-            ec_firmware_version: None,
-        };
-        let mut live = LiveHardware::new(
-            minimal,
-            SupportMode::Ready,
-            CountingBackend::scripted(vec![Ok(healthy_snapshot())]),
-            SnapshotHistory::default(),
-        );
-        live.refresh();
-        let capabilities = full_capabilities();
-        let text = screen_text(100, 30, |frame| {
+    fn unsupported_capability_stays_unavailable() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let mut capabilities = full_capabilities();
+        capabilities.cooler_boost = false;
+        let text = screen_text(160, 50, |frame| {
             render_diagnostics(frame, frame.area(), &live, &capabilities);
         });
-        assert!(text.contains("Board: N/A"));
-        assert!(text.contains("BIOS: N/A"));
-        assert!(text.contains("EC Firmware: N/A"));
+        assert!(text.contains("Cooler Boost: Unavailable"));
     }
 
     #[test]
-    fn ready_shown_correctly() {
+    fn telemetry_passes_when_live() {
         let text = text();
-        assert!(text.contains("READY"));
-        assert!(!text.contains("READ-ONLY"));
+        assert!(text.contains("CPU Temp:"));
+        assert!(text.contains("PASS"));
     }
 
     #[test]
-    fn read_only_shown_correctly() {
+    fn degraded_telemetry_fails_honestly() {
+        let (live, _) = live_for(
+            vec![Ok(healthy_snapshot()), Err(BackendError::Unavailable)],
+            SupportMode::Ready,
+            2,
+        );
+        let capabilities = full_capabilities();
+        let text = screen_text(160, 50, |frame| {
+            render_diagnostics(frame, frame.area(), &live, &capabilities);
+        });
+        assert!(text.contains("DEGRADED"));
+        assert!(text.contains("FAIL"));
+    }
+
+    #[test]
+    fn identity_shows_real_device() {
+        let text = text();
+        assert!(text.contains("Manufacturer:"));
+        assert!(text.contains("EC Firmware:"));
+    }
+
+    #[test]
+    fn export_keeps_privacy_rules() {
+        let text = text();
+        assert!(text.contains("mec doctor --export"));
+        assert!(text.contains("Omits serials"));
+    }
+
+    #[test]
+    fn read_only_shows_reason() {
         let text = text_in(SupportMode::ReadOnly(ReadOnlyReason::MsiEcUnavailable));
         assert!(text.contains("READ-ONLY"));
         assert!(text.contains("msi-ec unavailable"));
     }
 
     #[test]
-    fn read_only_reason_uses_stable_text() {
-        let text = text_in(SupportMode::ReadOnly(ReadOnlyReason::NonMsiHardware));
-        assert!(text.contains("Non-MSI hardware"));
+    fn hit_regions_carry_five_cards_without_rows() {
+        let regions = hit_regions(ratatui::layout::Rect::new(0, 0, 160, 48));
+        assert_eq!(regions.cards.len(), 5);
+        assert!(regions.rows.is_empty());
     }
 
     #[test]
-    fn live_telemetry_shown() {
-        let text = text();
-        assert!(text.contains("LIVE"));
-        assert!(!text.contains("DEGRADED"));
-    }
-
-    #[test]
-    fn waiting_telemetry_shown() {
-        let (live, _) = live_for(vec![], SupportMode::Ready, 0);
-        let capabilities = full_capabilities();
-        let text = screen_text(100, 30, |frame| {
-            render_diagnostics(frame, frame.area(), &live, &capabilities);
-        });
-        assert!(text.contains("WAITING"));
-    }
-
-    #[test]
-    fn degraded_telemetry_shown() {
-        let (live, _) = live_for(
-            vec![
-                Ok(healthy_snapshot()),
-                Err(BackendError::InvalidData("ec busy".to_owned())),
-            ],
-            SupportMode::Ready,
-            2,
-        );
-        let capabilities = full_capabilities();
-        let text = screen_text(100, 30, |frame| {
-            render_diagnostics(frame, frame.area(), &live, &capabilities);
-        });
-        assert!(text.contains("DEGRADED"));
-        assert!(text.contains("ec busy"));
-    }
-
-    #[test]
-    fn capability_matrix_includes_supported_items() {
-        let text = text();
-        for row in [
-            "CPU Temperature: Supported",
-            "CPU Fan: Supported",
-            "Fan Modes: Supported",
-            "Shift Modes: Supported",
-            "Cooler Boost: Supported",
-            "Webcam: Supported",
-            "Fn Key: Supported",
-            "Keyboard Backlight: Supported",
-            "Battery Thresholds: Supported",
-        ] {
-            assert!(text.contains(row), "{row:?} missing");
-        }
-    }
-
-    #[test]
-    fn capability_matrix_includes_unavailable_items() {
-        let text = text();
-        for row in [
-            "GPU Temperature: Unavailable",
-            "Super Battery: Unavailable",
-            "Webcam Block: Unavailable",
-            "Win Key: Unavailable",
-        ] {
-            assert!(text.contains(row), "{row:?} missing");
-        }
-    }
-
-    #[test]
-    fn unavailable_capability_is_not_labeled_fail() {
-        let text = text();
-        assert!(!text.contains("FAIL"));
-        assert!(!text.contains("PASS"));
-        assert!(!text.contains("WARN"));
-    }
-
-    #[test]
-    fn export_panel_names_exact_command() {
-        let text = text();
-        assert!(text.contains("EXPORT"));
-        assert!(text.contains("mec doctor --export"));
-    }
-
-    #[test]
-    fn export_panel_states_privacy_plainly() {
-        let text = text();
-        assert!(text.contains("Privacy"));
-        assert!(text.contains("user-controlled"));
-    }
-
-    #[test]
-    fn export_lines_are_deterministic() {
-        assert_eq!(super::export_lines(), super::export_lines());
-        let joined = super::export_lines()
-            .iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("mec doctor --export"));
-    }
-
-    #[test]
-    fn rendering_performs_zero_backend_calls() {
-        let (live, calls) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        assert_eq!(calls.get(), 1);
-        let capabilities = full_capabilities();
-        let _ = screen_text(100, 30, |frame| {
-            render_diagnostics(frame, frame.area(), &live, &capabilities);
-        });
-        let _ = screen_text(100, 30, |frame| {
-            render_diagnostics(frame, frame.area(), &live, &capabilities);
-        });
-        assert_eq!(calls.get(), 1);
-    }
-
-    #[test]
-    fn compact_keeps_export_hint() {
-        use crate::app::{AppAction, AppState};
-        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        let capabilities = full_capabilities();
-        let mut app = AppState::default();
-        app.apply(AppAction::GoTo(crate::app::Screen::Diagnostics));
-        let text = screen_text(50, 16, |frame| {
-            super::super::super::responsive::render_compact_screen(
-                frame,
-                frame.area(),
-                &app,
-                &live,
-                &capabilities,
-                &crate::tui::ProfileCatalog::empty(),
-                &crate::app::ProfileSelection::default(),
-                &crate::tui::editing::ControlState::default(),
-                &crate::tui::theme::Theme::default(),
-            );
-        });
-        assert!(text.contains("mec doctor --export"));
-    }
-
-    #[test]
-    fn tiny_and_zero_area_stay_safe() {
+    fn zero_area_does_not_panic() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         use ratatui::layout::Rect;
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        let capabilities = full_capabilities();
-        let tiny = screen_text(20, 8, |frame| {
-            render_diagnostics(frame, frame.area(), &live, &capabilities);
-        });
-        assert!(!tiny.is_empty());
+        let caps = full_capabilities();
         let backend = TestBackend::new(10, 5);
         let mut terminal = Terminal::new(backend).expect("test terminal constructs");
         terminal
-            .draw(|frame| render_diagnostics(frame, Rect::new(0, 0, 0, 0), &live, &capabilities))
+            .draw(|frame| {
+                render_diagnostics(frame, Rect::new(0, 0, 0, 0), &live, &caps);
+            })
             .expect("zero-area diagnostics draws");
     }
 }

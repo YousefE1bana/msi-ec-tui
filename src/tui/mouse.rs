@@ -92,40 +92,35 @@ pub fn dashboard_shell(area: Rect) -> (Rect, Rect, Rect) {
 /// Computes footer Help/Quit label rects for `footer` (the shell footer
 /// row). `read_only` selects the READ-ONLY status width so rects match the
 /// drawn spans exactly.
+/// Computes footer Help/Quit label rects for `footer` (the shell footer
+/// row). `read_only` selects the READ-ONLY status width so rects match the
+/// drawn spans exactly. Widths derive from [`super::shell`] literals so
+/// labels and regions can never drift apart.
 pub fn footer_regions(footer: Rect, read_only: bool) -> FooterRegions {
-    // Segments in draw order with exact ASCII widths.
-    let status = if read_only {
-        " ✓ READ-ONLY  "
-    } else {
-        " ✓ READY  "
+    use super::shell::{
+        FOOTER_FIXED, FOOTER_HELP, FOOTER_Q_KEY, FOOTER_QUIT, FOOTER_STATUS_READ_ONLY,
+        FOOTER_STATUS_READY,
     };
-    let fixed: &[&str] = &[
-        status,
-        "│ ",
-        " [1-9] ",
-        "Select ",
-        " [↑↓] ",
-        "Navigate ",
-        " [Enter] ",
-        "Open ",
-        " [?] ",
-    ];
-    let mut x = footer.x;
-    for part in fixed {
+    let status = if read_only {
+        FOOTER_STATUS_READ_ONLY
+    } else {
+        FOOTER_STATUS_READY
+    };
+    let mut x = footer.x + status.len() as u16;
+    for part in FOOTER_FIXED {
         x += part.len() as u16;
     }
     let help = Rect {
         x,
         y: footer.y,
-        width: "Help ".len() as u16,
+        width: FOOTER_HELP.len() as u16,
         height: 1,
     };
-    x += help.width;
-    x += " [Q] ".len() as u16;
+    x += help.width + FOOTER_Q_KEY.len() as u16;
     let quit = Rect {
         x,
         y: footer.y,
-        width: "Quit ".len() as u16,
+        width: FOOTER_QUIT.len() as u16,
         height: 1,
     };
     FooterRegions { help, quit }
@@ -232,21 +227,164 @@ pub(crate) fn grid_cards(workspace: Rect) -> Vec<Rect> {
     }
 }
 
-/// Maps one mouse event to a non-mutating [`AppAction`]. Returns `None`
-/// for anything inert: non-dashboard screens, non-full tiers, unmapped
-/// areas, non-left buttons, and hover/drag motion.
+/// Maps one mouse event to a non-mutating [`AppAction`]. `palette_open`
+/// routes clicks into the palette overlay (select-and-activate through
+/// the existing palette path, or close on outside clicks); `profile_rows`
+/// bounds profile row selection. Returns `None` for anything inert:
+/// non-full tiers, unmapped areas, non-left buttons, hover/drag motion.
 ///
-/// Menu rows win over card bodies; the footer wins over nothing (it never
-/// overlaps cards). Wheel over the menu or control card moves like the
-/// keyboard arrows; wheel elsewhere is inert.
-pub fn action_for_mouse(full: Rect, current: Screen, event: MouseEvent) -> Option<AppAction> {
-    if current != Screen::Dashboard {
+/// Clicks select or focus only: rows enter keyboard-identical selection
+/// state, cards gain focus, and nothing here can stage, confirm, apply,
+/// or execute. Modal precedence in `handle_action` drops anything that
+/// must not bypass confirmation.
+pub fn action_for_mouse(
+    full: Rect,
+    current: Screen,
+    palette_open: bool,
+    profile_rows: usize,
+    event: MouseEvent,
+) -> Option<AppAction> {
+    if layout_tier(full) != LayoutTier::Full {
         return None;
     }
-    let regions = dashboard_regions(full)?;
+    let area = dashboard_area(full);
+    let (_top, workspace, footer) = super::shell::shell_split(area);
+    if workspace.width == 0 || workspace.height == 0 {
+        return None;
+    }
     let col = event.column;
     let row = event.row;
+    // Footer shortcuts work on every screen; the overlay never covers
+    // the footer row by construction.
+    let foot = footer_regions(footer, false);
+    let foot_ro = footer_regions(footer, true);
+    let foot_help = union_row(foot.help, foot_ro.help);
+    let foot_quit = union_row(foot.quit, foot_ro.quit);
+    if palette_open {
+        return match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if contains(foot_help, col, row) {
+                    // Dropped by palette precedence, like keyboard `?`.
+                    Some(AppAction::ToggleHelp)
+                } else if contains(foot_quit, col, row) {
+                    Some(AppAction::Quit)
+                } else if let Some(index) = palette_row_at(full, col, row) {
+                    Some(AppAction::ActivatePaletteRow(index))
+                } else {
+                    Some(AppAction::Cancel)
+                }
+            }
+            MouseEventKind::ScrollUp => Some(AppAction::MoveUp),
+            MouseEventKind::ScrollDown => Some(AppAction::MoveDown),
+            _ => None,
+        };
+    }
+    if current == Screen::Dashboard {
+        return dashboard_action(full, col, row, event.kind, foot_help, foot_quit);
+    }
     match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if contains(foot_help, col, row) {
+                return Some(AppAction::ToggleHelp);
+            }
+            if contains(foot_quit, col, row) {
+                return Some(AppAction::Quit);
+            }
+            let regions = screen_regions(current, workspace, profile_rows)?;
+            if let Some(index) = super::shell::hit_row(&regions.rows, col, row) {
+                return Some(match current {
+                    Screen::Profiles => AppAction::SelectProfileRow(index),
+                    _ => AppAction::SelectControlRow(index),
+                });
+            }
+            if let Some(index) = super::shell::hit_card(&regions.cards, col, row) {
+                return Some(AppAction::FocusCard(index));
+            }
+            None
+        }
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let regions = screen_regions(current, workspace, profile_rows)?;
+            let over_rows = regions.rows.iter().any(|area| contains(*area, col, row));
+            if over_rows && matches!(current, Screen::Profiles) {
+                // Profile rows move like keyboard arrows on Profiles.
+                return Some(match event.kind {
+                    MouseEventKind::ScrollUp => AppAction::MoveUp,
+                    _ => AppAction::MoveDown,
+                });
+            }
+            if over_rows && is_control_screen(current) {
+                return Some(match event.kind {
+                    MouseEventKind::ScrollUp => AppAction::MoveUp,
+                    _ => AppAction::MoveDown,
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Screen regions for mouse mapping: each migrated screen's shared
+/// layout, so clicks land on the drawn rows and cards.
+fn screen_regions(
+    current: Screen,
+    workspace: Rect,
+    profile_rows: usize,
+) -> Option<super::shell::ScreenRegions> {
+    match current {
+        Screen::Performance => Some(super::screens::performance::hit_regions(workspace)),
+        Screen::Fans => Some(super::screens::fans::hit_regions(workspace)),
+        Screen::Battery => Some(super::screens::battery::hit_regions(workspace)),
+        Screen::Devices => Some(super::screens::devices::hit_regions(workspace)),
+        Screen::Profiles => Some(super::screens::profiles::hit_regions(
+            workspace,
+            profile_rows,
+        )),
+        Screen::Diagnostics => Some(super::screens::diagnostics::hit_regions(workspace)),
+        Screen::Settings => Some(super::screens::settings::hit_regions(workspace)),
+        Screen::Dashboard => None,
+    }
+}
+
+fn is_control_screen(screen: Screen) -> bool {
+    matches!(
+        screen,
+        Screen::Performance | Screen::Fans | Screen::Battery | Screen::Devices
+    )
+}
+
+/// Palette row under a point, if any. Geometry mirrors the overlay so
+/// clicks always land on drawn rows.
+fn palette_row_at(full: Rect, col: u16, row: u16) -> Option<usize> {
+    use super::palette::{PaletteCommand, overlay_area};
+    let overlay = overlay_area(full, PaletteCommand::ALL.len());
+    let inner = Rect {
+        x: overlay.x + 1,
+        y: overlay.y + 1,
+        width: overlay.width.saturating_sub(2),
+        height: overlay.height.saturating_sub(2),
+    };
+    if !contains(inner, col, row) {
+        return None;
+    }
+    let index = (row - inner.y) as usize;
+    if index < PaletteCommand::ALL.len() {
+        Some(index)
+    } else {
+        None
+    }
+}
+
+fn dashboard_action(
+    full: Rect,
+    col: u16,
+    row: u16,
+    kind: MouseEventKind,
+    foot_help: Rect,
+    foot_quit: Rect,
+) -> Option<AppAction> {
+    let regions = dashboard_regions(full)?;
+    match kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if let Some(index) = regions
                 .menu_rows
@@ -255,10 +393,10 @@ pub fn action_for_mouse(full: Rect, current: Screen, event: MouseEvent) -> Optio
             {
                 return Some(menu_action(index));
             }
-            if contains(regions.foot_help, col, row) {
+            if contains(foot_help, col, row) {
                 return Some(AppAction::ToggleHelp);
             }
-            if contains(regions.foot_quit, col, row) {
+            if contains(foot_quit, col, row) {
                 return Some(AppAction::Quit);
             }
             if let Some(index) = regions
@@ -266,7 +404,7 @@ pub fn action_for_mouse(full: Rect, current: Screen, event: MouseEvent) -> Optio
                 .iter()
                 .position(|area| contains(*area, col, row))
             {
-                return Some(AppAction::FocusDashboardCard(index));
+                return Some(AppAction::FocusCard(index));
             }
             None
         }
@@ -288,11 +426,11 @@ pub fn action_for_mouse(full: Rect, current: Screen, event: MouseEvent) -> Optio
     }
 }
 
-/// Menu row for a menu index: production screens jump directly, Settings
-/// lands on Diagnostics (closest existing read-only surface), Exit quits.
+/// Menu row for a menu index: production screens jump directly, Exit
+/// quits. Digit and click share this mapping.
 fn menu_action(index: usize) -> AppAction {
     match index {
-        SETTINGS_ROW => AppAction::GoTo(Screen::Diagnostics),
+        SETTINGS_ROW => AppAction::GoTo(Screen::Settings),
         EXIT_ROW => AppAction::Quit,
         _ => AppAction::GoTo(Screen::ALL[index.min(Screen::ALL.len() - 1)]),
     }
@@ -380,7 +518,7 @@ mod tests {
         for (index, screen) in Screen::ALL.iter().enumerate() {
             let row = &regions.menu_rows[index];
             assert_eq!(
-                action_for_mouse(FULL, Screen::Dashboard, click(row.x + 1, row.y)),
+                action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
                 Some(AppAction::GoTo(*screen)),
                 "row {index} must navigate"
             );
@@ -388,16 +526,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_row_lands_on_diagnostics() {
-        assert_eq!(
-            menu_action(SETTINGS_ROW),
-            AppAction::GoTo(Screen::Diagnostics)
-        );
+    fn settings_row_lands_on_settings() {
+        assert_eq!(menu_action(SETTINGS_ROW), AppAction::GoTo(Screen::Settings));
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[SETTINGS_ROW];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, click(row.x + 1, row.y)),
-            Some(AppAction::GoTo(Screen::Diagnostics))
+            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
+            Some(AppAction::GoTo(Screen::Settings))
         );
     }
 
@@ -407,7 +542,7 @@ mod tests {
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[EXIT_ROW];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, click(row.x + 1, row.y)),
+            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
             Some(AppAction::Quit)
         );
     }
@@ -428,8 +563,8 @@ mod tests {
                 "probe point must avoid menu rows"
             );
             assert_eq!(
-                action_for_mouse(FULL, Screen::Dashboard, click(col, row)),
-                Some(AppAction::FocusDashboardCard(index)),
+                action_for_mouse(FULL, Screen::Dashboard, false, 5, click(col, row)),
+                Some(AppAction::FocusCard(index)),
                 "card {index} must focus"
             );
         }
@@ -440,7 +575,7 @@ mod tests {
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[2];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, click(row.x + 1, row.y)),
+            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
             Some(AppAction::GoTo(Screen::Fans))
         );
     }
@@ -452,6 +587,8 @@ mod tests {
             action_for_mouse(
                 FULL,
                 Screen::Dashboard,
+                false,
+                5,
                 click(regions.foot_help.x + 1, regions.foot_help.y)
             ),
             Some(AppAction::ToggleHelp)
@@ -460,6 +597,8 @@ mod tests {
             action_for_mouse(
                 FULL,
                 Screen::Dashboard,
+                false,
+                5,
                 click(regions.foot_quit.x + 1, regions.foot_quit.y)
             ),
             Some(AppAction::Quit)
@@ -483,11 +622,23 @@ mod tests {
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[0];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, wheel(true, row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                5,
+                wheel(true, row.x + 1, row.y)
+            ),
             Some(AppAction::MoveUp)
         );
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, wheel(false, row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                5,
+                wheel(false, row.x + 1, row.y)
+            ),
             Some(AppAction::MoveDown)
         );
     }
@@ -499,33 +650,107 @@ mod tests {
         let col = card.x + 2;
         let row = card.y + 2;
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, wheel(true, col, row)),
+            action_for_mouse(FULL, Screen::Dashboard, false, 5, wheel(true, col, row)),
             None
         );
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, wheel(false, col, row)),
+            action_for_mouse(FULL, Screen::Dashboard, false, 5, wheel(false, col, row)),
             None
         );
     }
 
     #[test]
-    fn non_dashboard_screens_ignore_mouse() {
-        let regions = dashboard_regions(FULL).expect("full area maps");
-        let row = &regions.menu_rows[0];
-        for screen in [
-            Screen::Performance,
-            Screen::Fans,
-            Screen::Battery,
-            Screen::Devices,
-            Screen::Profiles,
-            Screen::Diagnostics,
+    fn control_row_clicks_select_without_editing() {
+        // Clicking a control row enters keyboard-identical selection
+        // state: no editor opens, nothing stages, nothing executes.
+        for (screen, rows) in [
+            (Screen::Performance, 4),
+            (Screen::Fans, 2),
+            (Screen::Battery, 1),
+            (Screen::Devices, 5),
         ] {
+            let area = super::super::shell::shell_split(FULL).1;
+            let regions = super::screen_regions(screen, area, 5).expect("screen maps");
+            assert_eq!(regions.rows.len(), rows, "{screen:?} row count");
+            let row = &regions.rows[0];
             assert_eq!(
-                action_for_mouse(FULL, screen, click(row.x + 1, row.y)),
-                None,
-                "{screen:?} must ignore mouse in P1"
+                action_for_mouse(FULL, screen, false, 5, click(row.x + 1, row.y)),
+                Some(AppAction::SelectControlRow(0)),
+                "{screen:?} must select row 0"
+            );
+            let last = &regions.rows[rows - 1];
+            assert_eq!(
+                action_for_mouse(FULL, screen, false, 5, click(last.x + 1, last.y)),
+                Some(AppAction::SelectControlRow(rows - 1)),
+                "{screen:?} must select last row"
             );
         }
+    }
+
+    #[test]
+    fn profile_row_clicks_select_without_applying() {
+        let area = super::super::shell::shell_split(FULL).1;
+        let regions = super::screen_regions(Screen::Profiles, area, 5).expect("profiles maps");
+        assert_eq!(regions.rows.len(), 5);
+        let row = &regions.rows[2];
+        assert_eq!(
+            action_for_mouse(FULL, Screen::Profiles, false, 5, click(row.x + 1, row.y)),
+            Some(AppAction::SelectProfileRow(2))
+        );
+    }
+
+    #[test]
+    fn display_screens_map_cards_only() {
+        // Diagnostics and Settings carry no rows: only card focus and
+        // footer shortcuts map.
+        for screen in [Screen::Diagnostics, Screen::Settings] {
+            let area = super::super::shell::shell_split(FULL).1;
+            let regions = super::screen_regions(screen, area, 5).expect("screen maps");
+            assert!(regions.rows.is_empty(), "{screen:?} has no rows");
+            let card = &regions.cards[0];
+            assert_eq!(
+                action_for_mouse(FULL, screen, false, 5, click(card.x + 2, card.y + 2)),
+                Some(AppAction::FocusCard(0))
+            );
+        }
+    }
+
+    #[test]
+    fn palette_clicks_activate_through_existing_path() {
+        use super::super::palette::{PaletteCommand, overlay_area};
+        let overlay = overlay_area(FULL, PaletteCommand::ALL.len());
+        let row_y = overlay.y + 1 + 2;
+        assert_eq!(
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                true,
+                5,
+                click(overlay.x + 3, row_y)
+            ),
+            Some(AppAction::ActivatePaletteRow(2))
+        );
+        // Outside clicks close the palette like keyboard Cancel.
+        assert_eq!(
+            action_for_mouse(FULL, Screen::Dashboard, true, 5, click(2, 30)),
+            Some(AppAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn palette_wheel_moves_selection() {
+        use super::super::palette::{PaletteCommand, overlay_area};
+        let overlay = overlay_area(FULL, PaletteCommand::ALL.len());
+        assert_eq!(
+            action_for_mouse(
+                FULL,
+                Screen::Fans,
+                true,
+                5,
+                wheel(true, overlay.x + 3, overlay.y + 3)
+            ),
+            Some(AppAction::MoveUp)
+        );
     }
 
     #[test]
@@ -545,7 +770,7 @@ mod tests {
                 modifiers: KeyModifiers::empty(),
             };
             assert_eq!(
-                action_for_mouse(FULL, Screen::Dashboard, event),
+                action_for_mouse(FULL, Screen::Dashboard, false, 5, event),
                 None,
                 "{kind:?} must be inert"
             );
@@ -556,7 +781,7 @@ mod tests {
     fn clicks_outside_regions_are_inert() {
         // The top strip carries state but no actions in P1.
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, click(150, 0)),
+            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(150, 0)),
             None,
             "top strip must stay inert in P1"
         );
@@ -603,14 +828,16 @@ mod tests {
         points.push((regions.foot_help.x + 1, regions.foot_help.y));
         points.push((regions.foot_quit.x + 1, regions.foot_quit.y));
         for (col, row) in points {
-            if let Some(action) = action_for_mouse(FULL, Screen::Dashboard, click(col, row)) {
+            if let Some(action) =
+                action_for_mouse(FULL, Screen::Dashboard, false, 5, click(col, row))
+            {
                 assert!(
                     matches!(
                         action,
                         AppAction::GoTo(_)
                             | AppAction::Quit
                             | AppAction::ToggleHelp
-                            | AppAction::FocusDashboardCard(_)
+                            | AppAction::FocusCard(_)
                     ),
                     "{action:?} must stay non-mutating"
                 );
@@ -618,7 +845,13 @@ mod tests {
         }
         let row = &regions.menu_rows[0];
         assert!(matches!(
-            action_for_mouse(FULL, Screen::Dashboard, wheel(true, row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                5,
+                wheel(true, row.x + 1, row.y)
+            ),
             Some(AppAction::MoveUp)
         ));
     }

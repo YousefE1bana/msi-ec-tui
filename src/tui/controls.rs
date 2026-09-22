@@ -11,7 +11,7 @@
 //! so duplicates produce identical text and commands.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use crate::app::Screen;
 use crate::hardware::{Capabilities, HardwareCommand, HardwareSnapshot, SupportMode};
@@ -182,44 +182,18 @@ fn control_row_line(
     controls: &ControlState,
     theme: &Theme,
 ) -> Line<'static> {
-    // Informational Fn/Win rows: capability existence only, never a command.
-    if matches!(control, ControlId::FnKeyInfo | ControlId::WinKeyInfo) {
-        let supported = match control {
-            ControlId::FnKeyInfo => capabilities.fn_key,
-            _ => capabilities.win_key,
-        };
-        let text = format!(
-            "{}: {} (informational only)",
-            control_display_name(control),
-            support_text(supported)
-        );
-        return styled_control_row(is_selected, text, Style::default(), theme);
+    let parts = row_parts(control, snapshot, capabilities, mode, controls);
+    if parts.informational {
+        return styled_control_row(is_selected, parts.base, Style::default(), theme);
     }
-    let current = representative_command(control)
-        .map(|command| current_text(&command, snapshot))
-        .unwrap_or_else(|| "unknown".to_owned());
-    let mut text = format!("{}: current {}", control_display_name(control), current);
-    let state = editability(control, snapshot, capabilities, mode);
-    if state != crate::tui::editing::Editability::Editable {
-        text.push_str(&format!(" — {}", state.reason()));
+    let mut text = parts.base;
+    if let Some(editing) = parts.editing {
+        text.push_str(&editing);
     }
-    if let Some(editor) = controls.editor()
-        && editor.control() == control
-    {
-        text.push_str(&format!(" — Editing: {}", command_text(editor.draft())));
-        if let Some(reason) = controls.error() {
-            text.push_str(&format!(" — {reason}"));
-        }
+    if let Some(pending) = parts.pending {
+        text.push_str(&pending);
     }
-    if let Some(crate::tui::confirmation::PendingMutation::Command(command)) = controls.pending()
-        && control_for_command(command) == control
-    {
-        text.push_str(&format!(
-            " — Pending confirmation: {} (NOT applied yet)",
-            command_text(command)
-        ));
-    }
-    let plain = match state {
+    let plain = match parts.state {
         crate::tui::editing::Editability::Editable => Style::default(),
         _ => Style::default().fg(theme.muted),
     };
@@ -229,12 +203,159 @@ fn control_row_line(
     styled_control_row(is_selected, text, plain, theme)
 }
 
+/// Styled v1.1 control row: identical base text to [`control_row_line`]
+/// with the approved marker, muted reasons, and NO inline staged detail:
+/// in-progress drafts and pending commands render in the card's staged
+/// footer ([`staged_footer_lines`]) so every row stays exactly one line
+/// and mouse hit-testing never drifts. Used by the migrated card
+/// screens; the compact tier keeps the plain variant.
+pub(crate) fn control_row_styled(
+    control: ControlId,
+    is_selected: bool,
+    snapshot: Option<&HardwareSnapshot>,
+    capabilities: &Capabilities,
+    mode: &SupportMode,
+    controls: &ControlState,
+    theme: &Theme,
+) -> Line<'static> {
+    let parts = row_parts(control, snapshot, capabilities, mode, controls);
+    let marker = if is_selected { "▸ " } else { "  " };
+    let spans = vec![
+        Span::styled(
+            marker.to_owned(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            parts.base,
+            if is_selected {
+                Style::default()
+                    .fg(theme.foreground)
+                    .add_modifier(Modifier::BOLD)
+            } else if parts.state == crate::tui::editing::Editability::Editable
+                || parts.informational
+            {
+                Style::default().fg(theme.foreground)
+            } else {
+                Style::default().fg(theme.muted)
+            },
+        ),
+    ];
+    Line::from(spans)
+}
+
+/// Fixed staged-state footer for control cards: the open draft (amber),
+/// the pending command (amber, explicitly not applied), or the inline
+/// validation reason. Rendered below the one-line rows so geometry stays
+/// fixed at every width.
+pub(crate) fn staged_footer_lines(controls: &ControlState, theme: &Theme) -> Vec<Line<'static>> {
+    let staged = Style::default()
+        .fg(theme.warning)
+        .add_modifier(Modifier::BOLD);
+    if let Some(editor) = controls.editor() {
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Editing: ", Style::default().fg(theme.muted)),
+            Span::styled(command_text(editor.draft()), staged),
+        ])];
+        if let Some(reason) = controls.error() {
+            lines.push(Line::styled(
+                reason.to_owned(),
+                Style::default().fg(theme.danger),
+            ));
+        }
+        return lines;
+    }
+    if let Some(crate::tui::confirmation::PendingMutation::Command(command)) = controls.pending() {
+        return vec![Line::from(vec![
+            Span::styled("Pending confirmation: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{} (NOT applied yet)", command_text(command)),
+                staged,
+            ),
+        ])];
+    }
+    Vec::new()
+}
+
+/// Text parts of one control row shared by the plain and styled
+/// renderers so wording can never drift between tiers.
+struct RowParts {
+    base: String,
+    editing: Option<String>,
+    pending: Option<String>,
+    state: crate::tui::editing::Editability,
+    informational: bool,
+}
+
+fn row_parts(
+    control: ControlId,
+    snapshot: Option<&HardwareSnapshot>,
+    capabilities: &Capabilities,
+    mode: &SupportMode,
+    controls: &ControlState,
+) -> RowParts {
+    use crate::tui::editing::Editability;
+    // Informational Fn/Win rows: capability existence only, never a command.
+    if matches!(control, ControlId::FnKeyInfo | ControlId::WinKeyInfo) {
+        let supported = match control {
+            ControlId::FnKeyInfo => capabilities.fn_key,
+            _ => capabilities.win_key,
+        };
+        return RowParts {
+            base: format!(
+                "{}: {} (informational only)",
+                control_display_name(control),
+                support_text(supported)
+            ),
+            editing: None,
+            pending: None,
+            state: Editability::Informational,
+            informational: true,
+        };
+    }
+    let current = representative_command(control)
+        .map(|command| current_text(&command, snapshot))
+        .unwrap_or_else(|| "unknown".to_owned());
+    let mut base = format!("{}: current {}", control_display_name(control), current);
+    let state = editability(control, snapshot, capabilities, mode);
+    if state != Editability::Editable {
+        base.push_str(&format!(" — {}", state.reason()));
+    }
+    let mut editing = None;
+    if let Some(editor) = controls.editor()
+        && editor.control() == control
+    {
+        let mut suffix = format!(" — Editing: {}", command_text(editor.draft()));
+        if let Some(reason) = controls.error() {
+            suffix.push_str(&format!(" — {reason}"));
+        }
+        editing = Some(suffix);
+    }
+    let mut pending = None;
+    if let Some(crate::tui::confirmation::PendingMutation::Command(command)) = controls.pending()
+        && control_for_command(command) == control
+    {
+        pending = Some(format!(
+            " — Pending confirmation: {} (NOT applied yet)",
+            command_text(command)
+        ));
+    }
+    RowParts {
+        base,
+        editing,
+        pending,
+        state,
+        informational: false,
+    }
+}
+
 fn styled_control_row(selected: bool, text: String, plain: Style, theme: &Theme) -> Line<'static> {
     if selected {
         Line::styled(
             format!("> {text}"),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
     } else {

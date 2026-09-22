@@ -19,6 +19,7 @@ mod profile_catalog;
 mod responsive;
 mod runtime;
 pub mod screens;
+mod shell;
 mod terminal;
 pub mod theme;
 pub mod ui;

@@ -59,6 +59,7 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
     controls: &crate::tui::editing::ControlState,
+    config: &crate::config::AppConfig,
     theme: &Theme,
 ) {
     let mut lines = compact_header(app, live, theme);
@@ -69,6 +70,7 @@ pub(crate) fn render_compact_screen<B: EcBackend>(
         catalog,
         selection,
         controls,
+        config,
         theme,
     ));
     frame.render_widget(
@@ -129,6 +131,7 @@ fn compact_body<B: EcBackend>(
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
     controls: &crate::tui::editing::ControlState,
+    config: &crate::config::AppConfig,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     let snapshot = live.current_snapshot();
@@ -211,6 +214,17 @@ fn compact_body<B: EcBackend>(
             ));
             lines
         }
+        Screen::Settings => {
+            let lines = vec![
+                Line::from(format!("Theme: {}", config.theme().display_name())),
+                Line::from(format!("Refresh: {} ms", config.refresh_interval_ms())),
+                Line::from(format!(
+                    "Vim keys: {}",
+                    if config.vim_keys() { "on" } else { "off" }
+                )),
+            ];
+            lines
+        }
         Screen::Diagnostics => {
             let mut lines = vec![Line::from("Export: mec doctor --export")];
             lines.extend(diagnostics_screen::identity_lines(live.device()));
@@ -285,52 +299,51 @@ mod tests {
     }
 
     #[test]
-    fn full_navigation_labels_at_reference_size() {
-        // Secondary screens keep the legacy navigation row in P1; the
-        // dashboard owns the approved menu instead (see
-        // `dashboard_hides_legacy_navigation_chrome`).
-        let text = rendered(Screen::Fans, 100, 30);
-        for label in [
-            "1 Dashboard",
-            "2 Performance",
-            "3 Fans",
-            "4 Battery",
-            "5 Devices",
-            "6 Profiles",
-            "7 Diagnostics",
-        ] {
-            assert!(text.contains(label), "{label:?} missing");
+    fn full_screens_carry_no_legacy_navigation() {
+        // Every migrated screen owns the v1.1 shell: the legacy
+        // "1 Dashboard ..." row renders nowhere.
+        for screen in Screen::ALL {
+            let text = rendered(screen, 100, 30);
+            assert!(!text.contains("1 Dashboard"), "{screen:?}");
+            assert!(text.contains(" MEC "), "{screen:?}");
         }
     }
 
     #[test]
-    fn medium_terminal_navigation_stays_meaningful() {
+    fn medium_terminal_shell_stays_meaningful() {
         let text = rendered(Screen::Fans, 72, 20);
-        assert!(text.contains("1 Dash"));
-        assert!(text.contains("6 Prof"));
-        assert!(text.contains("7 Diag"));
+        assert!(text.contains(" MEC "));
+        assert!(!text.contains("1 Dash"));
+        assert!(text.contains("42%"));
     }
 
     #[test]
-    fn medium_terminal_uses_abbreviated_navigation() {
+    fn medium_terminal_starts_with_top_strip() {
+        // 56x16 is Compact: the compact header names the screen without
+        // any legacy navigation row.
         let text = rendered(Screen::Fans, 56, 16);
         let nav: Vec<&str> = text.lines().collect();
-        assert_eq!(
-            nav[0],
-            "1 Dash  2 Perf  3 Fans  4 Batt  5 Dev  6 Prof  7 Diag"
-        );
+        assert!(nav[0].contains("MEC"), "{:?}", nav[0]);
+        assert!(nav[0].contains("Fans"), "{:?}", nav[0]);
+        assert!(!text.contains("1 Dash"));
     }
 
     #[test]
     fn narrow_terminal_shows_current_screen_context() {
+        // Compact tiers carry their own "MEC — {Screen}" header; no
+        // legacy navigation row exists anymore.
         let text = rendered(Screen::Fans, 40, 10);
-        assert!(text.contains("3/7 Fans"));
+        assert!(text.contains("MEC"));
+        assert!(text.contains("Fans"));
+        assert!(!text.contains("3/7 Fans"));
     }
 
     #[test]
     fn narrow_profiles_shows_current_screen_context() {
         let text = rendered(Screen::Profiles, 40, 10);
-        assert!(text.contains("6/7 Profiles"));
+        assert!(text.contains("MEC"));
+        assert!(text.contains("Profiles"));
+        assert!(!text.contains("6/7 Profiles"));
     }
 
     #[test]
