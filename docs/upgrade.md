@@ -17,7 +17,7 @@ Install the new `.deb` for your architecture with your normal package
 tool, for example:
 
 ```sh
-sudo apt install ./mec_1.0.1_amd64.deb
+sudo apt install ./mec_1.1.0_amd64.deb
 ```
 
 The package manager replaces `/usr/bin/mec` and the documentation
@@ -29,7 +29,7 @@ Install the new `.rpm` for your architecture with your normal package
 tool, for example:
 
 ```sh
-sudo dnf install ./mec-1.0.1-1.x86_64.rpm
+sudo dnf install ./mec-1.1.0-1.x86_64.rpm
 ```
 
 Same guarantee: system payload is replaced, `~/.config/mec/` is left
@@ -37,14 +37,16 @@ untouched.
 
 ## 3. Portable tarball upgrades
 
-There is nothing to upgrade in place. Verify the new `SHA256SUMS` as
+For a user-local install, rerun `bash install.sh` to discover and verify the latest stable version. Config and profiles are preserved. An explicit `--version` can select another stable release.
+
+For a manually extracted archive, verify the new `SHA256SUMS` as
 described in [Installation](installation.md), extract the new archive
 for your architecture, and use the new `mec` binary:
 
 ```sh
 sha256sum -c SHA256SUMS
 tar -xzf mec-x86_64-unknown-linux-gnu.tar.gz
-./mec-1.0.1-x86_64-unknown-linux-gnu/mec --version
+./mec-1.1.0-x86_64-unknown-linux-gnu/mec --version
 ```
 
 Your config and profiles stay where they were; only the binary you run
@@ -52,7 +54,7 @@ changes. Remove the old extracted directory when you are done with it.
 
 ## 4. AUR package upgrades
 
-Once an AUR entry is published (none exists yet), upgrade it with your
+If an AUR entry is published (publication is not claimed here), upgrade it with your
 normal AUR helper like any other `mec-bin` update. The packaging model
 is unchanged: the new GitHub release tarball for your architecture is
 installed as `/usr/bin/mec` plus refreshed documentation, while

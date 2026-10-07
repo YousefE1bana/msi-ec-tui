@@ -24,11 +24,13 @@ pub enum Screen {
     Profiles,
     /// Compatibility and diagnostics report.
     Diagnostics,
+    /// Display and input preferences (read-only presentation).
+    Settings,
 }
 
 impl Screen {
-    /// Canonical PLAN-006 navigation order.
-    pub const ALL: [Screen; 7] = [
+    /// Canonical navigation order.
+    pub const ALL: [Screen; 8] = [
         Screen::Dashboard,
         Screen::Performance,
         Screen::Fans,
@@ -36,6 +38,7 @@ impl Screen {
         Screen::Devices,
         Screen::Profiles,
         Screen::Diagnostics,
+        Screen::Settings,
     ];
 
     /// Stable user-facing title.
@@ -48,6 +51,7 @@ impl Screen {
             Screen::Devices => "Devices",
             Screen::Profiles => "Profiles",
             Screen::Diagnostics => "Diagnostics",
+            Screen::Settings => "Settings",
         }
     }
 
@@ -70,14 +74,29 @@ impl Screen {
 }
 
 /// Interaction and navigation state for the interactive TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppState {
     current_screen: Screen,
+    about_visible: bool,
+    /// Status of the last explicit update check; never a hardware result.
+    pub(crate) update_status: crate::updates::UpdateStatus,
     help_visible: bool,
     should_quit: bool,
+    /// Focused card/panel index for the mouse-driven focus highlight.
+    /// Presentation only; never affects hardware.
+    focused_card: usize,
 }
 
+/// Dashboard card count. Secondary screens clamp against their own
+/// smaller card counts in their renderers.
+pub const FOCUSED_CARD_COUNT: usize = 6;
+
 impl AppState {
+    /// Whether the utility About section is visible.
+    pub fn about_visible(&self) -> bool {
+        self.about_visible
+    }
+
     /// Screen currently displayed.
     pub fn current_screen(&self) -> Screen {
         self.current_screen
@@ -93,6 +112,11 @@ impl AppState {
         self.should_quit
     }
 
+    /// Focused dashboard card index (0-5). Defaults to the control card.
+    pub fn focused_card(&self) -> usize {
+        self.focused_card
+    }
+
     /// Applies one terminal-independent action. `MoveUp`/`MoveDown` keep
     /// legacy screen-navigation fallback semantics here; row-driven
     /// screens are dispatched contextually above this layer. `MoveLeft` /
@@ -101,7 +125,23 @@ impl AppState {
     /// `TogglePalette` is a no-op here: the palette overlay owns it above
     /// this layer.
     pub fn apply(&mut self, action: AppAction) {
+        if matches!(
+            action,
+            AppAction::GoTo(_)
+                | AppAction::NextScreen
+                | AppAction::PreviousScreen
+                | AppAction::MoveLeft
+                | AppAction::MoveRight
+        ) {
+            self.about_visible = false;
+        }
         match action {
+            AppAction::ShowAbout => {
+                self.about_visible = true;
+                self.focused_card = 2;
+            }
+            AppAction::HideAbout => self.about_visible = false,
+            AppAction::CheckUpdates => {}
             AppAction::Quit => self.should_quit = true,
             AppAction::NextScreen => self.current_screen = self.current_screen.next(),
             AppAction::PreviousScreen => {
@@ -118,6 +158,16 @@ impl AppState {
             AppAction::ShowHelp => self.help_visible = true,
             AppAction::HideHelp => self.help_visible = false,
             AppAction::TogglePalette => {}
+            AppAction::FocusCard(index) => {
+                self.focused_card = index.min(FOCUSED_CARD_COUNT - 1);
+            }
+            // Selection actions apply at the TuiApp layer (controls and
+            // profile selection live there); the navigation state itself
+            // treats them as no-ops so the fallback can never navigate.
+            AppAction::SelectControlRow(_)
+            | AppAction::EditControlRow(_)
+            | AppAction::SelectProfileRow(_)
+            | AppAction::ActivatePaletteRow(_) => {}
         }
     }
 }
@@ -143,6 +193,7 @@ mod tests {
                 Screen::Devices,
                 Screen::Profiles,
                 Screen::Diagnostics,
+                Screen::Settings,
             ]
         );
     }
@@ -156,6 +207,7 @@ mod tests {
         assert_eq!(Screen::Devices.title(), "Devices");
         assert_eq!(Screen::Profiles.title(), "Profiles");
         assert_eq!(Screen::Diagnostics.title(), "Diagnostics");
+        assert_eq!(Screen::Settings.title(), "Settings");
     }
 
     #[test]
@@ -166,12 +218,13 @@ mod tests {
         assert_eq!(Screen::Battery.next(), Screen::Devices);
         assert_eq!(Screen::Devices.next(), Screen::Profiles);
         assert_eq!(Screen::Profiles.next(), Screen::Diagnostics);
-        assert_eq!(Screen::Diagnostics.next(), Screen::Dashboard);
+        assert_eq!(Screen::Diagnostics.next(), Screen::Settings);
+        assert_eq!(Screen::Settings.next(), Screen::Dashboard);
     }
 
     #[test]
     fn previous_walks_reverse_order_with_wrap() {
-        assert_eq!(Screen::Dashboard.previous(), Screen::Diagnostics);
+        assert_eq!(Screen::Dashboard.previous(), Screen::Settings);
         assert_eq!(Screen::Diagnostics.previous(), Screen::Profiles);
         assert_eq!(Screen::Profiles.previous(), Screen::Devices);
         assert_eq!(Screen::Devices.previous(), Screen::Battery);
@@ -199,7 +252,7 @@ mod tests {
     fn previous_screen_updates_current_screen() {
         let mut state = AppState::default();
         state.apply(AppAction::PreviousScreen);
-        assert_eq!(state.current_screen(), Screen::Diagnostics);
+        assert_eq!(state.current_screen(), Screen::Settings);
     }
 
     #[test]
@@ -214,6 +267,13 @@ mod tests {
         let mut state = AppState::default();
         state.apply(AppAction::GoTo(Screen::Profiles));
         assert_eq!(state.current_screen(), Screen::Profiles);
+    }
+
+    #[test]
+    fn goto_selects_settings_screen() {
+        let mut state = AppState::default();
+        state.apply(AppAction::GoTo(Screen::Settings));
+        assert_eq!(state.current_screen(), Screen::Settings);
     }
 
     #[test]
@@ -247,7 +307,7 @@ mod tests {
     fn move_up_falls_back_to_previous_screen() {
         let mut state = AppState::default();
         state.apply(AppAction::MoveUp);
-        assert_eq!(state.current_screen(), Screen::Diagnostics);
+        assert_eq!(state.current_screen(), Screen::Settings);
     }
 
     #[test]
@@ -261,7 +321,7 @@ mod tests {
     fn move_left_falls_back_to_previous_screen() {
         let mut state = AppState::default();
         state.apply(AppAction::MoveLeft);
-        assert_eq!(state.current_screen(), Screen::Diagnostics);
+        assert_eq!(state.current_screen(), Screen::Settings);
     }
 
     #[test]
@@ -323,10 +383,37 @@ mod tests {
             AppAction::ShowHelp,
             AppAction::HideHelp,
             AppAction::TogglePalette,
+            AppAction::FocusCard(3),
+            AppAction::SelectControlRow(1),
+            AppAction::EditControlRow(1),
+            AppAction::SelectProfileRow(2),
+            AppAction::ActivatePaletteRow(0),
         ] {
             let mut state = AppState::default();
             state.apply(action);
             assert!(!state.should_quit());
         }
+    }
+
+    #[test]
+    fn focused_card_defaults_to_control_card() {
+        assert_eq!(AppState::default().focused_card(), 0);
+    }
+
+    #[test]
+    fn focus_dashboard_card_updates_highlight_only() {
+        let mut state = AppState::default();
+        state.apply(AppAction::FocusCard(4));
+        assert_eq!(state.focused_card(), 4);
+        assert_eq!(state.current_screen(), Screen::Dashboard);
+        assert!(!state.help_visible());
+        assert!(!state.should_quit());
+    }
+
+    #[test]
+    fn focused_card_clamps_to_last_card() {
+        let mut state = AppState::default();
+        state.apply(AppAction::FocusCard(99));
+        assert_eq!(state.focused_card(), FOCUSED_CARD_COUNT - 1);
     }
 }

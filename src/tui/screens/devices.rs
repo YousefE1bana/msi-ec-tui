@@ -1,23 +1,23 @@
-//! Read-only devices screen: current device state plus capability metadata.
+//! Devices screen in the approved v1.1 card system.
 //!
 //! Fn/Win keys expose capability existence only: the snapshot carries no
 //! runtime Fn/Win values, so no current state is ever invented. Control
 //! rows are selectable drafts for webcam/backlight only; Fn/Win stay
-//! informational and Task 4 never executes.
+//! informational and confirmation still gates every change.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::Paragraph;
 
-use crate::app::LiveHardware;
-use crate::hardware::{BacklightCapability, Capabilities, EcBackend};
+use crate::app::{AppState, LiveHardware};
+use crate::hardware::{BacklightCapability, Capabilities, EcBackend, HardwareSnapshot};
 
-use crate::tui::controls::control_row_lines;
-use crate::tui::editing::ControlState;
+use crate::tui::editing::{ControlId, ControlState, control_rows};
+use crate::tui::shell;
 use crate::tui::theme::Theme;
-use crate::tui::ui::{
-    capability_style, device_lines, render_panel, render_screen_shell, support_text,
-};
+use crate::tui::ui::{capability_style, device_lines, support_text};
 
 /// Renders current device state plus control-interface capabilities with
 /// selectable rows. Fn/Win keys report capability existence only: the
@@ -30,49 +30,384 @@ pub fn render_devices<B: EcBackend>(
     capabilities: &Capabilities,
     controls: &ControlState,
 ) {
-    render_devices_with_theme(frame, area, live, capabilities, controls, &Theme::default());
+    render_devices_with_theme(
+        frame,
+        area,
+        &AppState::default(),
+        live,
+        capabilities,
+        controls,
+        &Theme::default(),
+    );
 }
 
-/// Theme-aware devices renderer behind the Task-5 API.
+/// Theme-aware devices renderer: approved shell plus real state.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_devices_with_theme<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
+    app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     controls: &ControlState,
     theme: &Theme,
 ) {
-    let content = render_screen_shell(frame, area, "Devices", live, theme);
-    let control_rows = control_row_lines(
-        crate::app::Screen::Devices,
-        live.current_snapshot(),
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(theme.base_style()),
+        area,
+    );
+    let (top, workspace, footer) = shell::shell_split(area);
+    shell::render_top_strip(frame, top, live, theme);
+    shell::render_bottom_strip(frame, footer, live, theme);
+    let regions = hit_regions(workspace);
+    if regions.cards.len() != 4 {
+        return;
+    }
+    let focus = app.focused_card();
+    render_table_card(
+        frame,
+        regions.cards[0],
+        live,
         capabilities,
-        live.mode(),
         controls,
+        focus == 0,
         theme,
     );
-    let panels = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Length(control_rows.len() as u16 + 2),
-            Constraint::Min(0),
-        ])
-        .split(content);
-    render_panel(
+    render_details_card(
         frame,
-        panels[0],
-        " CURRENT ",
-        device_lines(live.current_snapshot()),
+        regions.cards[1],
+        live,
+        capabilities,
+        controls,
+        focus == 1,
         theme,
     );
-    render_panel(frame, panels[1], " CONTROLS ", control_rows, theme);
-    render_panel(
+    render_preview_card(frame, regions.cards[2], controls, focus == 2, theme);
+    render_status_card(
         frame,
-        panels[2],
-        " CAPABILITIES ",
-        capability_lines(capabilities, theme),
+        regions.cards[3],
+        capabilities,
+        live,
+        focus == 3,
         theme,
+    );
+}
+
+/// Card layout in focus order: table, details, preview, status. Table
+/// rows start below the header line in control order so mouse clicks land
+/// on the drawn rows.
+pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
+    let (table, side) = shell::hpair(workspace, 55);
+    let (side_top, side_rest) = shell::vsplit2(side, 42);
+    let (side_mid, side_bot) = shell::vsplit2(side_rest, 50);
+    let cards = vec![table, side_top, side_mid, side_bot];
+    let inner = shell::inset(table);
+    let rows = (0..control_rows(crate::app::Screen::Devices).len())
+        .map(|i| shell::row_rect(inner, i + 1))
+        .collect();
+    shell::ScreenRegions { cards, rows }
+}
+
+const DEVICE_NAME_WIDTH: usize = 19;
+
+pub(crate) fn value_region(
+    row: Rect,
+    control: ControlId,
+    snapshot: Option<&HardwareSnapshot>,
+) -> Rect {
+    if matches!(control, ControlId::FnKeyInfo | ControlId::WinKeyInfo) {
+        return Rect::default();
+    }
+    shell::text_region(
+        row,
+        (2 + DEVICE_NAME_WIDTH) as u16,
+        &current_value(control, snapshot),
+    )
+}
+
+/// Real action label per row: toggles flip, backlight steps levels,
+/// informational rows stage nothing.
+fn action_label(control: ControlId) -> &'static str {
+    match control {
+        ControlId::Webcam | ControlId::WebcamBlock => "toggle",
+        ControlId::KeyboardBacklight => "level",
+        _ => "info",
+    }
+}
+
+/// Current snapshot value for a device row, or an honest placeholder
+/// when the snapshot carries nothing (Fn/Win have no runtime values).
+fn current_value(control: ControlId, snapshot: Option<&HardwareSnapshot>) -> String {
+    match control {
+        ControlId::Webcam => match snapshot.and_then(|s| s.webcam) {
+            Some(true) => "On".to_owned(),
+            Some(false) => "Off".to_owned(),
+            None => "N/A".to_owned(),
+        },
+        ControlId::WebcamBlock => match snapshot.and_then(|s| s.webcam_block) {
+            Some(true) => "On".to_owned(),
+            Some(false) => "Off".to_owned(),
+            None => "N/A".to_owned(),
+        },
+        ControlId::KeyboardBacklight => match snapshot.and_then(|s| s.keyboard_backlight) {
+            Some(level) => format!("Level {level}"),
+            None => "N/A".to_owned(),
+        },
+        _ => "—".to_owned(),
+    }
+}
+
+/// Capability text for a device row from the real support model.
+fn capability_value(control: ControlId, capabilities: &Capabilities) -> String {
+    match control {
+        ControlId::Webcam => support_text(capabilities.webcam).to_owned(),
+        ControlId::WebcamBlock => support_text(capabilities.webcam_block).to_owned(),
+        ControlId::KeyboardBacklight => {
+            backlight_capability_text(capabilities.keyboard_backlight.as_ref())
+        }
+        ControlId::FnKeyInfo => support_text(capabilities.fn_key).to_owned(),
+        ControlId::WinKeyInfo => support_text(capabilities.win_key).to_owned(),
+        _ => "—".to_owned(),
+    }
+}
+
+fn control_name(control: ControlId) -> &'static str {
+    match control {
+        ControlId::Webcam => "Webcam",
+        ControlId::WebcamBlock => "Webcam Block",
+        ControlId::KeyboardBacklight => "Keyboard Backlight",
+        ControlId::FnKeyInfo => "Fn Key",
+        ControlId::WinKeyInfo => "Win Key",
+        _ => "?",
+    }
+}
+
+fn render_table_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    controls: &ControlState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "DEVICES", focused, theme);
+    let snapshot = live.current_snapshot();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("{:<21}", "DEVICE"),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<11}", "CURRENT"),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{:<16}", "CAPABILITY"),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "ACTION",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    for control in control_rows(crate::app::Screen::Devices) {
+        let selected = Some(*control) == controls.selected(crate::app::Screen::Devices);
+        let current = current_value(*control, snapshot);
+        let marker = if selected { "▸ " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(marker.to_owned(), Style::default().fg(theme.accent)),
+            Span::styled(
+                shell::table_cell(control_name(*control), DEVICE_NAME_WIDTH),
+                if selected {
+                    Style::default()
+                        .fg(theme.foreground)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.foreground)
+                },
+            ),
+            Span::styled(
+                format!("{current:<11}"),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled(
+                shell::table_cell(&capability_value(*control, capabilities), 16),
+                Style::default().fg(theme.muted),
+            ),
+            Span::styled(
+                action_label(*control).to_owned(),
+                Style::default().fg(theme.muted),
+            ),
+        ]));
+    }
+    lines.push(Line::from(""));
+    if matches!(live.mode(), crate::hardware::SupportMode::ReadOnly(_)) {
+        lines.push(Line::styled(
+            "Controls: Disabled (read-only)",
+            Style::default().fg(theme.warning),
+        ));
+    }
+    lines.push(Line::styled(
+        "Click value / Enter edits · review confirms",
+        Style::default().fg(theme.muted),
+    ));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_details_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    controls: &ControlState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "SELECTED DEVICE", focused, theme);
+    let snapshot = live.current_snapshot();
+    let index = controls.selected_index(crate::app::Screen::Devices);
+    let control = control_rows(crate::app::Screen::Devices)
+        .get(index)
+        .copied()
+        .unwrap_or(ControlId::Webcam);
+    let lines = vec![
+        Line::styled(
+            control_name(control).to_uppercase(),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            supported_values(control, capabilities),
+            Style::default().fg(theme.muted),
+        ),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Current: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                current_value(control, snapshot),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Capability: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                capability_value(control, capabilities),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+        Line::from(""),
+        Line::styled(
+            "Enter edits where supported",
+            Style::default().fg(theme.muted),
+        ),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+/// Supported values from the real capability model, never invented.
+fn supported_values(control: ControlId, capabilities: &Capabilities) -> String {
+    match control {
+        ControlId::Webcam | ControlId::WebcamBlock => "toggle on/off".to_owned(),
+        ControlId::KeyboardBacklight => match &capabilities.keyboard_backlight {
+            Some(spec) => format!("levels 0–{}", spec.max_brightness),
+            None => "unavailable".to_owned(),
+        },
+        _ => "informational only".to_owned(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_preview_card(
+    frame: &mut Frame,
+    area: Rect,
+    controls: &ControlState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "CONTROL PREVIEW", focused, theme);
+    let lines = match controls.editor() {
+        Some(_) => {
+            let mut lines = crate::tui::controls::editor_footer_lines(controls, theme);
+            lines.push(Line::styled(
+                "Nothing applied yet",
+                Style::default().fg(theme.warning),
+            ));
+            lines
+        }
+        None => match controls.pending_command() {
+            Some(command) => vec![
+                Line::from(vec![
+                    Span::styled("Pending: ", Style::default().fg(theme.muted)),
+                    Span::styled(
+                        crate::tui::controls::command_text(command),
+                        Style::default()
+                            .fg(theme.warning)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::styled(
+                    "NOT applied yet · Enter confirms",
+                    Style::default().fg(theme.warning),
+                ),
+            ],
+            None => vec![
+                Line::styled("No change staged", Style::default().fg(theme.muted)),
+                Line::from(""),
+                Line::styled(
+                    "Review opens on Enter · nothing changes early",
+                    Style::default().fg(theme.muted),
+                ),
+            ],
+        },
+    };
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_status_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    capabilities: &Capabilities,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "DEVICE STATUS", focused, theme);
+    let mut lines = capability_lines(capabilities, theme);
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Access: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            crate::tui::ui::support_mode_text(live.mode()).to_owned(),
+            crate::tui::ui::support_mode_style(live.mode(), theme),
+        ),
+    ]));
+    // Keep device current values visible beside capabilities.
+    lines.extend(device_lines(live.current_snapshot()));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
     );
 }
 
@@ -117,12 +452,12 @@ mod tests {
     use crate::hardware::SupportMode;
 
     use super::super::support::{full_capabilities, healthy_snapshot, live_for, screen_text};
-    use super::render_devices;
+    use super::{hit_regions, render_devices};
 
     fn text() -> String {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
-        screen_text(100, 30, |frame| {
+        screen_text(160, 50, |frame| {
             render_devices(
                 frame,
                 frame.area(),
@@ -134,18 +469,45 @@ mod tests {
     }
 
     #[test]
+    fn renders_shell_and_card_headings() {
+        let text = text();
+        for heading in [
+            "DEVICES",
+            "SELECTED DEVICE",
+            "CONTROL PREVIEW",
+            "DEVICE STATUS",
+        ] {
+            assert!(text.contains(heading), "{heading:?} missing");
+        }
+        assert!(text.contains(" MEC "));
+    }
+
+    #[test]
+    fn renders_table_columns() {
+        let text = text();
+        for heading in ["DEVICE", "CURRENT", "CAPABILITY", "ACTION"] {
+            assert!(text.contains(heading), "{heading:?} missing");
+        }
+        // A long capability must not run into the action column.
+        assert!(text.contains("… level"));
+        assert!(!text.contains(")level"));
+    }
+
+    #[test]
     fn renders_webcam_current_state() {
-        assert!(text().contains("Webcam: On"));
+        assert!(text().contains("Webcam"));
+        assert!(text().contains("On"));
     }
 
     #[test]
     fn renders_webcam_block_current_state() {
-        assert!(text().contains("Webcam Block: Off"));
+        assert!(text().contains("Webcam Block"));
+        assert!(text().contains("Off"));
     }
 
     #[test]
     fn renders_backlight_current_level() {
-        assert!(text().contains("Keyboard Backlight: 2"));
+        assert!(text().contains("Level 2"));
     }
 
     #[test]
@@ -176,7 +538,7 @@ mod tests {
             let mut capabilities = full_capabilities();
             capabilities.webcam = webcam;
             capabilities.webcam_block = block;
-            let text = screen_text(100, 30, |frame| {
+            let text = screen_text(160, 50, |frame| {
                 render_devices(
                     frame,
                     frame.area(),
@@ -202,7 +564,7 @@ mod tests {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let mut capabilities = full_capabilities();
         capabilities.keyboard_backlight = None;
-        let text = screen_text(100, 30, |frame| {
+        let text = screen_text(160, 50, |frame| {
             render_devices(
                 frame,
                 frame.area(),
@@ -246,30 +608,45 @@ mod tests {
         use crate::tui::screens::support::{healthy_snapshot, live_for};
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], mode, 1);
         let capabilities = capabilities.clone();
-        screen_text(100, 30, |frame| {
+        screen_text(160, 50, |frame| {
             render_devices(frame, frame.area(), &live, &capabilities, controls);
         })
     }
 
     #[test]
-    fn controls_panel_renders_with_fn_win_informational() {
+    fn controls_table_marks_selected_row() {
         let text = text_with_controls(
             &full_capabilities(),
             &crate::tui::editing::ControlState::default(),
             SupportMode::Ready,
         );
-        assert!(text.contains("CONTROLS"));
-        assert!(text.contains("> Webcam"));
+        assert!(text.contains("▸ "));
+        assert!(text.contains("Webcam"));
         assert!(text.contains("Fn Key"));
-        assert!(text.contains("informational only"));
+        assert!(text.contains("informational only") || text.contains("info"));
         assert!(text.contains("Win Key"));
+    }
+
+    #[test]
+    fn staged_device_value_renders_amber() {
+        use crate::tui::editing::ControlState;
+        use crate::tui::screens::support::healthy_snapshot;
+        let mut controls = ControlState::default();
+        assert!(controls.begin_edit(
+            crate::app::Screen::Devices,
+            Some(&healthy_snapshot()),
+            &full_capabilities(),
+            &SupportMode::Ready,
+        ));
+        controls.adjust(&full_capabilities(), 1);
+        let text = text_with_controls(&full_capabilities(), &controls, SupportMode::Ready);
+        assert!(text.contains("Editing:"));
     }
 
     #[test]
     fn fn_win_never_create_commands() {
         use crate::tui::editing::{ControlId, ControlState};
         use crate::tui::screens::support::healthy_snapshot;
-        // Fn/Win initial drafts are always None.
         assert!(ControlState::default().pending().is_none());
         let snapshot = healthy_snapshot();
         for control in [ControlId::FnKeyInfo, ControlId::WinKeyInfo] {
@@ -290,7 +667,6 @@ mod tests {
         use crate::tui::editing::ControlState;
         use crate::tui::screens::support::healthy_snapshot;
         let mut controls = ControlState::default();
-        // Select backlight row (index 2).
         controls.move_down(crate::app::Screen::Devices);
         controls.move_down(crate::app::Screen::Devices);
         assert!(controls.begin_edit(
@@ -320,7 +696,14 @@ mod tests {
             SupportMode::ReadOnly(crate::hardware::ReadOnlyReason::MsiEcUnavailable),
         );
         assert!(text.contains("Disabled (read-only)"));
-        assert!(text.contains("informational only"));
+        assert!(text.contains("info"));
+    }
+
+    #[test]
+    fn hit_regions_match_drawn_device_rows() {
+        let regions = hit_regions(ratatui::layout::Rect::new(0, 0, 160, 48));
+        assert_eq!(regions.cards.len(), 4);
+        assert_eq!(regions.rows.len(), 5);
     }
 
     #[test]
@@ -343,5 +726,28 @@ mod tests {
                 );
             })
             .expect("zero-area devices draws");
+    }
+    #[test]
+    fn staged_device_keeps_current_value_in_current_column() {
+        let snapshot = healthy_snapshot();
+        let (live, _) = live_for(vec![Ok(snapshot.clone())], SupportMode::Ready, 1);
+        let caps = full_capabilities();
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            crate::app::Screen::Devices,
+            Some(&snapshot),
+            &caps,
+            live.mode()
+        ));
+        controls.adjust(&caps, 1);
+        let text = screen_text(160, 50, |frame| {
+            render_devices(frame, frame.area(), &live, &caps, &controls)
+        });
+        let row = text
+            .lines()
+            .find(|line| line.contains("▸ Webcam "))
+            .unwrap();
+        assert!(row.contains("On"), "{row}");
+        assert!(text.contains("Editing: Webcam: Off"));
     }
 }

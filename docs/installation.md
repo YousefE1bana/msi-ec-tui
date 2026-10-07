@@ -1,153 +1,54 @@
 # Installation
 
-MEC is distributed as prebuilt release artifacts plus an AUR binary
-packaging workflow. Release binaries need no Rust toolchain; only
-building from source does.
-
-Release artifacts for each version (example `1.0.1`):
-
-- `mec-x86_64-unknown-linux-gnu.tar.gz` (portable, x86_64)
-- `mec-aarch64-unknown-linux-gnu.tar.gz` (portable, ARM64)
-- `mec_1.0.1_amd64.deb` (Debian/Ubuntu family, x86_64)
-- `mec_1.0.1_arm64.deb` (Debian/Ubuntu family, ARM64)
-- `mec-1.0.1-1.x86_64.rpm` (RPM family, x86_64)
-- `mec-1.0.1-1.aarch64.rpm` (RPM family, ARM64)
-- `SHA256SUMS` (checksums covering all six files above)
-
-Pick the install path that matches your system. The three paths are
-alternatives: package installation, portable binary use, or building
-from source.
-
-## 1. Verify checksums first
-
-Every install path below starts from the same release files. Verify
-them before installing. There are SHA256 checksums; there are no
-cryptographic release signatures.
+MEC v1.1.0 includes the production mouse workflow, About, update discovery and
+optional themes. See the [README](../README.md) for the inspect-first installer.
+From a checkout:
 
 ```sh
-sha256sum -c SHA256SUMS
+bash install.sh --help
+bash install.sh --dry-run
+bash install.sh --version 1.1.0 --dry-run
+bash install.sh
 ```
 
-Every line must report `OK`. Do not install files that fail
-verification.
+Prerequisites: Linux, curl, Python 3.12+, sha256sum, tar, getconf, and glibc >=2.39.
+The installer detects distro/CPU/package manager, an existing MEC, msi-ec, and
+Secure Boot where available. Unsupported architecture, musl, WSL, missing assets,
+malformed release data, duplicate checksum entries, and failed integrity checks
+stop installation. It requests administrator authentication only for native
+package installation. Same stable version leaves the binary unchanged and runs
+doctor. Dry-run performs release discovery but neither installs nor calls sudo.
 
-## 2. Debian/Ubuntu family (`.deb`)
+Native families use apt-get (.deb), dnf/zypper (.rpm), with a portable fallback
+where no matching package manager is available. This is package-format mapping,
+not proof of hardware/distro support; consult [compatibility](compatibility.md).
+Tar installs to ~/.local/bin/mec. Put that directory in your desktop session PATH.
+v1.1.0 tar assets carry a launcher/icon; older v1.0.1 tar assets do not.
+The native packages install `/usr/share/applications/mec.desktop` and
+`/usr/share/icons/hicolor/scalable/apps/mec.svg`. The launcher uses `Exec=mec`,
+`Terminal=true`, and your current permissions. No service or permission rules
+are installed.
 
-Install the package matching your architecture with your normal package
-tool, for example:
+For manual installation, download the appropriate asset and SHA256SUMS from the
+[same stable release](https://github.com/YousefE1bana/msi-ec-tui/releases/latest).
+Verify its **exact filename** with `sha256sum --check` before invoking your native
+package manager. The installer does this automatically and never installs after
+a checksum failure. SHA256 is integrity checking, not publisher authentication.
+
+Build from source with the pinned Rust toolchain:
 
 ```sh
-sudo apt install ./mec_1.0.1_amd64.deb
+cargo build --release --locked
+./target/release/mec doctor
+./target/release/mec
 ```
 
-(ARM64 systems use `mec_1.0.1_arm64.deb` instead.)
+Read [hardware support](hardware-support.md) for driver/DKMS/MOK setup and
+[troubleshooting](troubleshooting.md) for permission failures. No driver is
+silently installed. Unknown hardware must remain READ-ONLY.
 
-This installs `/usr/bin/mec` plus documentation under
-`/usr/share/doc/mec/`. The package is a passive file payload: it does
-not modify `/sys` permissions, does not install driver or permission
-workarounds, and does not create users, groups, services, or hooks.
+Config is `~/.config/mec/config.toml`; profiles are `~/.config/mec/profiles/`.
+Installations do not overwrite user data. AUR publication is not claimed.
+There are no cryptographic release signatures in the v1.1.0 asset set.
 
-Confirm with:
-
-```sh
-mec --version
-mec doctor
-```
-
-## 3. RPM family (`.rpm`)
-
-Install the package matching your architecture with your normal package
-tool, for example:
-
-```sh
-sudo dnf install ./mec-1.0.1-1.x86_64.rpm
-```
-
-(ARM64 systems use `mec-1.0.1-1.aarch64.rpm` instead.)
-
-This installs the same `/usr/bin/mec` plus documentation under
-`/usr/share/doc/mec/`, with the same passive-payload guarantees as the
-`.deb` path above.
-
-Confirm with:
-
-```sh
-mec --version
-mec doctor
-```
-
-Per-user data lives at `~/.config/mec/config.toml` and
-`~/.config/mec/profiles/`. Installing, upgrading, or removing a package
-never creates, overwrites, or deletes these paths; they are yours.
-See [Upgrade](upgrade.md) and [Uninstall](uninstall.md) for details.
-
-## 4. Portable `.tar.gz`
-
-No installation and no administrator privileges are needed. Extract the
-archive for your architecture and run the binary directly:
-
-```sh
-tar -xzf mec-x86_64-unknown-linux-gnu.tar.gz
-./mec-1.0.1-x86_64-unknown-linux-gnu/mec --help
-./mec-1.0.1-x86_64-unknown-linux-gnu/mec --sys-root tests/fixtures/gf63 status
-```
-
-Each archive contains exactly one top-level directory
-(`mec-<version>-<target>/`) with `mec`, `README.md`, `LICENSE`, and
-`SECURITY.md`. To "install" it system-wide, copy the `mec` binary to a
-directory on your `PATH`; nothing else is required.
-
-## 5. AUR binary packaging workflow
-
-There is not yet a published AUR entry for MEC, and this guide does not
-claim one exists. What the repository provides is a reproducible
-generator that turns a released `SHA256SUMS` into AUR metadata:
-
-- Template: `packaging/arch/PKGBUILD.template`
-- Generator: `scripts/generate-aur-package.sh`
-- Output: `PKGBUILD` and `.SRCINFO` for package `mec-bin`
-
-The generated package installs the prebuilt GitHub release tarball for
-your architecture (`mec-x86_64-unknown-linux-gnu.tar.gz` on x86_64,
-`mec-aarch64-unknown-linux-gnu.tar.gz` on ARM64) as `/usr/bin/mec` plus
-documentation under `/usr/share/doc/mec/`. It never rebuilds MEC, so an
-AUR user does not need Rust. See [Upgrade](upgrade.md) and
-[Uninstall](uninstall.md) for the once-published lifecycle.
-
-## 6. Building from source
-
-Source builds need the pinned toolchain in `rust-toolchain.toml`
-(currently Rust 1.98.1) and otherwise follow the standard workflow:
-
-```sh
-cargo build --release
-./target/release/mec --help
-```
-
-Release binaries never need this; use it only for development.
-
-## 7. Hardware and privilege reality
-
-MEC talks to supported MSI laptops through the upstream Linux `msi-ec`
-interface. MEC does not install the kernel module and does not change
-how it is loaded: if the interface is missing or incompatible, MEC
-stays read-only or unavailable as applicable instead of working around
-the hardware. Do not attempt to load an incompatible driver
-configuration to force it.
-
-Privilege model, as implemented:
-
-- MEC contains no sudo/pkexec/polkit/setuid helper of any kind.
-- The TUI is an ordinary user-space program, not something that must
-  run as root.
-- Reads work according to current permissions; writes use
-  current-process permissions and denied writes fail with
-  `AccessDenied`.
-- Do not run MEC permanently as root to work around permissions.
-- Packages do not change `/sys` permissions and do not install
-  permission workarounds.
-
-Physical write validation has been completed on MSI GF63 Thin 11UC for
-keyboard backlight, webcam, webcam block, and Cooler Boost; other write
-paths remain covered by fake sysfs integration tests and await physical
-validation.
+After installing, run `mec --version` and `mec doctor` before opening the TUI.

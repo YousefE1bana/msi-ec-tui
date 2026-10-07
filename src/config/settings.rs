@@ -189,6 +189,8 @@ mod tests {
             ("msi-dark", ThemeName::MsiDark),
             ("terminal", ThemeName::Terminal),
             ("light", ThemeName::Light),
+            ("arctic", ThemeName::Arctic),
+            ("graphite", ThemeName::Graphite),
         ] {
             let config = parse_config_text(&format!("theme = \"{slug}\"\n")).unwrap();
             assert_eq!(config.theme(), theme);
@@ -328,5 +330,17 @@ mod tests {
             ConfigError::UnsupportedInterval(7).to_string(),
             "unsupported config refresh interval: 7 ms"
         );
+    }
+    #[test]
+    fn optional_candidates_round_trip_through_real_atomic_store() {
+        for name in [ThemeName::Arctic, ThemeName::Graphite] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = crate::config::AppConfigStore::new(dir.path().join("config.toml"));
+            let mut config = AppConfig::default();
+            config.set_theme(name);
+            store.save(&config).unwrap();
+            assert_eq!(store.load().unwrap(), config);
+            assert_eq!(store.load().unwrap().theme(), name);
+        }
     }
 }

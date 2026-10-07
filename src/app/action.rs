@@ -8,6 +8,12 @@ use super::state::Screen;
 /// Intent applied to [`super::AppState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppAction {
+    /// Open product information without any network request.
+    ShowAbout,
+    /// Return from About to the underlying screen.
+    HideAbout,
+    /// Explicitly request a bounded, read-only release check.
+    CheckUpdates,
     /// Request application exit.
     Quit,
     /// Advance to the next screen in canonical order.
@@ -26,8 +32,9 @@ pub enum AppAction {
     /// Move to the next candidate while editing; falls back to
     /// next-screen navigation when not editing.
     MoveRight,
-    /// Begin editing the selected control, or accept the draft into a
-    /// pending (data-only, never executed here) command while editing.
+    /// Begin editing, review a draft/profile, or explicitly confirm an
+    /// existing pending mutation. TuiApp resolves the current context;
+    /// keyboard Enter and the visible Review/Apply buttons share this intent.
     Activate,
     /// Cancel the editor or pending draft; falls back to hiding help.
     Cancel,
@@ -41,4 +48,25 @@ pub enum AppAction {
     HideHelp,
     /// Toggle the non-mutating command palette overlay.
     TogglePalette,
+    /// Focus a card/panel by index on the current screen. Presentation
+    /// only: updates the focused-card highlight, never touches hardware
+    /// or selection. Produced by mouse clicks; keyboard has no binding.
+    FocusCard(usize),
+    /// Select an interactive control row by index on the current screen.
+    /// Enters the same selection state as keyboard row movement without
+    /// starting an edit. Produced by mouse clicks; dropped while an
+    /// editor, confirmation, or overlay owns input.
+    SelectControlRow(usize),
+    /// Select a visible control value and enter the existing editor.
+    /// Never confirms or executes; ignored while an editor/modal owns input.
+    EditControlRow(usize),
+    /// Select a profile row by index on the Profiles screen. Enters the
+    /// same selection state as keyboard row movement without staging or
+    /// applying anything. Produced by mouse clicks.
+    SelectProfileRow(usize),
+    /// Jump the command palette selection to a row and activate it
+    /// through the existing palette path (navigation, overlays, themes,
+    /// quit only: never a hardware mutation). Produced by mouse clicks
+    /// while the palette is open.
+    ActivatePaletteRow(usize),
 }

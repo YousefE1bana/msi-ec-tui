@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 256" role="img" aria-label="MEC — MSI EC Control Center by Yousef Osama">
+<rect width="880" height="256" rx="32" fill="#111820"/>
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="#111820"/>
+  <rect x="16" y="16" width="224" height="224" rx="40" fill="none" stroke="#4f9fad" stroke-width="4"/>
+  <path d="M40 166V90h14l16 29 16-29h14v76H84v-46l-14 24-14-24v46z M110 90h48v16h-32v14h28v16h-28v14h32v16h-48z M170 106l16-16h30v16h-24l-6 6v32l6 6h24v16h-30l-16-16z" fill="#79d4e7"/>
+  <path d="M88 192h80" stroke="#4f9fad" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="128" cy="192" r="9" fill="#e3edf2"/>
+<g font-family="sans-serif" fill="#e3edf2"><text x="286" y="104" font-size="64" font-weight="700">MEC</text><text x="286" y="156" font-size="28">MSI EC Control Center</text><text x="286" y="204" font-size="18" fill="#a1aeb9">Yousef Osama · github.com/YousefE1bana</text></g></svg>

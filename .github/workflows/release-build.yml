@@ -72,7 +72,7 @@ jobs:
           test -f "dist/mec-${VERSION}-1.${RPM_ARCH}.rpm"
           test "$(dpkg-deb -f "dist/mec_${VERSION}_${DEB_ARCH}.deb" Architecture)" = "$DEB_ARCH"
           test "$(rpm -qp --queryformat '%{ARCH}\n' "dist/mec-${VERSION}-1.${RPM_ARCH}.rpm")" = "$RPM_ARCH"
-          test "$(tar -tzf "dist/mec-${{ matrix.target }}.tar.gz" | LC_ALL=C sort)" = "$(printf 'mec-%s-%s/\nmec-%s-%s/LICENSE\nmec-%s-%s/README.md\nmec-%s-%s/SECURITY.md\nmec-%s-%s/mec\n' "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}" "$VERSION" "${{ matrix.target }}")"
+          python3 scripts/check-release-archive.py "dist/mec-${{ matrix.target }}.tar.gz" "${{ matrix.target }}" "$VERSION"
       - name: Execute native binary
         run: |
           set -euo pipefail

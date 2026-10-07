@@ -4,6 +4,7 @@ Architecture: @ARCH@
 Maintainer: MEC Project <noreply@example.com>
 Section: utils
 Priority: optional
+Depends: libc6 (>= 2.39), libgcc-s1
 Description: A safe capability-aware terminal control center for MSI laptops on Linux
  Monitors and safely controls supported MSI laptops through the msi-ec
  kernel interface. Uses current-process permissions only; unsupported

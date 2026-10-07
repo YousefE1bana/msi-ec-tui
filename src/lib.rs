@@ -9,3 +9,6 @@ pub mod monitoring;
 pub mod profiles;
 pub mod safety;
 pub mod tui;
+
+/// Explicit, read-only stable release checks.
+pub mod updates;

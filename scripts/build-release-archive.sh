@@ -8,13 +8,13 @@
 #
 # Produces <outdir>/mec-<target>.tar.gz containing exactly one top-level
 # directory mec-<VERSION>-<TARGET>/ with: mec (executable), README.md,
-# LICENSE, SECURITY.md. No source, target dir, .git, configs, or logs.
+# LICENSE, SECURITY.md, mec.desktop, mec.svg, and public docs/. No source, target dir, .git, configs, or logs.
 #
 # Normally the payload is assembled from a fresh
 # `cargo build --release --locked --target` plus the repo docs.
 # `--from-stage DIR` skips the cargo build and archives the already
 # prepared staging tree DIR (which must already be named exactly
-# mec-<VERSION>-<TARGET>/ with the four payload files). This narrow mode
+# mec-<VERSION>-<TARGET>/ with the release payload files). This narrow mode
 # exists so reproducibility can be tested cheaply without compiling
 # twice; release CI never uses it.
 #
@@ -73,7 +73,8 @@ else
   mkdir -p "$STAGE/$TOPDIR" "$OUTDIR"
   cp "target/${TARGET}/release/mec" "$STAGE/$TOPDIR/mec"
   chmod 755 "$STAGE/$TOPDIR/mec"
-  cp README.md LICENSE SECURITY.md "$STAGE/$TOPDIR/"
+  cp README.md LICENSE SECURITY.md packaging/desktop/mec.desktop packaging/desktop/mec.svg "$STAGE/$TOPDIR/"
+  cp -R docs "$STAGE/$TOPDIR/docs"
 fi
 mkdir -p "$OUTDIR"
 

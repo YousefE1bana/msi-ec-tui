@@ -62,6 +62,8 @@ pub enum TuiError {
 /// terminal or filesystem handles beyond the backend itself.
 pub struct TuiApp<B, E = SafeTuiExecutor> {
     state: AppState,
+    update_receiver:
+        Option<std::sync::mpsc::Receiver<Result<crate::updates::UpdateStatus, String>>>,
     live: LiveHardware<B>,
     capabilities: Capabilities,
     profile_catalog: ProfileCatalog,
@@ -74,6 +76,9 @@ pub struct TuiApp<B, E = SafeTuiExecutor> {
     theme_name: ThemeName,
     config: AppConfig,
     config_store: Option<AppConfigStore>,
+    /// Last drawn frame area for mouse hit-testing. Updated on every
+    /// draw; zero until the first frame so early mouse input stays inert.
+    viewport: ratatui::layout::Rect,
 }
 
 impl<B, E> TuiApp<B, E>
@@ -170,6 +175,165 @@ where
         &self.config
     }
 
+    /// Last drawn frame area. Mouse coordinates hit-test against this so
+    /// regions always match the visible grid.
+    pub fn viewport(&self) -> ratatui::layout::Rect {
+        self.viewport
+    }
+
+    /// Records the drawn frame area. Called once per draw by the runtime.
+    pub fn set_viewport(&mut self, viewport: ratatui::layout::Rect) {
+        self.viewport = viewport;
+    }
+
+    /// Resolve input from the currently drawn view. Geometry is recomputed
+    /// from current screen, editor and modal state, never retained across frames.
+    /// Returned actions enter handle_action; there is no execution here.
+    fn mouse_action(&self, event: crossterm::event::MouseEvent) -> Option<crate::app::AppAction> {
+        use super::{mouse, shell};
+        use crate::app::AppAction as A;
+        let full = self.viewport;
+        if full.is_empty() {
+            return None;
+        }
+        let (_, workspace, footer) = shell::shell_split(full);
+        let read_only = matches!(self.live.mode(), SupportMode::ReadOnly(_));
+        if self.state.help_visible() {
+            let mut buttons = vec![(super::help::close_region(full), A::Cancel)];
+            if super::responsive::layout_tier(full) == super::responsive::LayoutTier::Full {
+                buttons.push((mouse::footer_regions(footer, read_only).help, A::ToggleHelp));
+            }
+            return mouse::button_action(&buttons, event);
+        }
+        if let Some(pending) = self.controls.pending() {
+            return mouse::button_action(
+                &super::confirmation::confirmation_buttons(
+                    full,
+                    pending,
+                    self.live.current_snapshot(),
+                    self.live.mode(),
+                    &self.capabilities,
+                ),
+                event,
+            );
+        }
+        if self.notifications_open {
+            if super::responsive::layout_tier(full) == super::responsive::LayoutTier::Tiny {
+                return None;
+            }
+            return mouse::button_action(
+                &[(
+                    super::notifications::close_region(full, &self.notifications),
+                    A::Cancel,
+                )],
+                event,
+            );
+        }
+        let screen = self.state.current_screen();
+        if self.palette.is_open() {
+            return mouse::navigation_action(
+                full,
+                screen,
+                Some(self.palette.selected_index()),
+                (self.profile_row_count(), self.profile_selection.index()),
+                read_only,
+                event,
+            );
+        }
+        if self.state.about_visible() {
+            return mouse::button_action(&super::screens::about::buttons(full), event);
+        }
+        if screen == Screen::Settings
+            && super::responsive::layout_tier(full) == super::responsive::LayoutTier::Full
+            && let Some(action) = mouse::button_action(
+                &[(
+                    super::screens::settings::about_button(workspace),
+                    A::ShowAbout,
+                )],
+                event,
+            )
+        {
+            return Some(action);
+        }
+        if super::responsive::layout_tier(full) != super::responsive::LayoutTier::Full {
+            return None;
+        }
+        if self.controls.notice().is_some()
+            && mouse::contains(
+                super::confirmation::notice_area(full),
+                event.column,
+                event.row,
+            )
+        {
+            return None;
+        }
+        if let Some(regions) = mouse::screen_regions(screen, workspace, self.profile_row_count()) {
+            let control_rows = super::editing::control_rows(screen);
+            if self.controls.is_editing() && !control_rows.is_empty() {
+                let (card, offset) = match screen {
+                    Screen::Battery => (1, control_rows.len()),
+                    Screen::Devices => (2, 0),
+                    _ => (0, control_rows.len()),
+                };
+                if let Some(action) = mouse::button_action(
+                    &super::controls::editor_button_regions(
+                        shell::inset(regions.cards[card]),
+                        offset,
+                        &self.controls,
+                    ),
+                    event,
+                ) {
+                    return Some(action);
+                }
+            } else {
+                let values: Vec<_> = regions
+                    .rows
+                    .iter()
+                    .zip(control_rows)
+                    .enumerate()
+                    .map(|(index, (row, control))| {
+                        let value = if screen == Screen::Devices {
+                            super::screens::devices::value_region(
+                                *row,
+                                *control,
+                                self.live.current_snapshot(),
+                            )
+                        } else {
+                            super::controls::value_region(
+                                *row,
+                                *control,
+                                self.live.current_snapshot(),
+                            )
+                        };
+                        (value, A::EditControlRow(index))
+                    })
+                    .collect();
+                if let Some(action) = mouse::button_action(&values, event) {
+                    return Some(action);
+                }
+                if screen == Screen::Profiles
+                    && let Some(action) = mouse::button_action(
+                        &[(
+                            super::screens::profiles::review_button_region(workspace),
+                            A::Activate,
+                        )],
+                        event,
+                    )
+                {
+                    return Some(action);
+                }
+            }
+        }
+        mouse::navigation_action(
+            full,
+            screen,
+            None,
+            (self.profile_row_count(), self.profile_selection.index()),
+            read_only,
+            event,
+        )
+    }
+
     /// Event-loop poll timeout derived from the configured interval.
     pub fn poll_timeout(&self) -> Duration {
         self.config.refresh_interval().as_duration()
@@ -258,8 +422,29 @@ where
                 A::MoveUp => self.palette.move_up(),
                 A::MoveDown => self.palette.move_down(),
                 A::Activate => self.activate_palette(),
+                A::ActivatePaletteRow(index) => {
+                    self.palette.select_index(index);
+                    self.activate_palette();
+                }
                 A::Cancel | A::TogglePalette => self.palette.close(),
                 _ => {}
+            }
+            return;
+        }
+        if self.state.about_visible() {
+            match action {
+                A::Cancel | A::HideAbout => self.state.apply(A::HideAbout),
+                A::Activate if self.state.focused_card() == 2 => self.start_update_check(),
+                A::CheckUpdates => self.start_update_check(),
+                A::Activate => {}
+                A::TogglePalette => self.palette.open(),
+                A::MoveUp => self
+                    .state
+                    .apply(A::FocusCard((self.state.focused_card() + 2) % 3)),
+                A::MoveDown => self
+                    .state
+                    .apply(A::FocusCard((self.state.focused_card() + 1) % 3)),
+                _ => self.state.apply(action),
             }
             return;
         }
@@ -267,6 +452,27 @@ where
         match action {
             A::MoveUp if self.controls.is_editing() => {}
             A::MoveDown if self.controls.is_editing() => {}
+            // Mouse row selection enters the same selection state as
+            // keyboard movement. Ignored while editing so a draft is
+            // never disturbed, and profiles only accept their own rows.
+            A::EditControlRow(index) => {
+                if !self.controls.is_editing() && index < super::editing::control_rows(screen).len()
+                {
+                    self.controls.select_index(screen, index);
+                    // Converge with keyboard Enter before creating any draft.
+                    self.handle_action(A::Activate);
+                }
+            }
+            A::SelectControlRow(_) if self.controls.is_editing() => {}
+            A::SelectControlRow(index) if is_interactive_screen(screen) => {
+                self.controls.select_index(screen, index);
+            }
+            A::SelectControlRow(_) => {}
+            A::SelectProfileRow(_) if screen != Screen::Profiles => {}
+            A::SelectProfileRow(index) => {
+                self.profile_selection
+                    .set_index(index, self.profile_row_count());
+            }
             A::MoveUp if screen == Screen::Profiles => {
                 self.profile_selection.move_up(self.profile_row_count());
             }
@@ -304,6 +510,8 @@ where
                     &mode,
                 );
             }
+            A::Activate if screen == Screen::Settings => self.state.apply(A::ShowAbout),
+            A::CheckUpdates => {}
             A::Activate => {}
             // The palette opens only from normal browsing: no help (gated
             // above), no pending (gated above), no editor. Otherwise P does
@@ -321,12 +529,56 @@ where
             A::NextScreen | A::PreviousScreen | A::GoTo(_) => {
                 self.state.apply(action);
                 self.controls.on_screen_change();
+                self.state.apply(crate::app::AppAction::FocusCard(0));
             }
             A::MoveLeft | A::MoveRight => {
                 self.state.apply(action);
                 self.controls.on_screen_change();
+                self.state.apply(crate::app::AppAction::FocusCard(0));
             }
             _ => self.state.apply(action),
+        }
+    }
+
+    // Only an explicit utility action starts networking. The receiver carries
+    // release metadata alone; it has no hardware or executor handles.
+    fn start_update_check(&mut self) {
+        if self.update_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.state.update_status = crate::updates::UpdateStatus::Checking;
+        match std::thread::Builder::new()
+            .name("mec-update-check".into())
+            .spawn(move || {
+                let _ = sender.send(crate::updates::check(env!("CARGO_PKG_VERSION")));
+            }) {
+            Ok(_) => self.update_receiver = Some(receiver),
+            Err(_) => {
+                self.state.update_status =
+                    crate::updates::UpdateStatus::Failed("Could not start check".into())
+            }
+        }
+    }
+
+    fn poll_update_check(&mut self) -> bool {
+        let Some(receiver) = &self.update_receiver else {
+            return false;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.state.update_status =
+                    result.unwrap_or_else(crate::updates::UpdateStatus::Failed);
+                self.update_receiver = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.state.update_status =
+                    crate::updates::UpdateStatus::Failed("Check interrupted".into());
+                self.update_receiver = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
         }
     }
 
@@ -336,6 +588,10 @@ where
     /// Help opens Help, Quit requests quit. Zero executor calls.
     fn activate_palette(&mut self) {
         match self.palette.selected() {
+            PaletteCommand::About => {
+                self.palette.close();
+                self.state.apply(crate::app::AppAction::ShowAbout);
+            }
             PaletteCommand::Notifications => {
                 self.palette.close();
                 self.notifications_open = true;
@@ -489,6 +745,16 @@ where
     pub fn refresh(&mut self) {
         self.live.refresh();
     }
+
+    /// Dismisses an expired transient result band, if any. Called on
+    /// every event-loop step (ticks and activity) so bands vanish
+    /// without blocking, sleeping, or extra refreshes. Expiry only hides
+    /// an already-produced notice: zero hardware commands, zero profile
+    /// applies.
+    pub fn expire_transient_notice(&mut self) {
+        self.controls
+            .expire_notice_if_due(std::time::Instant::now());
+    }
 }
 
 /// Composes the hardware layer once: support verdict, device identity,
@@ -577,6 +843,7 @@ where
     };
     let mut app = TuiApp {
         state: AppState::default(),
+        update_receiver: None,
         live: LiveHardware::new(device, mode, backend, SnapshotHistory::default()),
         capabilities,
         profile_catalog,
@@ -589,6 +856,7 @@ where
         theme_name: ThemeName::MsiDark,
         config: AppConfig::default(),
         config_store: None,
+        viewport: ratatui::layout::Rect::default(),
     };
     apply_loaded_config(&mut app, loaded, config_store);
     Ok(app)
@@ -667,21 +935,50 @@ where
     Ev: EventSource,
     D: FnMut(&mut TuiApp<B, X>) -> std::io::Result<()>,
 {
-    match events.next_event(timeout)? {
+    let event = events.next_event(timeout)?;
+    let update_changed = app.poll_update_check();
+    match event {
         TuiEvent::Action(action) => {
+            app.expire_transient_notice();
             app.handle_action(action);
             if !app.state().should_quit() {
                 draw(app)?;
             }
         }
+        // Mouse only supplies actions; modal confirmation owns execution.
+        TuiEvent::Mouse(mouse) => {
+            // Resolve against what is still visible before expiry exposes
+            // an underlying value. Expiry itself always gets a redraw.
+            let action = app.mouse_action(mouse);
+            let had_notice = app.notice().is_some();
+            app.expire_transient_notice();
+            let notice_expired = had_notice && app.notice().is_none();
+            if let Some(action) = action {
+                app.handle_action(action);
+            }
+            if (action.is_some() || notice_expired || update_changed) && !app.state().should_quit()
+            {
+                draw(app)?;
+            }
+        }
         TuiEvent::Tick => {
             app.refresh();
+            app.expire_transient_notice();
             draw(app)?;
         }
         TuiEvent::Resize { .. } => {
+            app.expire_transient_notice();
             draw(app)?;
         }
-        TuiEvent::Ignored => {}
+        TuiEvent::Ignored => {
+            let had_notice = app.notice().is_some();
+            app.expire_transient_notice();
+            if (update_changed || (had_notice && app.notice().is_none()))
+                && !app.state().should_quit()
+            {
+                draw(app)?;
+            }
+        }
     }
     Ok(())
 }
@@ -704,7 +1001,16 @@ fn resolve_outcome(
 /// runs the 1-second loop, and always attempts terminal restoration.
 /// Returns typed errors; only `main` decides process exit codes.
 pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
+    run_tui_with_theme(paths, None)
+}
+
+/// Launch with a session-only theme override; never modifies configuration.
+pub fn run_tui_with_theme(paths: SystemPaths, theme: Option<ThemeName>) -> Result<(), TuiError> {
     let mut app = prepare_tui(paths, LinuxSysfsReader)?;
+    if let Some(name) = theme {
+        app.theme_name = name;
+        app.config.set_theme(name);
+    }
     let mut session = TerminalSession::enter().map_err(TuiError::Terminal)?;
     // The configured interval drives the loop timeout and the configured
     // vim-keys setting drives input mapping; CLI monitor semantics are
@@ -715,6 +1021,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
         session
             .terminal_mut()
             .draw(|frame| {
+                app.set_viewport(frame.area());
                 render_screen_with_theme(
                     frame,
                     frame.area(),
@@ -728,6 +1035,7 @@ pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
                     app.notifications(),
                     app.notifications_open(),
                     &app.theme(),
+                    app.config(),
                 );
             })
             .map(|_| ())
@@ -870,8 +1178,8 @@ mod tests {
     }
 
     #[test]
-    fn package_version_is_v1_0_1() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.1");
+    fn package_version_is_v1_1_0() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "1.1.0");
     }
 
     #[test]
@@ -1045,6 +1353,7 @@ mod tests {
     ) -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
         TuiApp {
             state: AppState::default(),
+            update_receiver: None,
             live: LiveHardware::new(
                 DeviceInfo {
                     manufacturer: "MSI".to_owned(),
@@ -1071,6 +1380,7 @@ mod tests {
             theme_name: crate::tui::theme::ThemeName::MsiDark,
             config: crate::config::AppConfig::default(),
             config_store: None,
+            viewport: ratatui::layout::Rect::default(),
         }
     }
 
@@ -1259,6 +1569,310 @@ mod tests {
             vec![TuiEvent::Action(AppAction::Quit)],
         );
         assert_eq!(harness.draws.get(), 1);
+    }
+
+    // ---- P1: mouse loop integration (non-mutating only) ----
+
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect as LoopRect;
+
+    const LOOP_VIEWPORT: LoopRect = LoopRect {
+        x: 0,
+        y: 0,
+        width: 160,
+        height: 50,
+    };
+
+    fn mouse_click(col: u16, row: u16) -> TuiEvent {
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    }
+
+    fn mouse_wheel_down(col: u16, row: u16) -> TuiEvent {
+        TuiEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        })
+    }
+
+    /// Menu row rect for `index` on the 160x50 dashboard grid.
+    fn menu_row_rect(index: usize) -> LoopRect {
+        crate::tui::mouse::dashboard_regions(LOOP_VIEWPORT)
+            .expect("loop viewport maps")
+            .menu_rows[index]
+    }
+
+    /// Runs the loop with every draw recording the production viewport,
+    /// mirroring `run_tui`.
+    fn run_loop_with_viewport(
+        script: Vec<Result<HardwareSnapshot, BackendError>>,
+        events: Vec<TuiEvent>,
+    ) -> (
+        TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor>,
+        LoopHarness,
+    ) {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(script, Rc::clone(&log));
+        let mut source = LoopSource::events(events, Rc::clone(&log));
+        let draws = Rc::new(Cell::new(0));
+        let harness = LoopHarness {
+            draws: Rc::clone(&draws),
+            degraded_at_draw: Rc::new(RefCell::new(Vec::new())),
+            current_at_draw: Rc::new(RefCell::new(Vec::new())),
+        };
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |app| {
+            app.set_viewport(LOOP_VIEWPORT);
+            draws.set(draws.get() + 1);
+            Ok(())
+        })
+        .expect("scripted mouse loop succeeds");
+        (app, harness)
+    }
+
+    #[test]
+    fn mouse_menu_click_navigates_and_redraws() {
+        let row = menu_row_rect(2);
+        let (app, harness) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_click(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert_eq!(app.state().current_screen(), Screen::Fans);
+        assert_eq!(harness.draws.get(), 2);
+    }
+
+    #[test]
+    fn mouse_wheel_over_menu_moves_like_arrows() {
+        let row = menu_row_rect(0);
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_wheel_down(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert_eq!(app.state().current_screen(), Screen::Performance);
+    }
+
+    #[test]
+    fn mouse_card_click_focuses_without_navigating() {
+        let regions = crate::tui::mouse::dashboard_regions(LOOP_VIEWPORT).expect("maps");
+        let card = &regions.cards[1];
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_click(card.x + 2, card.y + card.height - 2),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert_eq!(app.state().focused_card(), 1);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+    }
+
+    #[test]
+    fn mouse_exit_row_quits_without_final_redraw() {
+        let row = menu_row_rect(8);
+        let (app, harness) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![mouse_click(row.x + 1, row.y)],
+        );
+        assert!(app.state().should_quit());
+        assert_eq!(harness.draws.get(), 1);
+    }
+
+    #[test]
+    fn mouse_before_any_draw_stays_inert() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        let row = menu_row_rect(2);
+        let mut source = LoopSource::events(
+            vec![
+                mouse_click(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .expect("zero-viewport loop succeeds");
+        // Zero viewport maps nothing: only the initial draw runs and the
+        // screen never changes.
+        assert_eq!(draws, 1);
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+    }
+
+    #[test]
+    fn mouse_navigation_dropped_while_palette_open() {
+        let row = menu_row_rect(2);
+        let (app, harness) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                TuiEvent::Action(AppAction::TogglePalette),
+                mouse_click(row.x + 1, row.y),
+                TuiEvent::Action(AppAction::Cancel),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        // Outside palette rows are inert, so they cannot reach the menu.
+        assert_eq!(app.state().current_screen(), Screen::Dashboard);
+        // Initial + palette-open + cancel; inert click and quit do not draw.
+        assert_eq!(harness.draws.get(), 3);
+    }
+
+    #[test]
+    fn mouse_path_executes_zero_hardware_commands() {
+        let regions = crate::tui::mouse::dashboard_regions(LOOP_VIEWPORT).expect("maps");
+        let menu = &regions.menu_rows[1];
+        let card = &regions.cards[3];
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                mouse_click(menu.x + 1, menu.y),
+                mouse_click(card.x + 2, card.y + card.height - 2),
+                mouse_wheel_down(menu.x + 1, menu.y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        assert!(app.executor().received_commands().is_empty());
+        assert!(app.executor().received_profiles().is_empty());
+    }
+
+    #[test]
+    fn mouse_row_selection_never_stages_or_applies() {
+        use crate::tui::shell;
+        let workspace = shell::shell_split(LOOP_VIEWPORT).1;
+        let fans_rows = crate::tui::screens::fans::hit_regions(workspace).rows;
+        let profile_rows = crate::tui::screens::profiles::hit_regions(workspace, 5).rows;
+        let (app, _) = run_loop_with_viewport(
+            vec![Ok(temperature(60))],
+            vec![
+                TuiEvent::Action(AppAction::GoTo(Screen::Fans)),
+                mouse_click(fans_rows[1].x + 1, fans_rows[1].y),
+                TuiEvent::Action(AppAction::GoTo(Screen::Profiles)),
+                mouse_click(profile_rows[2].x + 1, profile_rows[2].y),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+        );
+        // Selection follows the clicks through keyboard-identical state.
+        assert_eq!(app.controls().selected_index(Screen::Fans), 1);
+        assert_eq!(app.profile_selection().index(), 2);
+        // Nothing staged, nothing pending, nothing executed.
+        assert!(!app.controls().is_editing());
+        assert!(app.controls().pending().is_none());
+        assert!(app.executor().received_commands().is_empty());
+        assert!(app.executor().received_profiles().is_empty());
+    }
+
+    #[test]
+    fn verified_success_creates_visible_notice() {
+        use crate::tui::screens::support::healthy_snapshot;
+        // Full keyboard flow with real capabilities: select, stage,
+        // confirm, execute. The band appears only after the executor
+        // reports success.
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+                Ok(healthy_snapshot()),
+            ],
+            Rc::clone(&log),
+        );
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        let mut source = LoopSource::events(
+            vec![
+                TuiEvent::Action(AppAction::GoTo(Screen::Fans)),
+                TuiEvent::Action(AppAction::Activate),
+                TuiEvent::Action(AppAction::Activate),
+                TuiEvent::Action(AppAction::Activate),
+                TuiEvent::Action(AppAction::Quit),
+            ],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .expect("success flow succeeds");
+        assert_eq!(draws, 5);
+        let notice = app.notice().expect("success band visible");
+        assert!(notice.message().contains("Applied"));
+        assert!(!notice.is_expired(std::time::Instant::now()));
+        assert_eq!(app.executor.command_calls(), 1);
+        assert_eq!(app.executor.profile_calls(), 0);
+    }
+
+    #[test]
+    fn tick_expires_aged_band_without_hardware() {
+        use crate::tui::confirmation::Notice;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![Ok(temperature(60)), Ok(temperature(60))],
+            Rc::clone(&log),
+        );
+        let old = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .expect("past constructs");
+        app.controls
+            .set_notice(Notice::success_at("old success".to_owned(), old));
+        let mut source = LoopSource::events(
+            vec![TuiEvent::Tick, TuiEvent::Action(AppAction::Quit)],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .expect("expiry loop succeeds");
+        assert!(app.notice().is_none());
+        assert_eq!(draws, 2);
+        assert!(app.executor().received_commands().is_empty());
+        assert!(app.executor().received_profiles().is_empty());
+    }
+
+    #[test]
+    fn fresh_band_survives_tick_and_action() {
+        use crate::tui::confirmation::Notice;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(
+            vec![Ok(temperature(60)), Ok(temperature(60))],
+            Rc::clone(&log),
+        );
+        app.controls.set_notice(Notice::success("fresh".to_owned()));
+        let mut source = LoopSource::events(
+            vec![TuiEvent::Tick, TuiEvent::Action(AppAction::Quit)],
+            Rc::clone(&log),
+        );
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| Ok(())).expect("loop succeeds");
+        assert!(app.notice().is_some());
+    }
+
+    #[test]
+    fn starting_edit_clears_stale_notice() {
+        use crate::tui::confirmation::Notice;
+        use crate::tui::screens::support::healthy_snapshot;
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(healthy_snapshot())], Rc::clone(&log));
+        app.capabilities = crate::tui::screens::support::full_capabilities();
+        app.refresh();
+        app.controls.set_notice(Notice::success("stale".to_owned()));
+        app.handle_action(AppAction::GoTo(Screen::Fans));
+        app.handle_action(AppAction::Activate);
+        assert!(app.notice().is_none());
+        assert!(app.controls().is_editing());
     }
 
     #[test]
@@ -1467,8 +2081,8 @@ mod tests {
         // Dashboard has no control rows: vertical moves fall back to screens.
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.state().current_screen(), Screen::Diagnostics);
-        // Diagnostics also has no rows.
+        assert_eq!(app.state().current_screen(), Screen::Settings);
+        // Settings also has no rows.
         app.handle_action(AppAction::MoveDown);
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
         // Interactive screens consume vertical moves as row navigation.
@@ -2079,9 +2693,9 @@ mod tests {
         }
         assert_eq!(app.palette().selected_index(), 0);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.palette().selected(), PaletteCommand::ThemeLight);
+        assert_eq!(app.palette().selected(), PaletteCommand::About);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.palette().selected(), PaletteCommand::ThemeTerminal);
+        assert_eq!(app.palette().selected(), PaletteCommand::ThemeGraphite);
     }
 
     #[test]
@@ -2094,6 +2708,7 @@ mod tests {
             (4, Screen::Devices),
             (5, Screen::Profiles),
             (6, Screen::Diagnostics),
+            (7, Screen::Settings),
         ];
         for (steps, screen) in cases {
             let mut app = healthy_control_app(Screen::Dashboard);
@@ -2115,7 +2730,7 @@ mod tests {
     fn palette_notifications_opens_overlay() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..7 {
+        for _ in 0..8 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2133,7 +2748,7 @@ mod tests {
         assert_eq!(app.notifications().len(), 1);
         assert!(app.notice().is_some());
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..8 {
+        for _ in 0..9 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2146,7 +2761,7 @@ mod tests {
     fn palette_help_opens_help() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..9 {
+        for _ in 0..10 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2158,7 +2773,7 @@ mod tests {
     fn palette_quit_requests_quit() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..10 {
+        for _ in 0..11 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2302,7 +2917,7 @@ mod tests {
     fn notifications_overlay_gates_input_deterministically() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..7 {
+        for _ in 0..8 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2316,7 +2931,7 @@ mod tests {
         app.handle_action(AppAction::TogglePalette);
         assert!(!app.notifications_open());
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..7 {
+        for _ in 0..8 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2644,9 +3259,9 @@ mod tests {
     fn selecting_each_theme_switches_palette_closed_with_one_notification() {
         use crate::tui::theme::ThemeName;
         let cases = [
-            (11, ThemeName::MsiDark, "MSI Dark"),
-            (12, ThemeName::Terminal, "Terminal"),
-            (13, ThemeName::Light, "Light"),
+            (12, ThemeName::MsiDark, "MSI Dark"),
+            (13, ThemeName::Terminal, "Terminal"),
+            (14, ThemeName::Light, "Light"),
         ];
         for (steps, name, display) in cases {
             let mut app = healthy_control_app(Screen::Dashboard);
@@ -2676,13 +3291,13 @@ mod tests {
     fn reselecting_active_theme_is_harmless() {
         let mut app = healthy_control_app(Screen::Dashboard);
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..11 {
+        for _ in 0..12 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
         // Selection persists across opens: reopening lands back on the
         // theme row, so Activate reselects it directly.
-        assert_eq!(app.palette().selected_index(), 11);
+        assert_eq!(app.palette().selected_index(), 12);
         app.handle_action(AppAction::TogglePalette);
         app.handle_action(AppAction::Activate);
         assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
@@ -2793,9 +3408,9 @@ mod tests {
         app.config_store = Some(store);
         assert_eq!(app.theme_name(), crate::tui::theme::ThemeName::MsiDark);
         let history_before = app.live().history().len();
-        // Drive the palette to "Theme: Light" (index 13) and activate.
+        // Drive the palette to "Theme: Light" (index 14) and activate.
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..13 {
+        for _ in 0..14 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2830,7 +3445,7 @@ mod tests {
         app.config_store = Some(store);
         let history_before = app.live().history().len();
         app.handle_action(AppAction::TogglePalette);
-        for _ in 0..13 {
+        for _ in 0..14 {
             app.handle_action(AppAction::MoveDown);
         }
         app.handle_action(AppAction::Activate);
@@ -2863,5 +3478,168 @@ mod tests {
         assert!(latest.message().contains("using defaults"));
         assert!(!latest.message().contains("home"));
         assert!(app.live().device().product_name.contains("GF63"));
+    }
+    #[test]
+    fn representative_keyboard_controls_remain_confirmation_gated() {
+        use crate::hardware::{BatteryThreshold, FanMode, HardwareCommand, ShiftMode};
+        for (screen, row, expected) in [
+            (
+                Screen::Performance,
+                0,
+                HardwareCommand::SetShiftMode(ShiftMode::try_from("sport").unwrap()),
+            ),
+            (
+                Screen::Fans,
+                0,
+                HardwareCommand::SetFanMode(FanMode::try_from("silent").unwrap()),
+            ),
+            (Screen::Fans, 1, HardwareCommand::SetCoolerBoost(true)),
+            (
+                Screen::Battery,
+                0,
+                HardwareCommand::SetBatteryThreshold(
+                    BatteryThreshold::from_end_percent(90).unwrap(),
+                ),
+            ),
+            (Screen::Devices, 0, HardwareCommand::SetWebcam(false)),
+            (Screen::Devices, 2, HardwareCommand::SetKeyboardBacklight(3)),
+        ] {
+            let mut app = healthy_control_app(screen);
+            for _ in 0..row {
+                app.handle_action(AppAction::MoveDown);
+            }
+            app.handle_action(AppAction::Activate);
+            app.handle_action(AppAction::MoveRight);
+            app.handle_action(AppAction::Activate);
+            assert_eq!(app.controls().pending_command(), Some(&expected));
+            assert!(app.executor().received_commands().is_empty());
+            assert!(app.executor().received_profiles().is_empty());
+            app.handle_action(AppAction::Activate);
+            assert_eq!(app.executor().received_commands(), &[expected]);
+            assert!(app.controls().pending().is_none());
+        }
+    }
+    include!("mouse_workflow_tests.rs");
+    #[test]
+    fn about_routes_keyboard_and_mouse_without_hardware_or_network() {
+        use crate::app::AppAction;
+        let mut app = healthy_control_app(Screen::Settings);
+        assert!(app.update_receiver.is_none());
+        app.handle_action(AppAction::Activate);
+        assert!(app.state.about_visible());
+        assert_eq!(
+            app.state.update_status,
+            crate::updates::UpdateStatus::NotChecked
+        );
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.state.about_visible());
+        assert_eq!(app.state.current_screen(), Screen::Settings);
+        app.set_viewport(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let (_, workspace, _) = super::super::shell::shell_split(app.viewport());
+        let rect = super::super::screens::settings::about_button(workspace);
+        let event = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(app.mouse_action(event), Some(AppAction::ShowAbout));
+        app.handle_action(AppAction::ShowAbout);
+        app.handle_action(AppAction::GoTo(Screen::Battery));
+        assert!(!app.state.about_visible());
+        assert!(app.update_receiver.is_none());
+    }
+
+    #[test]
+    fn update_receiver_is_independent_and_duplicate_check_is_ignored() {
+        use crate::updates::UpdateStatus;
+        let mut app = healthy_control_app(Screen::Settings);
+        app.handle_action(AppAction::ShowAbout);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.update_receiver = Some(receiver);
+        app.state.update_status = UpdateStatus::Checking;
+        app.handle_action(AppAction::CheckUpdates); // existing in-flight receiver blocks a second request
+        assert_eq!(app.state.update_status, UpdateStatus::Checking);
+        sender.send(Err("offline fixture".into())).unwrap();
+        app.poll_update_check();
+        assert_eq!(
+            app.state.update_status,
+            UpdateStatus::Failed("offline fixture".into())
+        );
+        assert!(app.update_receiver.is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        app.expire_transient_notice();
+        assert_eq!(
+            app.state.update_status,
+            UpdateStatus::Failed("offline fixture".into())
+        );
+    }
+
+    #[test]
+    fn palette_about_and_new_themes_are_non_mutating() {
+        use crate::tui::palette::PaletteCommand;
+        for command in [
+            PaletteCommand::About,
+            PaletteCommand::ThemeArctic,
+            PaletteCommand::ThemeGraphite,
+        ] {
+            let mut app = healthy_control_app(Screen::Dashboard);
+            app.palette.open();
+            app.palette.select_index(
+                PaletteCommand::ALL
+                    .iter()
+                    .position(|c| *c == command)
+                    .unwrap(),
+            );
+            app.handle_action(AppAction::Activate);
+            if let Some(theme) = command.theme() {
+                assert_eq!(app.theme_name(), theme);
+            } else {
+                assert!(app.state.about_visible());
+            }
+            assert_eq!(app.executor.command_calls(), 0);
+            assert_eq!(app.executor.profile_calls(), 0);
+            assert!(app.update_receiver.is_none());
+        }
+    }
+    #[test]
+    fn ignored_input_expires_notices_and_delivers_completed_update_without_writes() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        let old = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .unwrap();
+        app.controls
+            .set_notice(crate::tui::confirmation::Notice::failure_at(
+                "old failure".into(),
+                old,
+            ));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.update_receiver = Some(receiver);
+        app.state.update_status = crate::updates::UpdateStatus::Checking;
+        sender
+            .send(Ok(crate::updates::UpdateStatus::UpToDate("1.0.1".into())))
+            .unwrap();
+        let mut source = LoopSource::events(
+            vec![TuiEvent::Ignored, TuiEvent::Action(AppAction::Quit)],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(draws, 2);
+        assert!(app.notice().is_none());
+        assert_eq!(
+            app.state.update_status,
+            crate::updates::UpdateStatus::UpToDate("1.0.1".into())
+        );
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
     }
 }

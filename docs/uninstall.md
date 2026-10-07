@@ -32,13 +32,17 @@ Same effect: system payload removed, `~/.config/mec/` stays behind.
 
 ## 3. Portable copy removal
 
-There is no uninstaller because there was no installer. Delete the
+For the user-local installer, remove `~/.local/bin/mec`,
+`~/.local/share/applications/mec.desktop`, and
+`~/.local/share/icons/hicolor/scalable/apps/mec.svg` if installed.
+Documentation copied by the installer is in `~/.local/share/doc/mec/`; remove it too if no longer needed.
+Config and profiles are preserved. For a manually extracted copy, delete the
 extracted `mec-<version>-<target>/` directory, and if you copied the
 `mec` binary somewhere on your `PATH`, delete that copy too.
 
 ## 4. AUR package removal
 
-Once an AUR entry is published (none exists yet), remove `mec-bin` with
+If an AUR entry is published (publication is not claimed here), remove `mec-bin` with
 your normal AUR helper like any other package. As with the `.deb` and
 `.rpm` paths, `~/.config/mec/` stays behind.
 

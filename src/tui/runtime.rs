@@ -41,6 +41,9 @@ where
         match events.next_event(timeout)? {
             TuiEvent::Action(action) => state.apply(action),
             TuiEvent::Tick => on_tick(),
+            // The area-less loop cannot hit-test mouse coordinates, so
+            // mouse stays inert here; the viewport loop maps it instead.
+            TuiEvent::Mouse(_) => {}
             TuiEvent::Resize { .. } | TuiEvent::Ignored => {}
         }
     }
@@ -108,12 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn previous_screen_then_quit_wraps_to_diagnostics() {
+    fn previous_screen_then_quit_wraps_to_settings() {
         let (state, _) = run(vec![
             TuiEvent::Action(AppAction::PreviousScreen),
             TuiEvent::Action(AppAction::Quit),
         ]);
-        assert_eq!(state.current_screen(), Screen::Diagnostics);
+        assert_eq!(state.current_screen(), Screen::Settings);
     }
 
     #[test]

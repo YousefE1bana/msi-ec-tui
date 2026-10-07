@@ -103,6 +103,19 @@ fn overlay_area(area: Rect, line_count: usize) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+const TITLE_PREFIX: &str = " Notifications ";
+const CLOSE_BUTTON: &str = "[Close]";
+
+pub(crate) fn close_region(area: Rect, center: &NotificationCenter) -> Rect {
+    let rows = notification_lines(center);
+    let overlay = overlay_area(area, rows.len());
+    super::shell::text_region(
+        super::shell::row_rect(overlay, 0),
+        TITLE_PREFIX.len() as u16 + 1,
+        CLOSE_BUTTON,
+    )
+}
+
 /// Renders the read-only notification history above the underlying screen.
 /// Newest first; empty state is honest. Safe for tiny and zero areas.
 pub(crate) fn render_notifications(
@@ -119,7 +132,7 @@ pub(crate) fn render_notifications(
         .style(theme.base_style())
         .border_style(Style::default().fg(theme.border))
         .title(Line::styled(
-            " Notifications ".to_owned(),
+            format!("{TITLE_PREFIX}{CLOSE_BUTTON} "),
             Style::default()
                 .fg(theme.primary)
                 .add_modifier(Modifier::BOLD),

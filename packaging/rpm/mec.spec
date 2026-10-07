@@ -13,6 +13,8 @@ Release: 1
 Summary: safe capability-aware terminal control center for MSI laptops on Linux
 License: MIT
 BuildArch: @ARCH@
+Requires: glibc >= 2.39
+Requires: libgcc
 
 %global debug_package %{nil}
 %define __strip /bin/true
@@ -28,6 +30,14 @@ mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/doc/mec
 install -m755 %{_sourcedir}/mec %{buildroot}/usr/bin/mec
 install -m644 %{_sourcedir}/README.md %{_sourcedir}/LICENSE %{_sourcedir}/SECURITY.md %{buildroot}/usr/share/doc/mec/
 
+mkdir -p %{buildroot}/usr/share/applications %{buildroot}/usr/share/icons/hicolor/scalable/apps
+install -m644 %{_sourcedir}/mec.desktop %{buildroot}/usr/share/applications/mec.desktop
+install -m644 %{_sourcedir}/mec.svg %{buildroot}/usr/share/icons/hicolor/scalable/apps/mec.svg
+
+cp -R %{_sourcedir}/docs %{buildroot}/usr/share/doc/mec/docs
+
 %files
 /usr/bin/mec
 /usr/share/doc/mec/
+/usr/share/applications/mec.desktop
+/usr/share/icons/hicolor/scalable/apps/mec.svg

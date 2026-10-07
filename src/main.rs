@@ -20,18 +20,41 @@ fn run_hardware_command(paths: SystemPaths, command: HardwareCommand, success: &
 
 fn main() {
     let cli = Cli::parse();
+    if cli.theme.is_some() && cli.command.is_some() {
+        eprintln!("--theme applies only to the interactive TUI");
+        std::process::exit(2);
+    }
     match cli.command {
         None => {
             if mec::tui::should_launch_tui(
                 std::io::stdin().is_terminal(),
                 std::io::stdout().is_terminal(),
             ) {
-                if let Err(error) = mec::tui::run_tui(SystemPaths::new(cli.sys_root)) {
+                if let Err(error) =
+                    mec::tui::run_tui_with_theme(SystemPaths::new(cli.sys_root), cli.theme)
+                {
                     eprintln!("MEC TUI unavailable: {error}");
                     std::process::exit(1);
                 }
             } else {
                 println!("MEC — MSI EC Control Center");
+            }
+        }
+        Some(Command::UpdateCheck) => {
+            println!("Installed MEC {}", env!("CARGO_PKG_VERSION"));
+            match mec::updates::check(env!("CARGO_PKG_VERSION")) {
+                Ok(mec::updates::UpdateStatus::UpToDate(v)) => println!("Up to date: {v}"),
+                Ok(mec::updates::UpdateStatus::Available(v)) => {
+                    println!("Update available: {v}\n{}", mec::updates::RELEASES)
+                }
+                Ok(mec::updates::UpdateStatus::CurrentNewer(v)) => {
+                    println!("Current version is newer than latest stable {v}")
+                }
+                Ok(_) => unreachable!("completed check returns a final state"),
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
             }
         }
         Some(Command::Doctor { export }) => {

@@ -1,7 +1,7 @@
 //! Release packaging tests that need no cross hardware and no full
 //! multi-arch builds: script argument validation, checksum file behavior,
 //! and static script hygiene. A native archive smoke runs separately as a
-//! manual gate (see the PLAN-007 task text), not inside `cargo test`.
+//! manual gate, not inside `cargo test`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -340,6 +340,12 @@ fn staged_payload(root: &std::path::Path, topdir: &str, marker: &[u8]) {
     std::fs::write(payload.join("README.md"), b"# fake\n").unwrap();
     std::fs::write(payload.join("LICENSE"), b"fake\n").unwrap();
     std::fs::write(payload.join("SECURITY.md"), b"fake\n").unwrap();
+    std::fs::write(
+        payload.join("mec.desktop"),
+        b"[Desktop Entry]\nExec=mec\nTerminal=true\n",
+    )
+    .unwrap();
+    std::fs::write(payload.join("mec.svg"), b"<svg/>\n").unwrap();
 }
 
 fn build_from_stage(stage: &std::path::Path, out: &std::path::Path, target: &str) {
@@ -441,6 +447,8 @@ fn archive_members_are_exact() {
         format!("{topdir}/README.md"),
         format!("{topdir}/SECURITY.md"),
         format!("{topdir}/mec"),
+        format!("{topdir}/mec.desktop"),
+        format!("{topdir}/mec.svg"),
     ];
     expected.sort_unstable();
     assert_eq!(paths, expected);
@@ -966,4 +974,58 @@ fn aur_pkgver_tracks_cargo_version() {
     assert!(!pkgbuild.contains("@VERSION@"));
     assert!(!pkgbuild.contains("@X86_SHA@"));
     assert!(!pkgbuild.contains("@AARCH64_SHA@"));
+}
+
+#[test]
+fn archive_validator_rejects_changed_or_unapproved_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = r#"
+import pathlib, tarfile, sys
+root=pathlib.Path(sys.argv[1]); top='mec-1.0.1-x86_64-unknown-linux-gnu'
+for name,body in [('target/x86_64-unknown-linux-gnu/release/mec','binary'),('README.md','readme'),('LICENSE','license'),('SECURITY.md','security'),('packaging/desktop/mec.desktop','launcher'),('packaging/desktop/mec.svg','icon'),('docs/example.md','public docs')]:
+ p=root/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(body)
+(root/'target/x86_64-unknown-linux-gnu/release/mec').chmod(0o755)
+with tarfile.open(root/'valid.tar.gz','w:gz') as archive:
+ for name in ['', '/docs']:
+  node=tarfile.TarInfo(top+name);node.type=tarfile.DIRTYPE;archive.addfile(node)
+ for source,dest in [('target/x86_64-unknown-linux-gnu/release/mec','mec'),('README.md','README.md'),('LICENSE','LICENSE'),('SECURITY.md','SECURITY.md'),('packaging/desktop/mec.desktop','mec.desktop'),('packaging/desktop/mec.svg','mec.svg'),('docs/example.md','docs/example.md')]: archive.add(root/source,arcname=top+'/'+dest)
+"#;
+    assert!(
+        Command::new("python3")
+            .args(["-c", setup])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let validate = || {
+        Command::new("python3")
+            .arg(script("check-release-archive.py"))
+            .args(["valid.tar.gz", "x86_64-unknown-linux-gnu", "1.0.1"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+    };
+    assert!(validate().status.success());
+    std::fs::write(dir.path().join("README.md"), "changed after packaging").unwrap();
+    assert!(!validate().status.success());
+    std::fs::write(dir.path().join("README.md"), "readme").unwrap();
+    std::fs::write(dir.path().join("docs/internal.md"), "unexpected").unwrap();
+    assert!(!validate().status.success());
+}
+
+#[test]
+fn package_runtime_requirements_match_the_release_abi_floor() {
+    let root = manifest_dir();
+    let deb = std::fs::read_to_string(root.join("packaging/deb/control.template")).unwrap();
+    assert!(deb.contains("Depends: libc6 (>= 2.39), libgcc-s1"));
+    let rpm = std::fs::read_to_string(root.join("packaging/rpm/mec.spec")).unwrap();
+    assert!(rpm.contains("Requires: glibc >= 2.39"));
+    assert!(rpm.contains("Requires: libgcc"));
+    let (_work, out) = generate_aur_fixture(env!("CARGO_PKG_VERSION"));
+    let arch = std::fs::read_to_string(out.join("PKGBUILD")).unwrap();
+    assert!(arch.contains("depends=('glibc>=2.39' 'gcc-libs')"));
+    let info = std::fs::read_to_string(out.join(".SRCINFO")).unwrap();
+    assert!(info.contains("depends = glibc>=2.39"));
+    assert!(info.contains("depends = gcc-libs"));
 }

@@ -65,7 +65,7 @@ pub fn control_rows(screen: Screen) -> &'static [ControlId] {
             ControlId::SuperBattery,
         ],
         Screen::Fans => &[ControlId::FanMode, ControlId::CoolerBoost],
-        Screen::Battery => &[ControlId::BatteryThreshold],
+        Screen::Battery => &[ControlId::BatteryThreshold, ControlId::SuperBattery],
         Screen::Devices => &[
             ControlId::Webcam,
             ControlId::WebcamBlock,
@@ -388,6 +388,17 @@ impl ControlState {
         }
     }
 
+    /// Jumps to an absolute row, clamping into the screen's rows.
+    /// Produced by mouse clicks; enters the same selection state as
+    /// keyboard movement without starting an edit.
+    pub fn select_index(&mut self, screen: Screen, index: usize) {
+        let len = control_rows(screen).len();
+        if len == 0 {
+            return;
+        }
+        self.set_index(screen, index.min(len - 1));
+    }
+
     /// Clamps stale indices after capability changes.
     pub fn clamp(&mut self) {
         for screen in [
@@ -453,9 +464,28 @@ impl ControlState {
         self.notice.as_ref()
     }
 
-    /// Records a post-attempt banner.
+    /// Records a post-attempt banner. A newer result replaces any older
+    /// one, so stale bands never accumulate: only the current notice
+    /// renders.
     pub fn set_notice(&mut self, notice: Notice) {
         self.notice = Some(notice);
+    }
+
+    /// Dismisses the transient result band once its deadline has passed.
+    /// Pure time check against already-produced UI state: zero hardware
+    /// commands, zero profile applies, zero drafts touched. Returns true
+    /// when a notice was dismissed.
+    pub fn expire_notice_if_due(&mut self, now: std::time::Instant) -> bool {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.is_expired(now))
+        {
+            self.notice = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// Clears the banner when starting a new flow.
@@ -580,10 +610,10 @@ mod tests {
     }
 
     #[test]
-    fn battery_has_single_threshold_row() {
+    fn battery_rows_use_existing_threshold_and_super_battery_editors() {
         assert_eq!(
             control_rows(Screen::Battery),
-            &[ControlId::BatteryThreshold]
+            &[ControlId::BatteryThreshold, ControlId::SuperBattery]
         );
     }
 
@@ -934,6 +964,45 @@ mod tests {
         assert!(state.confirm(&SupportMode::Ready, &caps()));
         assert!(state.pending().is_some());
         assert!(state.cancel());
+        assert!(state.pending().is_none());
+    }
+
+    #[test]
+    fn newer_result_replaces_older_result() {
+        use super::super::confirmation::Notice;
+        let mut state = ControlState::default();
+        state.set_notice(Notice::success("first".to_owned()));
+        state.set_notice(Notice::failure("second".to_owned()));
+        assert_eq!(state.notice().map(|n| n.message()), Some("second"));
+    }
+
+    #[test]
+    fn fresh_notice_survives_expiry_check() {
+        use super::super::confirmation::Notice;
+        let mut state = ControlState::default();
+        state.set_notice(Notice::success("fresh".to_owned()));
+        assert!(!state.expire_notice_if_due(std::time::Instant::now()));
+        assert!(state.notice().is_some());
+    }
+
+    #[test]
+    fn aged_notice_dismisses_without_touching_drafts() {
+        use super::super::confirmation::Notice;
+        let mut state = ControlState::default();
+        assert!(state.begin_edit(
+            Screen::Fans,
+            Some(&snapshot()),
+            &caps(),
+            &SupportMode::Ready,
+        ));
+        let old = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(30))
+            .expect("past constructs");
+        state.set_notice(Notice::failure_at("old failure".to_owned(), old));
+        assert!(state.expire_notice_if_due(std::time::Instant::now()));
+        assert!(state.notice().is_none());
+        // Drafts, pending, and reasons are untouched by expiry.
+        assert!(state.is_editing());
         assert!(state.pending().is_none());
     }
 }

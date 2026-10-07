@@ -8,7 +8,7 @@
 
 use ratatui::style::{Color, Style};
 
-/// Stable identity for the three approved named themes.
+/// Stable identity for the existing themes and two optional candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeName {
     /// Dark background with an MSI-inspired red primary accent.
@@ -17,12 +17,22 @@ pub enum ThemeName {
     Terminal,
     /// Light background with a non-red primary accent.
     Light,
+    /// Navy surfaces with ice-cyan focus. Optional candidate.
+    Arctic,
+    /// Graphite surfaces with violet focus. Optional candidate.
+    Graphite,
 }
 
 impl ThemeName {
     /// All themes in stable order.
-    pub const fn all() -> [ThemeName; 3] {
-        [ThemeName::MsiDark, ThemeName::Terminal, ThemeName::Light]
+    pub const fn all() -> [ThemeName; 5] {
+        [
+            ThemeName::MsiDark,
+            ThemeName::Terminal,
+            ThemeName::Light,
+            ThemeName::Arctic,
+            ThemeName::Graphite,
+        ]
     }
 
     /// Exact user-facing name.
@@ -31,6 +41,8 @@ impl ThemeName {
             ThemeName::MsiDark => "MSI Dark",
             ThemeName::Terminal => "Terminal",
             ThemeName::Light => "Light",
+            ThemeName::Arctic => "Arctic Midnight",
+            ThemeName::Graphite => "Graphite Violet",
         }
     }
 
@@ -41,10 +53,12 @@ impl ThemeName {
             ThemeName::MsiDark => "msi-dark",
             ThemeName::Terminal => "terminal",
             ThemeName::Light => "light",
+            ThemeName::Arctic => "arctic",
+            ThemeName::Graphite => "graphite",
         }
     }
 
-    /// Parses a config slug. Accepts the three canonical values plus the
+    /// Parses a config slug. Accepts the canonical values plus the
     /// `default` alias (design-spec compatibility), which maps to the
     /// interactive product default MSI Dark. Anything else is rejected.
     pub fn from_config_name(value: &str) -> Option<Self> {
@@ -52,6 +66,8 @@ impl ThemeName {
             "msi-dark" | "default" => Some(ThemeName::MsiDark),
             "terminal" => Some(ThemeName::Terminal),
             "light" => Some(ThemeName::Light),
+            "arctic" => Some(ThemeName::Arctic),
+            "graphite" => Some(ThemeName::Graphite),
             _ => None,
         }
     }
@@ -61,15 +77,23 @@ impl ThemeName {
 ///
 /// Roles name meaning, never widgets: READY/LIVE resolve to `success`,
 /// READ-ONLY to `warning`, DEGRADED to `danger`, waiting states to `muted`,
-/// and the active navigation entry to `primary` plus bold.
+/// and the active navigation entry to `primary` plus bold. Dashboard card
+/// titles, telemetry headings, and focus accents resolve to `accent`;
+/// card interiors resolve to `surface`; telemetry meters resolve to
+/// `meter_fill` on `meter_track`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     /// Default terminal background.
     pub background: Color,
+    /// Card interior surface. Dark themes separate cards from the root;
+    /// reset/background themes let borders define cards.
+    pub surface: Color,
     /// Default terminal foreground.
     pub foreground: Color,
     /// Active navigation entry, screen titles, help chrome.
     pub primary: Color,
+    /// Dashboard card titles, telemetry headings, focus accents.
+    pub accent: Color,
     /// Secondary informational labels.
     pub secondary: Color,
     /// Healthy states: READY, LIVE, Supported.
@@ -82,6 +106,10 @@ pub struct Theme {
     pub muted: Color,
     /// Panel and shell borders.
     pub border: Color,
+    /// Telemetry meter fill (approved cool cyan, all themes).
+    pub meter_fill: Color,
+    /// Telemetry meter track (approved dark slate, all themes).
+    pub meter_track: Color,
 }
 
 impl Default for Theme {
@@ -98,36 +126,78 @@ impl Theme {
         match name {
             ThemeName::MsiDark => Self {
                 background: Color::Black,
+                surface: Color::Rgb(17, 19, 24),
                 foreground: Color::White,
                 primary: Color::Red,
+                accent: Color::Rgb(94, 197, 222),
                 secondary: Color::Magenta,
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::LightRed,
                 muted: Color::Gray,
                 border: Color::DarkGray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
+            },
+            ThemeName::Arctic => Self {
+                background: Color::Rgb(8, 15, 25),
+                surface: Color::Rgb(17, 29, 43),
+                foreground: Color::Rgb(224, 235, 244),
+                primary: Color::Rgb(117, 210, 234),
+                accent: Color::Rgb(117, 210, 234),
+                secondary: Color::Rgb(145, 170, 212),
+                success: Color::Green,
+                warning: Color::Yellow,
+                danger: Color::LightRed,
+                muted: Color::Rgb(144, 159, 177),
+                border: Color::Rgb(63, 79, 97),
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
+            },
+            ThemeName::Graphite => Self {
+                background: Color::Rgb(13, 13, 17),
+                surface: Color::Rgb(24, 23, 30),
+                foreground: Color::Rgb(232, 228, 239),
+                primary: Color::Rgb(183, 160, 240),
+                accent: Color::Rgb(183, 160, 240),
+                secondary: Color::Rgb(142, 166, 199),
+                success: Color::Green,
+                warning: Color::Yellow,
+                danger: Color::LightRed,
+                muted: Color::Rgb(155, 150, 165),
+                border: Color::Rgb(73, 69, 83),
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
             },
             ThemeName::Terminal => Self {
                 background: Color::Reset,
+                surface: Color::Reset,
                 foreground: Color::Reset,
                 primary: Color::Cyan,
+                accent: Color::Cyan,
                 secondary: Color::Blue,
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::Red,
                 muted: Color::Gray,
                 border: Color::DarkGray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
             },
             ThemeName::Light => Self {
                 background: Color::White,
+                surface: Color::White,
                 foreground: Color::Black,
                 primary: Color::Blue,
+                accent: Color::Blue,
                 secondary: Color::Magenta,
                 success: Color::Green,
                 warning: Color::Yellow,
                 danger: Color::Red,
                 muted: Color::DarkGray,
                 border: Color::Gray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
             },
         }
     }
@@ -163,6 +233,24 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_roles_cover_surface_accent_and_meters() {
+        use ratatui::style::Color;
+        for name in super::ThemeName::all() {
+            let theme = Theme::for_name(name);
+            // Meter colors are the approved locked pair in every theme.
+            assert_eq!(theme.meter_fill, Color::Rgb(79, 159, 173), "{name:?}");
+            assert_eq!(theme.meter_track, Color::Rgb(34, 50, 56), "{name:?}");
+            let _ = theme.surface;
+            let _ = theme.accent;
+        }
+        // The dark session separates cards from the root background.
+        assert_ne!(
+            Theme::for_name(super::ThemeName::MsiDark).surface,
+            Theme::for_name(super::ThemeName::MsiDark).background
+        );
+    }
+
+    #[test]
     fn default_is_deterministic() {
         assert_eq!(Theme::default(), Theme::default());
     }
@@ -176,14 +264,23 @@ mod tests {
     }
 
     #[test]
-    fn theme_name_has_exactly_three_stable_names() {
+    fn theme_names_preserve_existing_order_and_append_candidates() {
         use super::ThemeName;
-        assert_eq!(ThemeName::all().len(), 3);
+        assert_eq!(ThemeName::all().len(), 5);
         let names: Vec<&str> = ThemeName::all()
             .iter()
             .map(|name| name.display_name())
             .collect();
-        assert_eq!(names, vec!["MSI Dark", "Terminal", "Light"]);
+        assert_eq!(
+            names,
+            vec![
+                "MSI Dark",
+                "Terminal",
+                "Light",
+                "Arctic Midnight",
+                "Graphite Violet"
+            ]
+        );
     }
 
     #[test]

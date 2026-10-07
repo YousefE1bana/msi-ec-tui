@@ -7,9 +7,9 @@
 # aarch64 -> arm64. Anything else is rejected before doing anything.
 #
 # Metadata comes from packaging/deb/control.template with @VERSION@
-# (from Cargo metadata, never duplicated) and @ARCH@ filled in. No
-# Depends line on purpose: the binary links only essential system
-# libraries and MEC treats a missing msi-ec interface as READ-ONLY.
+# (from Cargo metadata, never duplicated) and @ARCH@ filled in.
+# Runtime requirements declare the release glibc floor and libgcc unwind library.
+# MEC treats a missing msi-ec interface as READ-ONLY.
 # No maintainer scripts are created: passive file payload only
 # (/usr/bin/mec plus documentation; nothing under /etc, /sys, /home,
 # and no services, udev rules, or user management).
@@ -60,6 +60,10 @@ chmod 755 "$STAGE/usr/bin/mec"
 cp "$REPO_DIR/README.md" "$REPO_DIR/LICENSE" "$REPO_DIR/SECURITY.md" \
   "$STAGE/usr/share/doc/mec/"
 chmod 644 "$STAGE/usr/share/doc/mec/"*
+cp -R "$REPO_DIR/docs" "$STAGE/usr/share/doc/mec/docs"
+mkdir -p "$STAGE/usr/share/applications" "$STAGE/usr/share/icons/hicolor/scalable/apps"
+install -m644 "$REPO_DIR/packaging/desktop/mec.desktop" "$STAGE/usr/share/applications/mec.desktop"
+install -m644 "$REPO_DIR/packaging/desktop/mec.svg" "$STAGE/usr/share/icons/hicolor/scalable/apps/mec.svg"
 
 mkdir -p "$OUTDIR"
 # --root-owner-group keeps payload ownership neutral for rootless builds.

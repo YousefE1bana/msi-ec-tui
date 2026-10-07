@@ -18,6 +18,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH", default_value = "/")]
     pub sys_root: PathBuf,
 
+    /// Session-only TUI theme override; palette choices remain persistent.
+    #[arg(long, value_parser = parse_theme, value_name = "THEME")]
+    pub theme: Option<crate::tui::theme::ThemeName>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -25,6 +29,8 @@ pub struct Cli {
 /// Available `mec` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Explicitly check the latest stable release (never install it).
+    UpdateCheck,
     /// Inspect hardware compatibility and report diagnostics.
     Doctor {
         /// Print only the privacy-conscious compatibility report
@@ -183,9 +189,30 @@ fn parse_battery_limit(value: &str) -> Result<BatteryThreshold, BatteryLimitPars
     BatteryThreshold::from_end_percent(end).map_err(BatteryLimitParseError::from)
 }
 
+fn parse_theme(value: &str) -> Result<crate::tui::theme::ThemeName, String> {
+    crate::tui::theme::ThemeName::from_config_name(value)
+        .ok_or_else(|| "expected msi-dark, terminal, light, arctic, or graphite".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_theme_overrides_and_explicit_update_command_parse() {
+        for name in ["msi-dark", "terminal", "light", "arctic", "graphite"] {
+            let cli = Cli::try_parse_from(["mec", "--theme", name]).unwrap();
+            assert_eq!(cli.theme.unwrap().config_name(), name);
+            assert!(cli.command.is_none());
+        }
+        assert!(Cli::try_parse_from(["mec", "--theme", "unknown"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(["mec", "update-check"])
+                .unwrap()
+                .command,
+            Some(Command::UpdateCheck)
+        ));
+    }
 
     #[test]
     fn version_flag_parses_and_reports_cargo_package_version() {

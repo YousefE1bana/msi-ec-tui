@@ -24,7 +24,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 
-CI is planned for a later task; it is not configured in this bootstrap.
+CI runs these gates and a release build for pull requests and main. Release artifact validation also runs on manual dispatch; only matching version tags can publish.
 
 ## Ground rules
 
@@ -52,7 +52,7 @@ CI is planned for a later task; it is not configured in this bootstrap.
 ## Reporting issues
 
 For bugs, include your distribution, kernel version, laptop model, and the
-output of `mec doctor --export` (once available), after reviewing it for
+output of `mec doctor --export`, after reviewing it for
 private information.
 
 For security issues, see [SECURITY.md](SECURITY.md) — do not open a public

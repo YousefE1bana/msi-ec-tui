@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{Event, poll, read};
+use crossterm::event::{Event, MouseEvent, poll, read};
 
 use crate::app::AppAction;
 
@@ -17,6 +17,9 @@ use super::input::action_for_key_with_options;
 pub enum TuiEvent {
     /// A key mapped to an application intent.
     Action(AppAction),
+    /// A mouse event; the loop hit-tests it against the last drawn
+    /// viewport. Area-less loops treat it as inert.
+    Mouse(MouseEvent),
     /// The poll timeout elapsed with no terminal input.
     Tick,
     /// The terminal was resized.
@@ -43,6 +46,7 @@ pub fn event_to_tui_event_with_options(polled: Option<Event>, vim_keys: bool) ->
             Some(action) => TuiEvent::Action(action),
             None => TuiEvent::Ignored,
         },
+        Some(Event::Mouse(mouse)) => TuiEvent::Mouse(mouse),
         Some(Event::Resize(width, height)) => TuiEvent::Resize { width, height },
         Some(_) => TuiEvent::Ignored,
     }
@@ -157,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_and_focus_events_become_ignored() {
+    fn mouse_becomes_mouse_event_for_loop_hit_testing() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
         let click = Event::Mouse(MouseEvent {
@@ -166,7 +170,14 @@ mod tests {
             row: 1,
             modifiers: KeyModifiers::empty(),
         });
-        assert_eq!(event_to_tui_event(Some(click)), TuiEvent::Ignored);
+        assert!(matches!(
+            event_to_tui_event(Some(click)),
+            TuiEvent::Mouse(_)
+        ));
+    }
+
+    #[test]
+    fn focus_events_become_ignored() {
         assert_eq!(
             event_to_tui_event(Some(Event::FocusGained)),
             TuiEvent::Ignored

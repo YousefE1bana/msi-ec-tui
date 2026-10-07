@@ -1,23 +1,26 @@
-//! Read-only performance screen: current modes plus capability metadata.
+//! Performance screen in the approved v1.1 card system.
 //!
 //! Current values come from [`LiveHardware::current_snapshot`] only.
 //! Available modes come from injected startup [`Capabilities`]. Control
-//! rows are selectable drafts; Task 4 creates pending data only and never
-//! executes hardware writes.
+//! rows are selectable drafts; confirming creates pending data only and
+//! never executes hardware writes.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::Paragraph;
 
-use crate::app::LiveHardware;
+use crate::app::{AppState, LiveHardware};
 use crate::hardware::{Capabilities, EcBackend};
 
-use crate::tui::controls::control_row_lines;
-use crate::tui::editing::ControlState;
+use crate::tui::controls::control_row_styled;
+use crate::tui::editing::{ControlState, control_rows};
+use crate::tui::shell;
 use crate::tui::theme::Theme;
 use crate::tui::ui::{
-    capability_style, joined_modes, performance_lines, render_panel, render_screen_shell,
-    support_text,
+    capability_style, fan_mode_text, fan_text, joined_modes, on_off_text, performance_lines,
+    shift_mode_text, support_text, temperature_text,
 };
 
 /// Renders current performance state plus available modes and feature
@@ -29,49 +32,280 @@ pub fn render_performance<B: EcBackend>(
     capabilities: &Capabilities,
     controls: &ControlState,
 ) {
-    render_performance_with_theme(frame, area, live, capabilities, controls, &Theme::default());
+    render_performance_with_theme(
+        frame,
+        area,
+        &AppState::default(),
+        live,
+        capabilities,
+        controls,
+        &Theme::default(),
+    );
 }
 
-/// Theme-aware performance renderer behind the Task-5 API.
+/// Theme-aware performance renderer: approved shell plus real state.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_performance_with_theme<B: EcBackend>(
     frame: &mut Frame,
     area: Rect,
+    app: &AppState,
     live: &LiveHardware<B>,
     capabilities: &Capabilities,
     controls: &ControlState,
     theme: &Theme,
 ) {
-    let content = render_screen_shell(frame, area, "Performance", live, theme);
-    let control_rows = control_row_lines(
-        crate::app::Screen::Performance,
-        live.current_snapshot(),
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(theme.base_style()),
+        area,
+    );
+    let (top, workspace, footer) = shell::shell_split(area);
+    shell::render_top_strip(frame, top, live, theme);
+    shell::render_bottom_strip(frame, footer, live, theme);
+    let regions = hit_regions(workspace);
+    if regions.cards.len() != 5 {
+        return;
+    }
+    let focus = app.focused_card();
+    render_control_card(
+        frame,
+        regions.cards[0],
+        live,
         capabilities,
-        live.mode(),
         controls,
+        focus == 0,
         theme,
     );
-    let panels = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(6),
-            Constraint::Length(control_rows.len() as u16 + 2),
-            Constraint::Min(0),
-        ])
-        .split(content);
-    render_panel(
+    render_telemetry_card(frame, regions.cards[1], live, focus == 1, theme);
+    render_current_card(frame, regions.cards[2], live, focus == 2, theme);
+    render_capabilities_card(
         frame,
-        panels[0],
-        " CURRENT ",
-        performance_lines(live.current_snapshot()),
+        regions.cards[3],
+        capabilities,
+        live,
+        focus == 3,
         theme,
     );
-    render_panel(frame, panels[1], " CONTROLS ", control_rows, theme);
-    render_panel(
-        frame,
-        panels[2],
-        " CAPABILITIES ",
-        capability_lines(capabilities, theme),
-        theme,
+    render_activity_card(frame, regions.cards[4], live, focus == 4, theme);
+}
+
+/// Card layout in focus order: control, telemetry, current, capabilities,
+/// activity. Control rows start at the first inner line in selection
+/// order so mouse clicks land on the drawn rows.
+pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
+    let (top, mid, bottom) = shell::vsplit3(workspace, 44, 33);
+    let (tl, tr) = shell::hpair(top, 60);
+    let (ml, mr) = shell::hpair(mid, 50);
+    let cards = vec![tl, tr, ml, mr, bottom];
+    let inner = shell::inset(tl);
+    let rows = (0..control_rows(crate::app::Screen::Performance).len())
+        .map(|i| shell::row_rect(inner, i))
+        .collect();
+    shell::ScreenRegions { cards, rows }
+}
+
+fn render_control_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    capabilities: &Capabilities,
+    controls: &ControlState,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "PERFORMANCE CONTROL", focused, theme);
+    let snapshot = live.current_snapshot();
+    let mode = live.mode();
+    let rows: Vec<Line<'static>> = control_rows(crate::app::Screen::Performance)
+        .iter()
+        .map(|control| {
+            let selected = Some(*control) == controls.selected(crate::app::Screen::Performance);
+            control_row_styled(
+                *control,
+                selected,
+                snapshot,
+                capabilities,
+                mode,
+                controls,
+                theme,
+            )
+        })
+        .collect();
+    let mut lines = rows;
+    lines.extend(crate::tui::controls::editor_footer_lines(controls, theme));
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "Enter edits · ←/→ adjusts · review confirms",
+        Style::default().fg(theme.muted),
+    ));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_telemetry_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "LIVE TELEMETRY", focused, theme);
+    let snapshot = live.current_snapshot();
+    // Preserve all readings before decorative meters on short terminals.
+    if inner.height < 14 {
+        frame.render_widget(
+            Paragraph::new(Text::from(crate::tui::ui::thermals_lines(snapshot)))
+                .style(shell::card_style(theme)),
+            inner,
+        );
+        return;
+    }
+    let bar_w = (inner.width as usize).saturating_sub(2).clamp(8, 48);
+    let cpu = snapshot.and_then(|s| s.cpu_temperature);
+    let gpu = snapshot.and_then(|s| s.gpu_temperature);
+    let cpu_fan = snapshot.and_then(|s| s.cpu_fan);
+    let gpu_fan = snapshot.and_then(|s| s.gpu_fan);
+    let lines = vec![
+        Line::styled("CPU Temperature", Style::default().fg(theme.accent)),
+        Line::styled(
+            temperature_text(cpu),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        shell::bar_line(temp_frac(cpu), bar_w, theme),
+        Line::styled("GPU Temperature", Style::default().fg(theme.accent)),
+        Line::styled(
+            temperature_text(gpu),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        shell::bar_line(temp_frac(gpu), bar_w, theme),
+        Line::from(""),
+        Line::styled("CPU Fan", Style::default().fg(theme.accent)),
+        Line::styled(
+            fan_text(cpu_fan),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        shell::bar_line(fan_frac(cpu_fan), bar_w, theme),
+        Line::styled("GPU Fan", Style::default().fg(theme.accent)),
+        Line::styled(
+            fan_text(gpu_fan),
+            Style::default()
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+        shell::bar_line(fan_frac(gpu_fan), bar_w, theme),
+    ];
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_current_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "CURRENT STATE", focused, theme);
+    let mut lines = performance_lines(live.current_snapshot());
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Access: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            crate::tui::ui::support_mode_text(live.mode()).to_owned(),
+            crate::tui::ui::support_mode_style(live.mode(), theme),
+        ),
+    ]));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_capabilities_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    capabilities: &Capabilities,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "CAPABILITIES", focused, theme);
+    let mut lines = capability_lines(capabilities, theme);
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Telemetry: ", Style::default().fg(theme.muted)),
+        Span::styled(
+            crate::tui::ui::telemetry_state_text(
+                live.is_degraded(),
+                live.current_snapshot().is_some(),
+            )
+            .to_owned(),
+            crate::tui::ui::telemetry_style(
+                live.is_degraded(),
+                live.current_snapshot().is_some(),
+                theme,
+            ),
+        ),
+    ]));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
+    );
+}
+
+fn render_activity_card<B: EcBackend>(
+    frame: &mut Frame,
+    area: Rect,
+    live: &LiveHardware<B>,
+    focused: bool,
+    theme: &Theme,
+) {
+    let inner = shell::card(frame, area, "ACTIVITY", focused, theme);
+    let snapshot = live.current_snapshot();
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Shift current: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                shift_mode_text(snapshot.and_then(|s| s.shift_mode.as_ref())),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled("   Fan current: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                fan_mode_text(snapshot.and_then(|s| s.fan_mode.as_ref())),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Boost: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                on_off_text(snapshot.and_then(|s| s.cooler_boost)),
+                Style::default().fg(theme.foreground),
+            ),
+            Span::styled("   Super: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                on_off_text(snapshot.and_then(|s| s.super_battery)),
+                Style::default().fg(theme.foreground),
+            ),
+        ]),
+    ];
+    for row in crate::tui::history::temperature_summary_lines(live.history()) {
+        lines.push(Line::styled(row, Style::default().fg(theme.muted)));
+    }
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
+        inner,
     );
 }
 
@@ -99,17 +333,25 @@ pub(crate) fn capability_lines(capabilities: &Capabilities, theme: &Theme) -> Ve
     ]
 }
 
+fn temp_frac(value: Option<crate::hardware::TemperatureCelsius>) -> f64 {
+    value.map(|v| f64::from(v.get()) / 100.0).unwrap_or(0.0)
+}
+
+fn fan_frac(value: Option<crate::hardware::FanPercent>) -> f64 {
+    value.map(|v| f64::from(v.get()) / 100.0).unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::hardware::{FanMode, ShiftMode, SupportMode};
 
     use super::super::support::{full_capabilities, healthy_snapshot, live_for, screen_text};
-    use super::render_performance;
+    use super::{hit_regions, render_performance};
 
     fn text() -> String {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
-        screen_text(100, 30, |frame| {
+        screen_text(160, 50, |frame| {
             render_performance(
                 frame,
                 frame.area(),
@@ -118,6 +360,22 @@ mod tests {
                 &crate::tui::editing::ControlState::default(),
             );
         })
+    }
+
+    #[test]
+    fn renders_shell_and_card_headings() {
+        let text = text();
+        for heading in [
+            "PERFORMANCE CONTROL",
+            "LIVE TELEMETRY",
+            "CURRENT STATE",
+            "CAPABILITIES",
+            "ACTIVITY",
+        ] {
+            assert!(text.contains(heading), "{heading:?} missing");
+        }
+        assert!(text.contains(" MEC "));
+        assert!(text.contains("Quit"));
     }
 
     #[test]
@@ -173,7 +431,7 @@ mod tests {
         let mut capabilities = full_capabilities();
         capabilities.fan_modes = Vec::new();
         capabilities.shift_modes = Vec::new();
-        let text = screen_text(100, 30, |frame| {
+        let text = screen_text(160, 50, |frame| {
             render_performance(
                 frame,
                 frame.area(),
@@ -202,7 +460,7 @@ mod tests {
         let mut capabilities = full_capabilities();
         capabilities.shift_modes = vec![ShiftMode::try_from("Turbo_PLUS").unwrap()];
         capabilities.fan_modes = vec![FanMode::try_from("Whisper 2.0").unwrap()];
-        let text = screen_text(100, 30, |frame| {
+        let text = screen_text(160, 50, |frame| {
             render_performance(
                 frame,
                 frame.area(),
@@ -223,7 +481,7 @@ mod tests {
         use crate::tui::screens::support::{healthy_snapshot, live_for};
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], mode, 1);
         let capabilities = capabilities.clone();
-        screen_text(100, 30, |frame| {
+        screen_text(160, 50, |frame| {
             render_performance(frame, frame.area(), &live, &capabilities, controls);
         })
     }
@@ -235,8 +493,9 @@ mod tests {
             &crate::tui::editing::ControlState::default(),
             SupportMode::Ready,
         );
-        assert!(text.contains("CONTROLS"));
-        assert!(text.contains("> Shift Mode"));
+        assert!(text.contains("PERFORMANCE CONTROL"));
+        assert!(text.contains("▸ "));
+        assert!(text.contains("Shift Mode"));
     }
 
     #[test]
@@ -266,7 +525,7 @@ mod tests {
         use crate::hardware::HardwareSnapshot;
         let (live, _) = live_for(vec![Ok(HardwareSnapshot::default())], SupportMode::Ready, 1);
         let caps = full_capabilities();
-        let text = screen_text(100, 30, |frame| {
+        let text = screen_text(160, 50, |frame| {
             render_performance(
                 frame,
                 frame.area(),
@@ -300,6 +559,13 @@ mod tests {
     }
 
     #[test]
+    fn hit_regions_match_drawn_control_rows() {
+        let regions = hit_regions(ratatui::layout::Rect::new(0, 0, 160, 48));
+        assert_eq!(regions.cards.len(), 5);
+        assert_eq!(regions.rows.len(), 4);
+    }
+
+    #[test]
     fn zero_area_does_not_panic() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -319,5 +585,19 @@ mod tests {
                 );
             })
             .expect("zero-area performance draws");
+    }
+    #[test]
+    fn sampled_state_never_claims_execution_verification() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let text = screen_text(160, 50, |frame| {
+            render_performance(
+                frame,
+                frame.area(),
+                &live,
+                &full_capabilities(),
+                &crate::tui::editing::ControlState::default(),
+            )
+        });
+        assert!(!text.contains("verified"));
     }
 }

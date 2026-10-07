@@ -5,6 +5,7 @@
 //! The dispatcher owns the shared navigation chrome and renders the help
 //! overlay last so it sits above the active screen.
 
+pub(crate) mod about;
 pub(crate) mod battery;
 pub(crate) mod dashboard;
 pub(crate) mod devices;
@@ -12,6 +13,7 @@ pub(crate) mod diagnostics;
 pub(crate) mod fans;
 pub(crate) mod performance;
 pub(crate) mod profiles;
+pub(crate) mod settings;
 #[cfg(test)]
 pub(crate) mod support;
 
@@ -22,12 +24,11 @@ pub use diagnostics::render_diagnostics;
 pub use fans::render_fans;
 pub use performance::render_performance;
 pub use profiles::render_profiles;
+pub use settings::render_settings;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::layout::Rect;
+use ratatui::widgets::Block;
 
 use crate::app::{AppState, LiveHardware, Screen};
 use crate::hardware::{Capabilities, EcBackend};
@@ -40,6 +41,8 @@ use crate::tui::ui::render_compact;
 /// Renders the screen selected by `app` with the default theme.
 ///
 /// Help visibility is honored: a visible overlay renders above the screen.
+/// Test path: settings present with defaults; production passes the real
+/// config through [`render_screen_with_theme`].
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen<B: EcBackend>(
     frame: &mut Frame,
@@ -67,6 +70,7 @@ pub fn render_screen<B: EcBackend>(
         notifications,
         notifications_open,
         &Theme::default(),
+        &crate::config::AppConfig::default(),
     );
 }
 
@@ -74,8 +78,8 @@ pub fn render_screen<B: EcBackend>(
 ///
 /// Layering is deterministic: active/compact screen at the bottom, then the
 /// result notice, then the command palette, then the notification history,
-/// then the modal confirmation, then help on top. Tiny skips overlays
-/// and stays a safe fallback.
+/// then the modal confirmation, then help on top. Tiny retains pending
+/// confirmation safety actions while skipping utility overlays.
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_theme<B: EcBackend>(
     frame: &mut Frame,
@@ -90,47 +94,51 @@ pub fn render_screen_with_theme<B: EcBackend>(
     notifications: &crate::tui::notifications::NotificationCenter,
     notifications_open: bool,
     theme: &Theme,
+    config: &crate::config::AppConfig,
 ) {
     // Base surface: paint the full frame area with the theme background
-    // before navigation/screens so MSI Dark stays dark, Light stays light,
+    // before screens so MSI Dark stays dark, Light stays light,
     // and Terminal stays Reset. Zero-area safe via the empty guard.
     if !area.is_empty() {
         frame.render_widget(Block::default().style(theme.base_style()), area);
     }
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
-    render_navigation(frame, rows[0], app, theme);
+    // Every migrated screen owns the approved v1.1 shell (top strip,
+    // cards, footer). The legacy navigation row is gone: digits, palette,
+    // and the dashboard menu drive the same `AppState` screens.
     let tier = layout_tier(area);
     match tier {
         LayoutTier::Full => {
             render_active_screen(
                 frame,
-                rows[1],
+                area,
                 app,
                 live,
                 capabilities,
                 catalog,
                 selection,
                 controls,
+                config,
                 theme,
             );
         }
         LayoutTier::Compact => {
             render_compact_screen(
                 frame,
-                rows[1],
+                area,
                 app,
                 live,
                 capabilities,
                 catalog,
                 selection,
                 controls,
+                config,
                 theme,
             );
         }
-        LayoutTier::Tiny => render_compact(frame, rows[1], theme),
+        LayoutTier::Tiny => render_compact(frame, area, theme),
+    }
+    if app.about_visible() {
+        about::render(frame, area, app, live, theme);
     }
     if !matches!(tier, LayoutTier::Tiny) {
         render_overlays(
@@ -142,6 +150,19 @@ pub fn render_screen_with_theme<B: EcBackend>(
             palette,
             notifications,
             notifications_open,
+            theme,
+        );
+    }
+    if matches!(tier, LayoutTier::Tiny)
+        && let Some(pending) = controls.pending()
+    {
+        crate::tui::confirmation::render_confirmation(
+            frame,
+            area,
+            pending,
+            live.current_snapshot(),
+            live.mode(),
+            capabilities,
             theme,
         );
     }
@@ -162,16 +183,18 @@ fn render_active_screen<B: EcBackend>(
     catalog: &ProfileCatalog,
     selection: &crate::app::ProfileSelection,
     controls: &crate::tui::editing::ControlState,
+    config: &crate::config::AppConfig,
     theme: &Theme,
 ) {
     match app.current_screen() {
         Screen::Dashboard => {
-            dashboard::render_dashboard_with_theme(frame, area, live, theme);
+            dashboard::render_dashboard_with_theme(frame, area, app, live, theme);
         }
         Screen::Performance => {
             performance::render_performance_with_theme(
                 frame,
                 area,
+                app,
                 live,
                 capabilities,
                 controls,
@@ -179,18 +202,35 @@ fn render_active_screen<B: EcBackend>(
             );
         }
         Screen::Fans => {
-            fans::render_fans_with_theme(frame, area, live, capabilities, controls, theme);
+            fans::render_fans_with_theme(frame, area, app, live, capabilities, controls, theme);
         }
         Screen::Battery => {
-            battery::render_battery_with_theme(frame, area, live, capabilities, controls, theme);
+            battery::render_battery_with_theme(
+                frame,
+                area,
+                app,
+                live,
+                capabilities,
+                controls,
+                theme,
+            );
         }
         Screen::Devices => {
-            devices::render_devices_with_theme(frame, area, live, capabilities, controls, theme);
+            devices::render_devices_with_theme(
+                frame,
+                area,
+                app,
+                live,
+                capabilities,
+                controls,
+                theme,
+            );
         }
         Screen::Profiles => {
             profiles::render_profiles_with_theme(
                 frame,
                 area,
+                app,
                 live,
                 capabilities,
                 catalog,
@@ -199,7 +239,10 @@ fn render_active_screen<B: EcBackend>(
             );
         }
         Screen::Diagnostics => {
-            diagnostics::render_diagnostics_with_theme(frame, area, live, capabilities, theme);
+            diagnostics::render_diagnostics_with_theme(frame, area, app, live, capabilities, theme);
+        }
+        Screen::Settings => {
+            settings::render_settings_with_theme(frame, area, app, live, config, theme);
         }
     }
 }
@@ -242,82 +285,9 @@ fn render_overlays<B: EcBackend>(
     }
 }
 
-/// Shared navigation row in canonical [`Screen::ALL`] order. Labels shrink
-/// with the terminal: full names when they fit, short names below that,
-/// and the current screen alone on narrow displays. The active entry uses
-/// the primary role plus bold; the rest stay muted.
-fn render_navigation(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
-    let full: Vec<String> = Screen::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, screen)| format!("{} {}", index + 1, screen.title()))
-        .collect();
-    let short: Vec<String> = Screen::ALL
-        .iter()
-        .enumerate()
-        .map(|(index, screen)| format!("{} {}", index + 1, short_title(*screen)))
-        .collect();
-    let line = if area.width as usize >= full.join("  ").len() {
-        navigation_line(&full, app, theme)
-    } else if area.width as usize >= short.join("  ").len() {
-        navigation_line(&short, app, theme)
-    } else {
-        narrow_navigation_line(app, theme)
-    };
-    frame.render_widget(Paragraph::new(line).style(theme.base_style()), area);
-}
-
-/// Abbreviated navigation labels for medium terminals.
-fn short_title(screen: Screen) -> &'static str {
-    match screen {
-        Screen::Dashboard => "Dash",
-        Screen::Performance => "Perf",
-        Screen::Fans => "Fans",
-        Screen::Battery => "Batt",
-        Screen::Devices => "Dev",
-        Screen::Profiles => "Prof",
-        Screen::Diagnostics => "Diag",
-    }
-}
-
-fn navigation_entry_style(active: bool, theme: &Theme) -> Style {
-    if active {
-        Style::default()
-            .fg(theme.primary)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.muted)
-    }
-}
-
-fn navigation_line(entries: &[String], app: &AppState, theme: &Theme) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, screen) in Screen::ALL.iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(Span::styled(
-            entries[index].clone(),
-            navigation_entry_style(*screen == app.current_screen(), theme),
-        ));
-    }
-    Line::from(spans)
-}
-
-fn narrow_navigation_line(app: &AppState, theme: &Theme) -> Line<'static> {
-    let position = Screen::ALL
-        .iter()
-        .position(|screen| *screen == app.current_screen())
-        .expect("current screen is a member of ALL");
-    Line::from(vec![
-        Span::styled(
-            format!("{}/7 {}", position + 1, app.current_screen().title()),
-            navigation_entry_style(true, theme),
-        ),
-        Span::styled(" • ? Help • Q Quit", navigation_entry_style(false, theme)),
-    ])
-}
-
+/// The legacy navigation row is fully removed: every migrated screen
+/// owns the approved v1.1 shell (top strip, cards, footer) and digits,
+/// palette, and the dashboard menu drive the same `AppState` screens.
 #[cfg(test)]
 mod tests {
     use ratatui::layout::Rect;
@@ -379,7 +349,26 @@ mod tests {
 
     #[test]
     fn battery_dispatch_renders_battery() {
-        assert!(dispatched(Screen::Battery).contains("Threshold Control"));
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Battery);
+        let text = screen_text(160, 50, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
+        });
+        assert!(text.contains("Threshold Control"));
+        assert!(text.contains("CHARGE LIMIT"));
     }
 
     #[test]
@@ -394,11 +383,29 @@ mod tests {
 
     #[test]
     fn profiles_dispatch_renders_profiles() {
-        let text = dispatched(Screen::Profiles);
-        assert!(text.contains("PROFILE LIST"));
-        assert!(text.contains("DETAILS / PREVIEW"));
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Profiles);
+        let text = screen_text(160, 50, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
+        });
+        assert!(text.contains("PROFILES"));
+        assert!(text.contains("PROFILE DETAILS"));
         assert!(text.contains("(none)"));
-        assert!(text.contains("6 Profiles"));
+        assert!(text.contains("Balanced"));
+        assert!(text.contains("CHANGE SUMMARY"));
     }
 
     #[test]
@@ -433,58 +440,96 @@ mod tests {
             );
         });
         assert!(text.contains("Dispatch Work"));
-        assert!(text.contains("Valid"));
+        assert!(text.contains("custom"));
     }
 
     #[test]
-    fn navigation_renders_all_seven_screen_names() {
-        let text = dispatched(Screen::Dashboard);
-        for name in [
-            "Dashboard",
-            "Performance",
-            "Fans",
-            "Battery",
-            "Devices",
-            "Profiles",
-            "Diagnostics",
-        ] {
-            assert!(text.contains(name), "{name:?} missing from navigation");
+    fn no_legacy_navigation_on_any_screen() {
+        // P2 regression: every migrated screen owns the v1.1 shell, so
+        // the legacy "1 Dashboard ..." row renders nowhere. The first
+        // application row is always the MEC top strip.
+        for screen in Screen::ALL {
+            let text = screen_frame(screen, 100, 30);
+            let first = text.lines().next().unwrap_or_default();
+            assert!(
+                first.starts_with(" MEC "),
+                "{screen:?}: first row must be the top strip, got {first:?}"
+            );
+            assert!(
+                !text.contains("1 Dashboard"),
+                "{screen:?}: legacy navigation row must stay hidden"
+            );
         }
     }
 
     #[test]
-    fn navigation_renders_digits() {
-        let text = dispatched(Screen::Dashboard);
-        for digit in ["1", "2", "3", "4", "5", "6", "7"] {
-            assert!(text.contains(digit), "{digit:?} missing from navigation");
-        }
-    }
-
-    #[test]
-    fn navigation_follows_canonical_order() {
-        let text = dispatched(Screen::Dashboard);
+    fn dashboard_menu_keeps_digit_shortcuts_in_order() {
+        // Numeric navigation semantics survive the chrome removal: the
+        // dashboard menu carries [1]..[9] in canonical screen order.
+        let text = dashboard_frame(160, 50);
         let mut positions = Vec::new();
-        for name in [
-            "1 Dashboard",
-            "2 Performance",
-            "3 Fans",
-            "4 Battery",
-            "5 Devices",
-            "6 Profiles",
-            "7 Diagnostics",
+        for digit in [
+            "[1]", "[2]", "[3]", "[4]", "[5]", "[6]", "[7]", "[8]", "[9]",
         ] {
-            positions.push(text.find(name).expect("{name:?} missing"));
+            positions.push(text.find(digit).expect("{digit:?} missing"));
         }
         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
+    /// One screen frame at a fixed size for chrome-level assertions.
+    fn screen_frame(screen: Screen, width: u16, height: u16) -> String {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(screen);
+        screen_text(width, height, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
+        })
+    }
+
+    /// Dashboard frame at a fixed size for chrome-level assertions.
+    fn dashboard_frame(width: u16, height: u16) -> String {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let capabilities = full_capabilities();
+        let app = app_on(Screen::Dashboard);
+        screen_text(width, height, |frame| {
+            render_screen(
+                frame,
+                frame.area(),
+                &app,
+                &live,
+                &capabilities,
+                &crate::tui::ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+                &crate::tui::editing::ControlState::default(),
+                &crate::tui::palette::CommandPalette::default(),
+                &crate::tui::notifications::NotificationCenter::new(),
+                false,
+            );
+        })
+    }
+
     #[test]
-    fn active_dashboard_entry_uses_primary_style() {
+    fn dashboard_menu_marks_active_screen() {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(Screen::Dashboard);
         let theme = Theme::default();
-        let (foreground, modifier) = first_cell_style(100, 30, "1 Dashboard", |frame| {
+        // Trailing padding keeps the needle inside the menu name span:
+        // the top strip ("Dashboard Test Fixture") and the footer
+        // ("Current: ...") never carry it.
+        let (foreground, modifier) = first_cell_style(160, 50, "ashboard   ", |frame| {
             render_screen_with_theme(
                 frame,
                 frame.area(),
@@ -498,102 +543,26 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
-        .expect("navigation entry present");
-        assert_eq!(foreground, theme.primary);
+        .expect("menu entry present");
+        // The approved menu highlights the active screen in the primary
+        // text role plus bold.
+        assert_eq!(foreground, theme.foreground);
         assert!(modifier.contains(Modifier::BOLD));
     }
 
     #[test]
-    fn goto_fans_marks_fans_entry_active() {
-        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        let capabilities = full_capabilities();
-        let app = app_on(Screen::Fans);
-        let theme = Theme::default();
-        let (foreground, _) = first_cell_style(100, 30, "3 Fans", |frame| {
-            render_screen_with_theme(
-                frame,
-                frame.area(),
-                &app,
-                &live,
-                &capabilities,
-                &crate::tui::ProfileCatalog::empty(),
-                &crate::app::ProfileSelection::default(),
-                &crate::tui::editing::ControlState::default(),
-                &crate::tui::palette::CommandPalette::default(),
-                &crate::tui::notifications::NotificationCenter::new(),
-                false,
-                &theme,
-            );
-        })
-        .expect("fans entry present");
-        assert_eq!(foreground, theme.primary);
-        let (dashboard_foreground, _) = first_cell_style(100, 30, "1 Dashboard", |frame| {
-            render_screen_with_theme(
-                frame,
-                frame.area(),
-                &app,
-                &live,
-                &capabilities,
-                &crate::tui::ProfileCatalog::empty(),
-                &crate::app::ProfileSelection::default(),
-                &crate::tui::editing::ControlState::default(),
-                &crate::tui::palette::CommandPalette::default(),
-                &crate::tui::notifications::NotificationCenter::new(),
-                false,
-                &theme,
-            );
-        })
-        .expect("dashboard entry present");
-        assert_eq!(dashboard_foreground, theme.muted);
-    }
-
-    #[test]
-    fn goto_profiles_marks_profiles_entry_active() {
-        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        let capabilities = full_capabilities();
-        let app = app_on(Screen::Profiles);
-        let theme = Theme::default();
-        let (foreground, modifier) = first_cell_style(100, 30, "6 Profiles", |frame| {
-            render_screen_with_theme(
-                frame,
-                frame.area(),
-                &app,
-                &live,
-                &capabilities,
-                &crate::tui::ProfileCatalog::empty(),
-                &crate::app::ProfileSelection::default(),
-                &crate::tui::editing::ControlState::default(),
-                &crate::tui::palette::CommandPalette::default(),
-                &crate::tui::notifications::NotificationCenter::new(),
-                false,
-                &theme,
-            );
-        })
-        .expect("profiles entry present");
-        assert_eq!(foreground, theme.primary);
-        assert!(modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn only_one_entry_is_styled_active() {
-        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
-        let capabilities = full_capabilities();
-        let app = app_on(Screen::Battery);
-        let theme = Theme::default();
-        let mut active = 0;
-        for label in [
-            "1 Dashboard",
-            "2 Performance",
-            "3 Fans",
-            "4 Battery",
-            "5 Devices",
-            "6 Profiles",
-            "7 Diagnostics",
-        ] {
-            let (foreground, _) = first_cell_style(100, 30, label, |frame| {
-                render_screen_with_theme(
+    fn secondary_screens_share_top_strip_state() {
+        // Migrated secondary screens carry the same real top strip as
+        // the dashboard: device, verdict, firmware, telemetry.
+        for screen in [Screen::Fans, Screen::Profiles, Screen::Battery] {
+            let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+            let capabilities = full_capabilities();
+            let app = app_on(screen);
+            let text = screen_text(100, 30, |frame| {
+                render_screen(
                     frame,
                     frame.area(),
                     &app,
@@ -605,15 +574,12 @@ mod tests {
                     &crate::tui::palette::CommandPalette::default(),
                     &crate::tui::notifications::NotificationCenter::new(),
                     false,
-                    &theme,
                 );
-            })
-            .expect("entry present");
-            if foreground == theme.primary {
-                active += 1;
-            }
+            });
+            assert!(text.contains(" MEC "), "{screen:?}");
+            assert!(text.contains("READY"), "{screen:?}");
+            assert!(text.contains("LIVE"), "{screen:?}");
         }
-        assert_eq!(active, 1);
     }
 
     #[test]
@@ -636,6 +602,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("READY present");
@@ -666,6 +633,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("READ-ONLY present");
@@ -692,6 +660,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("LIVE present");
@@ -718,6 +687,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("WAITING present");
@@ -748,6 +718,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("DEGRADED present");
@@ -779,14 +750,16 @@ mod tests {
 
     #[test]
     fn custom_theme_drives_active_styling() {
+        // A custom accent flows into the dashboard menu digits on the
+        // migrated shell.
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
-        let app = app_on(Screen::Devices);
+        let app = app_on(Screen::Dashboard);
         let theme = Theme {
-            primary: ratatui::style::Color::Red,
+            accent: ratatui::style::Color::Red,
             ..Theme::default()
         };
-        let (foreground, _) = first_cell_style(100, 30, "5 Devices", |frame| {
+        let (foreground, _) = first_cell_style(160, 50, "[5]", |frame| {
             render_screen_with_theme(
                 frame,
                 frame.area(),
@@ -800,6 +773,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &theme,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("devices entry present");
@@ -921,9 +895,16 @@ mod tests {
                 false,
             );
         });
-        assert!(text.contains("Fans"));
+        assert!(text.contains("FAN CONTROL"));
+        assert!(text.contains("REVIEW CHANGES"));
         assert!(text.contains("Confirm Hardware Change"));
-        assert!(text.contains("Requested: Fan Mode:"));
+        assert!(text.contains("SETTING"));
+        assert!(text.contains("REQUESTED"));
+        assert!(text.contains("Fan Mode"));
+        assert!(text.contains("auto"));
+        assert!(text.contains("Nothing has been applied yet."));
+        assert!(text.contains("Cancel"));
+        assert!(text.contains("Apply"));
         assert!(!text.contains("RPM"));
     }
 
@@ -964,9 +945,11 @@ mod tests {
                 false,
             );
         });
-        assert!(text.contains("Profiles"));
+        assert!(text.contains("PROFILES"));
+        assert!(text.contains("REVIEW CHANGES"));
         assert!(text.contains("Confirm Profile Apply"));
         assert!(text.contains("Balanced"));
+        assert!(text.contains("Nothing has been applied yet."));
     }
 
     #[test]
@@ -1034,7 +1017,9 @@ mod tests {
                 false,
             );
         });
-        assert!(!text.is_empty());
+        assert!(text.contains("Not applied"));
+        assert!(text.contains("Esc Cancel"));
+        assert!(text.contains("Enter Apply"));
     }
 
     #[test]
@@ -1343,6 +1328,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 theme,
+                &crate::config::AppConfig::default(),
             );
         })
     }
@@ -1351,11 +1337,13 @@ mod tests {
         screen: Screen,
         theme: &Theme,
         needle: &str,
+        width: u16,
+        height: u16,
     ) -> Option<(ratatui::style::Color, Modifier)> {
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
         let app = app_on(screen);
-        first_cell_style(100, 30, needle, |frame| {
+        first_cell_style(width, height, needle, |frame| {
             render_screen_with_theme(
                 frame,
                 frame.area(),
@@ -1369,6 +1357,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 theme,
+                &crate::config::AppConfig::default(),
             );
         })
     }
@@ -1379,10 +1368,12 @@ mod tests {
         use ratatui::style::Color;
         let light = Theme::for_name(ThemeName::Light);
         assert_eq!(light.primary, Color::Blue);
-        let (foreground, modifier) = themed_style(Screen::Dashboard, &light, "1 Dashboard")
-            .expect("navigation entry present");
+        // The approved menu digits use the accent role, which the Light
+        // theme maps to Blue: the session theme flows into navigation.
+        // Full width keeps every menu row visible.
+        let (foreground, _) =
+            themed_style(Screen::Dashboard, &light, "[1]", 160, 50).expect("menu digit present");
         assert_eq!(foreground, Color::Blue);
-        assert!(modifier.contains(Modifier::BOLD));
         // Default terminal theme differs, proving the session theme flows.
         assert_ne!(Theme::default().primary, Color::Blue);
     }
@@ -1414,6 +1405,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &light,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("mode present");
@@ -1448,6 +1440,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &dark,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("telemetry state present");
@@ -1458,7 +1451,6 @@ mod tests {
     #[test]
     fn confirmation_uses_current_theme() {
         use crate::tui::theme::{Theme, ThemeName};
-        use ratatui::style::Color;
         let dark = Theme::for_name(ThemeName::MsiDark);
         let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
         let capabilities = full_capabilities();
@@ -1471,7 +1463,7 @@ mod tests {
             live.mode(),
         ));
         assert!(controls.confirm(live.mode(), &capabilities));
-        let (foreground, _) = first_cell_style(100, 30, "Confirm Hardware Change", |frame| {
+        let (foreground, _) = first_cell_style(100, 30, "REVIEW CHANGES", |frame| {
             render_screen_with_theme(
                 frame,
                 frame.area(),
@@ -1485,10 +1477,11 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &dark,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("confirmation present");
-        assert_eq!(foreground, Color::Red);
+        assert_eq!(foreground, dark.accent);
     }
 
     #[test]
@@ -1515,6 +1508,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &light,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("palette selection present");
@@ -1547,6 +1541,7 @@ mod tests {
                 &center,
                 true,
                 &light,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("notifications title present");
@@ -1577,6 +1572,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &light,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("help present");
@@ -1607,6 +1603,7 @@ mod tests {
                 &crate::tui::notifications::NotificationCenter::new(),
                 false,
                 &light,
+                &crate::config::AppConfig::default(),
             );
         })
         .expect("compact header present");
@@ -1641,6 +1638,7 @@ mod tests {
                     &crate::tui::notifications::NotificationCenter::new(),
                     false,
                     &light,
+                    &crate::config::AppConfig::default(),
                 );
             })
             .expect("zero-area themed dispatch draws");
@@ -1708,10 +1706,12 @@ mod tests {
             false,
         );
         // Confirmation painted last over the shared center region: its
-        // title and inner request line survive instead of being covered
-        // by palette rows.
+        // title and review rows survive instead of being covered by
+        // palette rows.
         assert!(text.contains("Confirm Hardware Change"));
-        assert!(text.contains("Requested: Fan Mode:"));
+        assert!(text.contains("REVIEW CHANGES"));
+        assert!(text.contains("Fan Mode"));
+        assert!(text.contains("auto"));
     }
 
     #[test]
@@ -1735,7 +1735,8 @@ mod tests {
             true,
         );
         assert!(text.contains("Confirm Hardware Change"));
-        assert!(text.contains("Requested: Fan Mode:"));
+        assert!(text.contains("REVIEW CHANGES"));
+        assert!(text.contains("Fan Mode"));
     }
 
     #[test]
@@ -1794,6 +1795,7 @@ mod tests {
                 notifications,
                 notifications_open,
                 theme,
+                &crate::config::AppConfig::default(),
             );
         })
     }
@@ -1826,6 +1828,7 @@ mod tests {
                     &crate::tui::notifications::NotificationCenter::new(),
                     false,
                     theme,
+                    &crate::config::AppConfig::default(),
                 );
             },
             |buffer| buffer[(x, y)].bg,
@@ -1853,7 +1856,9 @@ mod tests {
         )
         .expect("body text present");
         assert_eq!(fg, Color::White);
-        assert_eq!(bg, Color::Black);
+        // Dashboard card interiors use the surface role (charcoal on the
+        // dark session); the root background still owns untouched cells.
+        assert_eq!(bg, dark.surface);
         // Tiny fallback leaves most cells untouched: base fill owns them.
         assert_eq!(empty_cell_bg(20, 8, 19, 7, &dark), Color::Black);
     }
@@ -1973,7 +1978,7 @@ mod tests {
         // Confirmation interior.
         let controls = pending_command_controls(&live, &capabilities);
         let (_, bg) = layered_themed_colors(
-            "Requested:",
+            "REQUESTED",
             &app,
             &live,
             &capabilities,
@@ -2029,7 +2034,7 @@ mod tests {
             &dark,
         )
         .expect("palette row present");
-        assert_eq!(bg, Color::Black);
+        assert_eq!(bg, dark.surface);
         let mut help_app = app_on(Screen::Dashboard);
         help_app.apply(AppAction::ShowHelp);
         let (_, bg) = layered_themed_colors(
@@ -2086,7 +2091,8 @@ mod tests {
             &after,
         )
         .expect("body present");
-        assert_eq!(bg_before, Color::Black);
+        // Card interiors repaint with the destination surface role.
+        assert_eq!(bg_before, before.surface);
         assert_eq!(bg_after, Color::White);
     }
 
@@ -2133,5 +2139,120 @@ mod tests {
         )
         .expect("failure notice present");
         assert_eq!(fg, Color::Red);
+    }
+    #[test]
+    fn selected_control_and_draft_survive_required_sizes() {
+        let snapshot = healthy_snapshot();
+        let mut capabilities = full_capabilities();
+        capabilities.super_battery = true;
+        for (width, height) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+            let (live, _) = live_for(vec![Ok(snapshot.clone())], SupportMode::Ready, 1);
+            let app = app_on(Screen::Performance);
+            let mut controls = crate::tui::editing::ControlState::default();
+            controls.select_index(Screen::Performance, 3);
+            assert!(controls.begin_edit(
+                Screen::Performance,
+                Some(&snapshot),
+                &capabilities,
+                live.mode()
+            ));
+            controls.adjust(&capabilities, 1);
+            let text = screen_text(width, height, |frame| {
+                render_screen(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &controls,
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
+                )
+            });
+            assert!(text.contains("▸ Super Battery"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("Editing: Super Battery: On"),
+                "{width}x{height}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_fixtures_render_truthfully_at_required_sizes() {
+        use crate::hardware::{LinuxSysfsReader, SystemPaths};
+        for fixture in ["gf63", "partial-device", "broken-sysfs"] {
+            let paths = SystemPaths::new(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(fixture),
+            );
+            let mut app = crate::tui::prepare_tui(paths, LinuxSysfsReader).unwrap();
+            app.refresh();
+            for (screen, heading) in [
+                (Screen::Performance, "PERFORMANCE CONTROL"),
+                (Screen::Fans, "FAN CONTROL"),
+                (Screen::Battery, "BATTERY STATUS"),
+                (Screen::Devices, "DEVICES"),
+                (Screen::Profiles, "PROFILES"),
+                (Screen::Diagnostics, "SYSTEM"),
+                (Screen::Settings, "INTERFACE"),
+            ] {
+                app.handle_action(AppAction::GoTo(screen));
+                for (w, h) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+                    let text = screen_text(w, h, |frame| {
+                        render_screen_with_theme(
+                            frame,
+                            frame.area(),
+                            app.state(),
+                            app.live(),
+                            app.capabilities(),
+                            app.profile_catalog(),
+                            app.profile_selection(),
+                            app.controls(),
+                            app.palette(),
+                            app.notifications(),
+                            app.notifications_open(),
+                            &app.theme(),
+                            app.config(),
+                        )
+                    });
+                    assert!(
+                        text.contains(heading),
+                        "{fixture} {screen:?} {w}x{h}: {text}"
+                    );
+                    assert!(!text.contains("1 Dashboard"));
+                    assert!(!text.contains("RPM"));
+                    if fixture == "broken-sysfs" {
+                        assert!(text.contains("READ-ONLY"));
+                    }
+                    if fixture == "partial-device"
+                        && matches!(
+                            screen,
+                            Screen::Performance | Screen::Fans | Screen::Battery | Screen::Devices
+                        )
+                    {
+                        assert!(text.contains("N/A") || text.contains("unknown"));
+                    }
+                    if fixture == "gf63" {
+                        for value in match screen {
+                            Screen::Performance => vec!["comfort", "auto", "63°C", "42%"],
+                            Screen::Fans => vec!["42%", "31%", "63°C", "51°C"],
+                            Screen::Battery => vec!["77%", "Charging", "Connected", "70%", "80%"],
+                            Screen::Devices => vec!["Webcam", "On", "Level 2"],
+                            Screen::Diagnostics => {
+                                vec!["MSI hardware: PASS", "msi-ec interface: PASS"]
+                            }
+                            Screen::Settings => vec!["MSI Dark", "1000 ms", "Vim keys"],
+                            _ => vec![],
+                        } {
+                            assert!(text.contains(value), "{screen:?} {w}x{h}: {value}: {text}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

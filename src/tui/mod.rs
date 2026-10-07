@@ -12,18 +12,21 @@ pub mod executor;
 mod help;
 mod history;
 mod input;
+mod mouse;
 mod notifications;
 mod palette;
 mod profile_catalog;
 mod responsive;
 mod runtime;
 pub mod screens;
+mod shell;
 mod terminal;
 pub mod theme;
 pub mod ui;
 
 pub use app::{
-    TuiApp, prepare_tui, prepare_tui_with_profile_store, run_tui, run_tui_loop, should_launch_tui,
+    TuiApp, prepare_tui, prepare_tui_with_profile_store, run_tui, run_tui_loop, run_tui_with_theme,
+    should_launch_tui,
 };
 pub use event::{
     CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event,

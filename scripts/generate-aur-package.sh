@@ -108,6 +108,8 @@ ARM_URL="https://github.com/YousefE1bana/msi-ec-tui/releases/download/v${VERSION
     "arch = x86_64" \
     "arch = aarch64" \
     "license = MIT" \
+    "depends = glibc>=2.39" \
+    "depends = gcc-libs" \
     "provides = mec" \
     "conflicts = mec" \
     "source_x86_64 = mec-x86_64-unknown-linux-gnu.tar.gz::$X86_URL" \

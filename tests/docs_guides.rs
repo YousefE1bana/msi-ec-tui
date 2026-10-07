@@ -76,7 +76,9 @@ fn guides_make_no_false_claims() {
     ] {
         let lowered = text.to_lowercase();
         assert!(
-            lowered.contains("not yet") || lowered.contains("none exists"),
+            lowered.contains("not yet")
+                || lowered.contains("none exists")
+                || lowered.contains("publication is not claimed"),
             "{label} must not imply the AUR entry is published"
         );
     }
@@ -124,10 +126,15 @@ fn guides_make_no_false_claims() {
             }
         }
     }
-    // Published stable tree: README names v1.0.0 as published and tracks
-    // the current 1.0.1 line without unpublished-release claims.
+    // Public installation entry points and notes follow the authoritative version.
+    let version = env!("CARGO_PKG_VERSION");
     let readme = read("README.md");
-    assert!(readme.contains("MEC v1.0.0"));
-    assert!(readme.contains("1.0.1"));
-    assert!(!readme.to_lowercase().contains("not yet published"));
+    assert!(readme.contains(&format!("Stable release: v{version}")));
+    assert!(readme.contains(&format!("docs/releases/v{version}.md")));
+    assert!(readme.contains("/main/install.sh"));
+    assert!(!readme.contains("has not been published"));
+    assert!(install.contains(&format!("--version {version}")));
+    assert!(upgrade.contains(&format!("mec_{version}_amd64.deb")));
+    assert!(upgrade.contains(&format!("mec-{version}-1.x86_64.rpm")));
+    assert!(read("install.sh").contains(&format!("--version {version}")));
 }

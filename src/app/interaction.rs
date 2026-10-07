@@ -46,6 +46,16 @@ impl ProfileSelection {
             self.index = row_count - 1;
         }
     }
+
+    /// Jumps to an absolute row, clamping into range. Empty row sets pin
+    /// at zero. Produced by mouse clicks; keyboard moves relatively.
+    pub fn set_index(&mut self, index: usize, row_count: usize) {
+        if row_count == 0 {
+            self.index = 0;
+        } else {
+            self.index = index.min(row_count - 1);
+        }
+    }
 }
 
 #[cfg(test)]

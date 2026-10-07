@@ -49,9 +49,10 @@ pub fn action_for_key_with_options(key: KeyEvent, vim_keys: bool) -> Option<AppA
         KeyCode::Char('?') if allows_only_shift(key.modifiers) => Some(AppAction::ToggleHelp),
         KeyCode::Char('p') if key.modifiers.is_empty() => Some(AppAction::TogglePalette),
         KeyCode::Char('P') if allows_only_shift(key.modifiers) => Some(AppAction::TogglePalette),
-        KeyCode::Char(digit @ '1'..='7') if key.modifiers.is_empty() => {
+        KeyCode::Char(digit @ '1'..='8') if key.modifiers.is_empty() => {
             Some(AppAction::GoTo(screen_for_digit(digit)))
         }
+        KeyCode::Char('9') if key.modifiers.is_empty() => Some(AppAction::Quit),
         _ => None,
     }
 }
@@ -70,7 +71,10 @@ fn screen_for_digit(digit: char) -> Screen {
         '4' => Screen::Battery,
         '5' => Screen::Devices,
         '6' => Screen::Profiles,
-        _ => Screen::Diagnostics,
+        '7' => Screen::Diagnostics,
+        // Digit and mouse click share this mapping: the approved menu's
+        // eighth row is the real Settings screen.
+        _ => Screen::Settings,
     }
 }
 
@@ -180,6 +184,7 @@ mod tests {
             ('5', Screen::Devices),
             ('6', Screen::Profiles),
             ('7', Screen::Diagnostics),
+            ('8', Screen::Settings),
         ];
         for (digit, screen) in cases {
             assert_eq!(
@@ -192,10 +197,11 @@ mod tests {
     }
 
     #[test]
-    fn digit_eight_is_unmapped() {
+    fn digit_nine_quits_like_menu_exit_row() {
+        // The approved menu advertises [9] Exit: keyboard and mouse agree.
         assert_eq!(
-            action_for_key(press(KeyCode::Char('8'), KeyModifiers::empty())),
-            None
+            action_for_key(press(KeyCode::Char('9'), KeyModifiers::empty())),
+            Some(AppAction::Quit)
         );
     }
 
