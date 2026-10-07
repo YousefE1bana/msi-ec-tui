@@ -65,6 +65,16 @@ fn help_overlay_area(area: Rect, line_count: usize) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+pub(crate) fn close_region(area: Rect) -> Rect {
+    let lines = help_lines();
+    let inner = super::shell::inset(help_overlay_area(area, lines.len()));
+    let line = lines
+        .iter()
+        .position(|line| line.starts_with("[Close]"))
+        .expect("Help has a close action");
+    super::shell::text_region(super::shell::row_rect(inner, line), 0, "[Close]")
+}
+
 fn help_lines() -> Vec<&'static str> {
     vec![
         "NAVIGATION",
@@ -81,9 +91,12 @@ fn help_lines() -> Vec<&'static str> {
         "Esc  Close help",
         "Q / q / Ctrl+C  Quit",
         "MOUSE",
-        "Click menu row or card to select and focus",
-        "Click control row to select · wheel moves rows",
-        "Clicks never confirm, apply, or execute",
+        "Click Select    Open command palette",
+        "Click row/card  Select / focus · wheel navigates",
+        "Click value     Enter editor · [-]/[+] stage",
+        "Review          Inspect pending changes",
+        "Apply / Cancel  Confirm once / discard pending",
+        "[Close]         Close Help (or footer Help)",
     ]
 }
 
@@ -178,10 +191,14 @@ mod tests {
     }
 
     #[test]
-    fn overlay_documents_mouse_without_promising_mutation() {
+    fn overlay_documents_staging_review_and_explicit_confirmation() {
         let text = shown_help();
         assert!(text.contains("Click"));
-        assert!(text.contains("never confirm"));
+        assert!(text.contains("Click value"));
+        assert!(text.contains("[-]/[+] stage"));
+        assert!(text.contains("Inspect pending changes"));
+        assert!(text.contains("Confirm once / discard pending"));
+        assert!(!text.contains("Clicks never confirm"));
     }
 
     #[test]

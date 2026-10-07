@@ -310,6 +310,44 @@ pub(crate) fn render_confirmation(
     if area.is_empty() {
         return;
     }
+    let (lines, footer) = confirmation_content(area, pending, snapshot, mode, capabilities, theme);
+    let (overlay, body, actions) = confirmation_layout(area, lines.len(), footer.len());
+    frame.render_widget(Clear, overlay);
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(theme.base_style())
+        .border_style(Style::default().fg(theme.warning))
+        .title(Line::styled(" REVIEW CHANGES ", accent));
+    frame.render_widget(block, overlay);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .style(theme.base_style()),
+        body,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(footer)).style(theme.base_style()),
+        actions,
+    );
+}
+
+const CANCEL_BUTTON: &str = "[Esc] Cancel";
+const APPLY_BUTTON: &str = "[Enter] Apply";
+const SMALL_CANCEL_BUTTON: &str = "Esc Cancel";
+const SMALL_APPLY_BUTTON: &str = "Enter Apply";
+
+/// The renderer and input mapper derive the footer from the same review content.
+fn confirmation_content(
+    area: Rect,
+    pending: &PendingMutation,
+    snapshot: Option<&HardwareSnapshot>,
+    mode: &SupportMode,
+    capabilities: &Capabilities,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
     let rows = review_rows(pending, snapshot, mode, capabilities);
     let changed = rows
         .iter()
@@ -400,35 +438,76 @@ pub(crate) fn render_confirmation(
     };
     let mut footer = vec![Line::styled(safety_text, warning)];
     if inner_width < 32 {
-        footer.push(Line::styled("Esc Cancel", accent));
-        footer.push(Line::styled("Enter Apply", accent));
+        footer.push(Line::styled(SMALL_CANCEL_BUTTON, accent));
+        footer.push(Line::styled(SMALL_APPLY_BUTTON, accent));
     } else {
-        footer.push(Line::styled("[Esc] Cancel  [Enter] Apply", accent));
+        footer.push(Line::styled(
+            format!("{CANCEL_BUTTON}  {APPLY_BUTTON}"),
+            accent,
+        ));
     }
-    let overlay = overlay_area(area, lines.len() + footer.len() + 1);
-    frame.render_widget(Clear, overlay);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(theme.base_style())
-        .border_style(Style::default().fg(theme.warning))
-        .title(Line::styled(" REVIEW CHANGES ", accent));
-    let inner = block.inner(overlay);
-    frame.render_widget(block, overlay);
-    // Reserve safety actions independently of content height or wrapping.
+    (lines, footer)
+}
+
+fn confirmation_layout(area: Rect, line_count: usize, footer_count: usize) -> (Rect, Rect, Rect) {
+    let overlay = overlay_area(area, line_count + footer_count + 1);
+    let inner = super::shell::inset(overlay);
     let bands = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(footer.len() as u16)])
+        .constraints([Constraint::Min(0), Constraint::Length(footer_count as u16)])
         .split(inner);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .style(theme.base_style()),
-        bands[0],
+    (overlay, bands[0], bands[1])
+}
+
+/// Only the visible, explicit footer buttons authorize Cancel or Apply.
+pub(crate) fn confirmation_buttons(
+    area: Rect,
+    pending: &PendingMutation,
+    snapshot: Option<&HardwareSnapshot>,
+    mode: &SupportMode,
+    capabilities: &Capabilities,
+) -> Vec<(Rect, crate::app::AppAction)> {
+    let (lines, footer) = confirmation_content(
+        area,
+        pending,
+        snapshot,
+        mode,
+        capabilities,
+        &Theme::default(),
     );
-    frame.render_widget(
-        Paragraph::new(Text::from(footer)).style(theme.base_style()),
-        bands[1],
-    );
+    let (_, _, actions) = confirmation_layout(area, lines.len(), footer.len());
+    let narrow = overlay_area(area, 0).width.saturating_sub(2) < 32;
+    let (cancel, apply) = if narrow {
+        (
+            super::shell::text_region(super::shell::row_rect(actions, 1), 0, SMALL_CANCEL_BUTTON),
+            super::shell::text_region(super::shell::row_rect(actions, 2), 0, SMALL_APPLY_BUTTON),
+        )
+    } else {
+        let row = super::shell::row_rect(actions, 1);
+        (
+            super::shell::text_region(row, 0, CANCEL_BUTTON),
+            super::shell::text_region(row, CANCEL_BUTTON.len() as u16 + 2, APPLY_BUTTON),
+        )
+    };
+    [
+        (cancel, crate::app::AppAction::Cancel),
+        (apply, crate::app::AppAction::Activate),
+    ]
+    .into_iter()
+    .filter(|(rect, _)| !rect.is_empty())
+    .collect()
+}
+
+pub(crate) fn notice_area(area: Rect) -> Rect {
+    if area.height < 2 {
+        return Rect::default();
+    }
+    Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        3.min(area.height.saturating_sub(1)),
+    )
 }
 
 /// Renders the post-attempt result as a full-width band: green for
@@ -443,12 +522,7 @@ pub(crate) fn render_notice(frame: &mut Frame, area: Rect, notice: &Notice, them
         NoticeKind::Failure => (theme.danger, "✕"),
     };
     let style = Style::default().fg(edge).add_modifier(Modifier::BOLD);
-    let band = Rect {
-        x: area.x,
-        y: area.y.saturating_add(1),
-        width: area.width,
-        height: 3.min(area.height.saturating_sub(1).max(1)),
-    };
+    let band = notice_area(area);
     if band.is_empty() {
         return;
     }

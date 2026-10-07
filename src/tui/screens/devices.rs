@@ -111,6 +111,23 @@ pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
     shell::ScreenRegions { cards, rows }
 }
 
+const DEVICE_NAME_WIDTH: usize = 18;
+
+pub(crate) fn value_region(
+    row: Rect,
+    control: ControlId,
+    snapshot: Option<&HardwareSnapshot>,
+) -> Rect {
+    if matches!(control, ControlId::FnKeyInfo | ControlId::WinKeyInfo) {
+        return Rect::default();
+    }
+    shell::text_region(
+        row,
+        (2 + DEVICE_NAME_WIDTH) as u16,
+        &current_value(control, snapshot),
+    )
+}
+
 /// Real action label per row: toggles flip, backlight steps levels,
 /// informational rows stage nothing.
 fn action_label(control: ControlId) -> &'static str {
@@ -212,7 +229,11 @@ fn render_table_card<B: EcBackend>(
         lines.push(Line::from(vec![
             Span::styled(marker.to_owned(), Style::default().fg(theme.accent)),
             Span::styled(
-                format!("{:<18}", control_name(*control)),
+                format!(
+                    "{:<width$}",
+                    control_name(*control),
+                    width = DEVICE_NAME_WIDTH
+                ),
                 if selected {
                     Style::default()
                         .fg(theme.foreground)
@@ -243,7 +264,7 @@ fn render_table_card<B: EcBackend>(
         ));
     }
     lines.push(Line::styled(
-        "Enter edits · click selects · review confirms",
+        "Click value / Enter edits · review confirms",
         Style::default().fg(theme.muted),
     ));
     frame.render_widget(
@@ -328,18 +349,14 @@ fn render_preview_card(
 ) {
     let inner = shell::card(frame, area, "CONTROL PREVIEW", focused, theme);
     let lines = match controls.editor() {
-        Some(editor) => vec![
-            Line::from(vec![
-                Span::styled("Editing: ", Style::default().fg(theme.muted)),
-                Span::styled(
-                    crate::tui::controls::command_text(editor.draft()),
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::styled("Nothing applied yet", Style::default().fg(theme.warning)),
-        ],
+        Some(_) => {
+            let mut lines = crate::tui::controls::editor_footer_lines(controls, theme);
+            lines.push(Line::styled(
+                "Nothing applied yet",
+                Style::default().fg(theme.warning),
+            ));
+            lines
+        }
         None => match controls.pending_command() {
             Some(command) => vec![
                 Line::from(vec![

@@ -2,8 +2,8 @@
 //!
 //! Only battery threshold control carries an explicit capability label:
 //! absent charge/state/AC values render `N/A`, never "Unavailable". The
-//! threshold row is a selectable draft; confirming creates pending data
-//! only and never executes.
+//! threshold and Super Battery rows use the existing editors; accepting
+//! a draft creates pending data only and never executes.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -92,8 +92,8 @@ pub(crate) fn render_battery_with_theme<B: EcBackend>(
 }
 
 /// Card layout in focus order: status, limit, policy, details, safety.
-/// The single threshold row starts at the first inner line of the limit
-/// card so mouse clicks land on the drawn row.
+/// Threshold and Super Battery rows start at the first inner line of the
+/// limit card so mouse clicks land on the drawn row.
 pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
     let (top, mid, bottom) = shell::vsplit3(workspace, 40, 40);
     let (tl, tr) = shell::hpair(top, 50);
@@ -188,7 +188,7 @@ fn render_limit_card<B: EcBackend>(
         .collect();
     let start = snapshot.and_then(|s| s.battery_start_threshold);
     let end = snapshot.and_then(|s| s.battery_end_threshold);
-    lines.extend(crate::tui::controls::staged_footer_lines(controls, theme));
+    lines.extend(crate::tui::controls::editor_footer_lines(controls, theme));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("Start: ", Style::default().fg(theme.muted)),
@@ -538,7 +538,7 @@ mod tests {
     fn hit_regions_match_drawn_threshold_row() {
         let regions = hit_regions(ratatui::layout::Rect::new(0, 0, 160, 48));
         assert_eq!(regions.cards.len(), 5);
-        assert_eq!(regions.rows.len(), 1);
+        assert_eq!(regions.rows.len(), 2);
     }
 
     #[test]

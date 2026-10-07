@@ -184,6 +184,139 @@ where
         self.viewport = viewport;
     }
 
+    /// Resolve input from the currently drawn view. Geometry is recomputed
+    /// from current screen, editor and modal state, never retained across frames.
+    /// Returned actions enter handle_action; there is no execution here.
+    fn mouse_action(&self, event: crossterm::event::MouseEvent) -> Option<crate::app::AppAction> {
+        use super::{mouse, shell};
+        use crate::app::AppAction as A;
+        let full = self.viewport;
+        if full.is_empty() {
+            return None;
+        }
+        let (_, workspace, footer) = shell::shell_split(full);
+        let read_only = matches!(self.live.mode(), SupportMode::ReadOnly(_));
+        if self.state.help_visible() {
+            let mut buttons = vec![(super::help::close_region(full), A::Cancel)];
+            if super::responsive::layout_tier(full) == super::responsive::LayoutTier::Full {
+                buttons.push((mouse::footer_regions(footer, read_only).help, A::ToggleHelp));
+            }
+            return mouse::button_action(&buttons, event);
+        }
+        if let Some(pending) = self.controls.pending() {
+            return mouse::button_action(
+                &super::confirmation::confirmation_buttons(
+                    full,
+                    pending,
+                    self.live.current_snapshot(),
+                    self.live.mode(),
+                    &self.capabilities,
+                ),
+                event,
+            );
+        }
+        if self.notifications_open {
+            if super::responsive::layout_tier(full) == super::responsive::LayoutTier::Tiny {
+                return None;
+            }
+            return mouse::button_action(
+                &[(
+                    super::notifications::close_region(full, &self.notifications),
+                    A::Cancel,
+                )],
+                event,
+            );
+        }
+        let screen = self.state.current_screen();
+        if self.palette.is_open() {
+            return mouse::navigation_action(
+                full,
+                screen,
+                true,
+                (self.profile_row_count(), self.profile_selection.index()),
+                read_only,
+                event,
+            );
+        }
+        if super::responsive::layout_tier(full) != super::responsive::LayoutTier::Full {
+            return None;
+        }
+        if self.controls.notice().is_some()
+            && mouse::contains(
+                super::confirmation::notice_area(full),
+                event.column,
+                event.row,
+            )
+        {
+            return None;
+        }
+        if let Some(regions) = mouse::screen_regions(screen, workspace, self.profile_row_count()) {
+            let control_rows = super::editing::control_rows(screen);
+            if self.controls.is_editing() && !control_rows.is_empty() {
+                let (card, offset) = match screen {
+                    Screen::Battery => (1, control_rows.len()),
+                    Screen::Devices => (2, 0),
+                    _ => (0, control_rows.len()),
+                };
+                if let Some(action) = mouse::button_action(
+                    &super::controls::editor_button_regions(
+                        shell::inset(regions.cards[card]),
+                        offset,
+                        &self.controls,
+                    ),
+                    event,
+                ) {
+                    return Some(action);
+                }
+            } else {
+                let values: Vec<_> = regions
+                    .rows
+                    .iter()
+                    .zip(control_rows)
+                    .enumerate()
+                    .map(|(index, (row, control))| {
+                        let value = if screen == Screen::Devices {
+                            super::screens::devices::value_region(
+                                *row,
+                                *control,
+                                self.live.current_snapshot(),
+                            )
+                        } else {
+                            super::controls::value_region(
+                                *row,
+                                *control,
+                                self.live.current_snapshot(),
+                            )
+                        };
+                        (value, A::EditControlRow(index))
+                    })
+                    .collect();
+                if let Some(action) = mouse::button_action(&values, event) {
+                    return Some(action);
+                }
+                if screen == Screen::Profiles
+                    && let Some(action) = mouse::button_action(
+                        &[(
+                            super::screens::profiles::review_button_region(workspace),
+                            A::Activate,
+                        )],
+                        event,
+                    )
+                {
+                    return Some(action);
+                }
+            }
+        }
+        mouse::navigation_action(
+            full,
+            screen,
+            false,
+            (self.profile_row_count(), self.profile_selection.index()),
+            read_only,
+            event,
+        )
+    }
+
     /// Event-loop poll timeout derived from the configured interval.
     pub fn poll_timeout(&self) -> Duration {
         self.config.refresh_interval().as_duration()
@@ -288,6 +421,14 @@ where
             // Mouse row selection enters the same selection state as
             // keyboard movement. Ignored while editing so a draft is
             // never disturbed, and profiles only accept their own rows.
+            A::EditControlRow(index) => {
+                if !self.controls.is_editing() && index < super::editing::control_rows(screen).len()
+                {
+                    self.controls.select_index(screen, index);
+                    // Converge with keyboard Enter before creating any draft.
+                    self.handle_action(A::Activate);
+                }
+            }
             A::SelectControlRow(_) if self.controls.is_editing() => {}
             A::SelectControlRow(index) if is_interactive_screen(screen) => {
                 self.controls.select_index(screen, index);
@@ -719,30 +860,19 @@ where
                 draw(app)?;
             }
         }
-        // Mouse maps through the same semantic actions as the keyboard:
-        // menu clicks navigate, card clicks focus, wheel rows move, and
-        // anything unmapped stays inert. Modal precedence in
-        // `handle_action` drops navigations that must not bypass it, so a
-        // click can never jump screens or quit past a confirmation.
+        // Mouse only supplies actions; modal confirmation owns execution.
         TuiEvent::Mouse(mouse) => {
-            // Mouse maps through the same semantic actions as the
-            // keyboard: row clicks select, card clicks focus, palette
-            // clicks use the existing palette path, and anything unmapped
-            // stays inert. Modal precedence in `handle_action` drops
-            // anything that must not bypass confirmation, so a click can
-            // never stage, confirm, apply, or execute.
-            if let Some(action) = super::mouse::action_for_mouse(
-                app.viewport(),
-                app.state().current_screen(),
-                app.palette().is_open(),
-                (app.profile_row_count(), app.profile_selection().index()),
-                mouse,
-            ) {
-                app.expire_transient_notice();
+            // Resolve against what is still visible before expiry exposes
+            // an underlying value. Expiry itself always gets a redraw.
+            let action = app.mouse_action(mouse);
+            let had_notice = app.notice().is_some();
+            app.expire_transient_notice();
+            let notice_expired = had_notice && app.notice().is_none();
+            if let Some(action) = action {
                 app.handle_action(action);
-                if !app.state().should_quit() {
-                    draw(app)?;
-                }
+            }
+            if (action.is_some() || notice_expired) && !app.state().should_quit() {
+                draw(app)?;
             }
         }
         TuiEvent::Tick => {
@@ -1490,11 +1620,10 @@ mod tests {
                 TuiEvent::Action(AppAction::Quit),
             ],
         );
-        // The click maps to GoTo(Fans) but palette precedence drops it.
+        // Outside palette rows are inert, so they cannot reach the menu.
         assert_eq!(app.state().current_screen(), Screen::Dashboard);
-        // Initial + palette-open + dropped click (harmless redraw, no
-        // state change) + cancel; quit draws nothing.
-        assert_eq!(harness.draws.get(), 4);
+        // Initial + palette-open + cancel; inert click and quit do not draw.
+        assert_eq!(harness.draws.get(), 3);
     }
 
     #[test]
@@ -3286,4 +3415,5 @@ mod tests {
             assert!(app.controls().pending().is_none());
         }
     }
+    include!("mouse_workflow_tests.rs");
 }

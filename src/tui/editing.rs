@@ -65,7 +65,7 @@ pub fn control_rows(screen: Screen) -> &'static [ControlId] {
             ControlId::SuperBattery,
         ],
         Screen::Fans => &[ControlId::FanMode, ControlId::CoolerBoost],
-        Screen::Battery => &[ControlId::BatteryThreshold],
+        Screen::Battery => &[ControlId::BatteryThreshold, ControlId::SuperBattery],
         Screen::Devices => &[
             ControlId::Webcam,
             ControlId::WebcamBlock,
@@ -610,10 +610,10 @@ mod tests {
     }
 
     #[test]
-    fn battery_has_single_threshold_row() {
+    fn battery_rows_use_existing_threshold_and_super_battery_editors() {
         assert_eq!(
             control_rows(Screen::Battery),
-            &[ControlId::BatteryThreshold]
+            &[ControlId::BatteryThreshold, ControlId::SuperBattery]
         );
     }
 

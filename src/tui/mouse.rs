@@ -1,9 +1,6 @@
-//! Dashboard mouse geometry and non-mutating action mapping.
-//!
-//! Pure layout math shared by the dashboard renderer and the mouse event
-//! path so hit regions always match what is drawn. Mouse may only produce
-//! navigation, help, quit, card-focus, and row-move intents: every output
-//! is an existing [`AppAction`] with zero hardware reach.
+//! Presentation-driven mouse input. Regions produce semantic actions only.
+//! Editing, review, cancellation and confirmation remain owned by TuiApp.
+//! This module never creates command intent or calls an executor.
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -57,14 +54,16 @@ pub struct DashboardRegions {
 /// Footer label geometry shared by the renderer and the hit tester.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FooterRegions {
+    /// Existing Select label opens the non-mutating command palette.
+    pub palette: Rect,
     /// Help label rect.
     pub help: Rect,
     /// Quit label rect.
     pub quit: Rect,
 }
 
-fn contains(area: Rect, col: u16, row: u16) -> bool {
-    col >= area.x && col < area.x + area.width && row >= area.y && row < area.y + area.height
+pub(crate) fn contains(area: Rect, col: u16, row: u16) -> bool {
+    col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
 }
 
 /// Dashboard content area: the v1.1 dashboard owns the full frame (the
@@ -90,24 +89,25 @@ pub fn dashboard_shell(area: Rect) -> (Rect, Rect, Rect) {
 
 /// Computes footer Help/Quit label rects for `footer` (the shell footer
 /// row). `read_only` selects the READ-ONLY status width so rects match the
-/// drawn spans exactly.
-/// Computes footer Help/Quit label rects for `footer` (the shell footer
-/// row). `read_only` selects the READ-ONLY status width so rects match the
 /// drawn spans exactly. Widths derive from [`super::shell`] literals so
 /// labels and regions can never drift apart.
 pub fn footer_regions(footer: Rect, read_only: bool) -> FooterRegions {
     use super::shell::{
-        FOOTER_FIXED, FOOTER_HELP, FOOTER_Q_KEY, FOOTER_QUIT, FOOTER_STATUS_READ_ONLY,
-        FOOTER_STATUS_READY,
+        FOOTER_FIXED, FOOTER_HELP, FOOTER_Q_KEY, FOOTER_QUIT, FOOTER_SELECT,
+        FOOTER_STATUS_READ_ONLY, FOOTER_STATUS_READY,
     };
     let status = if read_only {
         FOOTER_STATUS_READ_ONLY
     } else {
         FOOTER_STATUS_READY
     };
-    let mut x = footer.x + status.len() as u16;
+    let mut x = footer.x + ratatui::text::Line::raw(status).width() as u16;
+    let mut palette = Rect::default();
     for part in FOOTER_FIXED {
-        x += part.len() as u16;
+        if *part == FOOTER_SELECT {
+            palette = super::shell::text_region(footer, x.saturating_sub(footer.x), part);
+        }
+        x += ratatui::text::Line::raw(*part).width() as u16;
     }
     let help = Rect {
         x,
@@ -122,7 +122,11 @@ pub fn footer_regions(footer: Rect, read_only: bool) -> FooterRegions {
         width: FOOTER_QUIT.len() as u16,
         height: 1,
     };
-    FooterRegions { help, quit }
+    FooterRegions {
+        palette,
+        help: super::shell::text_region(footer, help.x.saturating_sub(footer.x), FOOTER_HELP),
+        quit: super::shell::text_region(footer, quit.x.saturating_sub(footer.x), FOOTER_QUIT),
+    }
 }
 
 /// Computes dashboard hit regions for `full` (the whole frame). Returns
@@ -143,41 +147,19 @@ pub fn dashboard_regions(full: Rect) -> Option<DashboardRegions> {
     }
     // Menu rows live inside the control card (cards[0]) below its header
     // content. Border consumes one cell; content starts at inner.y.
-    let inner_x = cards[0].x + 1;
-    let inner_y = cards[0].y + 1;
-    let inner_w = cards[0].width.saturating_sub(2);
+    let inner = super::shell::inset(cards[0]);
     let menu_rows = (0..MENU_LABELS.len())
-        .map(|i| Rect {
-            x: inner_x,
-            y: inner_y + MENU_FIRST_ROW_OFFSET + i as u16,
-            width: inner_w,
-            height: 1,
-        })
+        .map(|i| super::shell::row_rect(inner, usize::from(MENU_FIRST_ROW_OFFSET) + i))
         .collect();
     let foot = footer_regions(footer, false);
-    // READ-ONLY widens the status segment; recompute against the wider
-    // layout and keep the widest rects so clicks land in either mode.
-    let foot_ro = footer_regions(footer, true);
-    let foot_help = union_row(foot.help, foot_ro.help);
-    let foot_quit = union_row(foot.quit, foot_ro.quit);
+    let foot_help = foot.help;
+    let foot_quit = foot.quit;
     Some(DashboardRegions {
         menu_rows,
         cards,
         foot_help,
         foot_quit,
     })
-}
-
-/// Widest single-row span covering both rects (same row by construction).
-fn union_row(a: Rect, b: Rect) -> Rect {
-    let x = a.x.min(b.x);
-    let end = (a.x + a.width).max(b.x + b.width);
-    Rect {
-        x,
-        y: a.y,
-        width: end.saturating_sub(x),
-        height: 1,
-    }
 }
 
 /// Six card rects in focus order. Wide terminals use the approved
@@ -226,21 +208,14 @@ pub(crate) fn grid_cards(workspace: Rect) -> Vec<Rect> {
     }
 }
 
-/// Maps one mouse event to a non-mutating [`AppAction`]. `palette_open`
-/// routes clicks into the palette overlay (select-and-activate through
-/// the existing palette path, or close on outside clicks); `profile_view`
-/// supplies the row count and existing selected index for scrolling. Returns `None` for anything inert:
-/// non-full tiers, unmapped areas, non-left buttons, hover/drag motion.
-///
-/// Clicks select or focus only: rows enter keyboard-identical selection
-/// state, cards gain focus, and nothing here can stage, confirm, apply,
-/// or execute. Modal precedence in `handle_action` drops anything that
-/// must not bypass confirmation.
-pub fn action_for_mouse(
+/// Browsing and palette mapping. Mutation-related regions are resolved by
+/// TuiApp only after enforcing the same overlay precedence as keyboard input.
+pub(crate) fn navigation_action(
     full: Rect,
     current: Screen,
     palette_open: bool,
     profile_view: (usize, usize),
+    read_only: bool,
     event: MouseEvent,
 ) -> Option<AppAction> {
     if layout_tier(full) != LayoutTier::Full {
@@ -255,10 +230,9 @@ pub fn action_for_mouse(
     let row = event.row;
     // Footer shortcuts work on every screen; the overlay never covers
     // the footer row by construction.
-    let foot = footer_regions(footer, false);
-    let foot_ro = footer_regions(footer, true);
-    let foot_help = union_row(foot.help, foot_ro.help);
-    let foot_quit = union_row(foot.quit, foot_ro.quit);
+    let foot = footer_regions(footer, read_only);
+    let foot_help = foot.help;
+    let foot_quit = foot.quit;
     if palette_open {
         return match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -267,16 +241,33 @@ pub fn action_for_mouse(
                     Some(AppAction::ToggleHelp)
                 } else if contains(foot_quit, col, row) {
                     Some(AppAction::Quit)
-                } else if let Some(index) = palette_row_at(full, col, row) {
-                    Some(AppAction::ActivatePaletteRow(index))
                 } else {
-                    Some(AppAction::Cancel)
+                    palette_row_at(full, col, row).map(AppAction::ActivatePaletteRow)
                 }
             }
-            MouseEventKind::ScrollUp => Some(AppAction::MoveUp),
-            MouseEventKind::ScrollDown => Some(AppAction::MoveDown),
+            MouseEventKind::ScrollUp
+                if contains(
+                    super::palette::overlay_area(full, super::palette::PaletteCommand::ALL.len()),
+                    col,
+                    row,
+                ) =>
+            {
+                Some(AppAction::MoveUp)
+            }
+            MouseEventKind::ScrollDown
+                if contains(
+                    super::palette::overlay_area(full, super::palette::PaletteCommand::ALL.len()),
+                    col,
+                    row,
+                ) =>
+            {
+                Some(AppAction::MoveDown)
+            }
             _ => None,
         };
+    }
+    if event.kind == MouseEventKind::Down(MouseButton::Left) && contains(foot.palette, col, row) {
+        return Some(AppAction::TogglePalette);
     }
     if current == Screen::Dashboard {
         return dashboard_action(full, col, row, event.kind, foot_help, foot_quit);
@@ -330,9 +321,31 @@ pub fn action_for_mouse(
     }
 }
 
+/// Hit only visible buttons; right click, drag, wheel and empty regions are inert.
+pub(crate) fn button_action(regions: &[(Rect, AppAction)], event: MouseEvent) -> Option<AppAction> {
+    if event.kind != MouseEventKind::Down(MouseButton::Left) {
+        return None;
+    }
+    regions
+        .iter()
+        .find(|(rect, _)| contains(*rect, event.column, event.row))
+        .map(|(_, action)| *action)
+}
+
+#[cfg(test)]
+fn action_for_mouse(
+    full: Rect,
+    current: Screen,
+    palette_open: bool,
+    profile_view: (usize, usize),
+    event: MouseEvent,
+) -> Option<AppAction> {
+    navigation_action(full, current, palette_open, profile_view, false, event)
+}
+
 /// Screen regions for mouse mapping: each migrated screen's shared
 /// layout, so clicks land on the drawn rows and cards.
-fn screen_regions(
+pub(crate) fn screen_regions(
     current: Screen,
     workspace: Rect,
     profile_rows: usize,
@@ -708,7 +721,7 @@ mod tests {
         for (screen, rows) in [
             (Screen::Performance, 4),
             (Screen::Fans, 2),
-            (Screen::Battery, 1),
+            (Screen::Battery, 2),
             (Screen::Devices, 5),
         ] {
             let area = super::super::shell::shell_split(FULL).1;
@@ -778,10 +791,10 @@ mod tests {
             ),
             Some(AppAction::ActivatePaletteRow(2))
         );
-        // Outside clicks close the palette like keyboard Cancel.
+        // Outside clicks have no actionable region.
         assert_eq!(
             action_for_mouse(FULL, Screen::Dashboard, true, (5, 0), click(2, 30)),
-            Some(AppAction::Cancel)
+            None
         );
     }
 

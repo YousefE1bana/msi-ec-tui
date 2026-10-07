@@ -135,7 +135,7 @@ fn render_control_card<B: EcBackend>(
             )
         })
         .collect();
-    lines.extend(crate::tui::controls::staged_footer_lines(controls, theme));
+    lines.extend(crate::tui::controls::editor_footer_lines(controls, theme));
     lines.push(Line::from(""));
     lines.push(Line::styled(
         "Enter edits · ←/→ adjusts · review confirms",

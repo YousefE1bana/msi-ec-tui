@@ -365,6 +365,17 @@ fn render_details_card(
     );
 }
 
+pub(crate) const REVIEW_BUTTON: &str = "[ REVIEW CHANGES ]";
+
+pub(crate) fn review_button_region(workspace: Rect) -> Rect {
+    let regions = hit_regions(workspace, 0);
+    shell::text_region(
+        shell::row_rect(shell::inset(regions.cards[3]), 0),
+        0,
+        REVIEW_BUTTON,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_summary_card(
     frame: &mut Frame,
@@ -434,7 +445,7 @@ fn render_action_card<B: EcBackend>(
 ) {
     let inner = shell::card(frame, area, "ACTION / SAFETY", focused, theme);
     let lines = vec![
-        Line::styled("[ REVIEW CHANGES ]", Style::default().fg(theme.accent)),
+        Line::styled(REVIEW_BUTTON, Style::default().fg(theme.accent)),
         Line::from(""),
         Line::from(vec![
             Span::styled("Access: ", Style::default().fg(theme.muted)),

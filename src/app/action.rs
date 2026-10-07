@@ -26,8 +26,9 @@ pub enum AppAction {
     /// Move to the next candidate while editing; falls back to
     /// next-screen navigation when not editing.
     MoveRight,
-    /// Begin editing the selected control, or accept the draft into a
-    /// pending (data-only, never executed here) command while editing.
+    /// Begin editing, review a draft/profile, or explicitly confirm an
+    /// existing pending mutation. TuiApp resolves the current context;
+    /// keyboard Enter and the visible Review/Apply buttons share this intent.
     Activate,
     /// Cancel the editor or pending draft; falls back to hiding help.
     Cancel,
@@ -50,6 +51,9 @@ pub enum AppAction {
     /// starting an edit. Produced by mouse clicks; dropped while an
     /// editor, confirmation, or overlay owns input.
     SelectControlRow(usize),
+    /// Select a visible control value and enter the existing editor.
+    /// Never confirms or executes; ignored while an editor/modal owns input.
+    EditControlRow(usize),
     /// Select a profile row by index on the Profiles screen. Enters the
     /// same selection state as keyboard row movement without staging or
     /// applying anything. Produced by mouse clicks.

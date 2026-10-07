@@ -141,6 +141,7 @@ impl AppState {
             // profile selection live there); the navigation state itself
             // treats them as no-ops so the fallback can never navigate.
             AppAction::SelectControlRow(_)
+            | AppAction::EditControlRow(_)
             | AppAction::SelectProfileRow(_)
             | AppAction::ActivatePaletteRow(_) => {}
         }
@@ -360,6 +361,7 @@ mod tests {
             AppAction::TogglePalette,
             AppAction::FocusCard(3),
             AppAction::SelectControlRow(1),
+            AppAction::EditControlRow(1),
             AppAction::SelectProfileRow(2),
             AppAction::ActivatePaletteRow(0),
         ] {

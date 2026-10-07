@@ -282,6 +282,67 @@ pub(crate) fn staged_footer_lines(controls: &ControlState, theme: &Theme) -> Vec
     Vec::new()
 }
 
+/// Buttons use the same row and captions for rendering and hit testing.
+/// They only adjust the existing editor, open review, or cancel it.
+const EDITOR_BUTTONS: [(&str, crate::app::AppAction); 4] = [
+    ("[-]", crate::app::AppAction::MoveLeft),
+    ("[+]", crate::app::AppAction::MoveRight),
+    ("[Review]", crate::app::AppAction::Activate),
+    ("[Cancel]", crate::app::AppAction::Cancel),
+];
+
+pub(crate) fn editor_footer_lines(controls: &ControlState, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = staged_footer_lines(controls, theme);
+    if controls.is_editing() {
+        lines.push(Line::styled(
+            EDITOR_BUTTONS.map(|(label, _)| label).join(" "),
+            Style::default().fg(theme.accent),
+        ));
+    }
+    lines
+}
+
+pub(crate) fn editor_button_regions(
+    inner: ratatui::layout::Rect,
+    row_offset: usize,
+    controls: &ControlState,
+) -> Vec<(ratatui::layout::Rect, crate::app::AppAction)> {
+    if !controls.is_editing() {
+        return Vec::new();
+    }
+    let row = super::shell::row_rect(
+        inner,
+        row_offset + staged_footer_lines(controls, &Theme::default()).len(),
+    );
+    let mut x = 0;
+    EDITOR_BUTTONS
+        .into_iter()
+        .filter_map(|(label, action)| {
+            let rect = super::shell::text_region(row, x, label);
+            x += label.len() as u16 + 1;
+            (!rect.is_empty()).then_some((rect, action))
+        })
+        .collect()
+}
+
+/// Current-value text is the edit target; labels and row whitespace only select.
+/// The region exists only when the complete value is drawn.
+pub(crate) fn value_region(
+    row: ratatui::layout::Rect,
+    control: ControlId,
+    snapshot: Option<&HardwareSnapshot>,
+) -> ratatui::layout::Rect {
+    let Some(command) = representative_command(control) else {
+        return ratatui::layout::Rect::default();
+    };
+    let prefix = format!("  {}: current ", control_display_name(control));
+    super::shell::text_region(
+        row,
+        Line::raw(prefix).width() as u16,
+        &current_text(&command, snapshot),
+    )
+}
+
 /// Text parts of one control row shared by the plain and styled
 /// renderers so wording can never drift between tiers.
 struct RowParts {

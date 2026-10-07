@@ -22,6 +22,7 @@ use super::ui::{support_mode_style, support_mode_text, telemetry_state_text, tel
 /// the drawn labels.
 pub(crate) const FOOTER_STATUS_READY: &str = " ✓ READY  ";
 pub(crate) const FOOTER_STATUS_READ_ONLY: &str = " ✓ READ-ONLY  ";
+pub(crate) const FOOTER_SELECT: &str = "Select ";
 pub(crate) const FOOTER_HELP: &str = "Help ";
 pub(crate) const FOOTER_QUIT: &str = "Quit ";
 pub(crate) const FOOTER_Q_KEY: &str = " [Q] ";
@@ -29,7 +30,7 @@ pub(crate) const FOOTER_Q_KEY: &str = " [Q] ";
 pub(crate) const FOOTER_FIXED: &[&str] = &[
     "│ ",
     " [1-9] ",
-    "Select ",
+    FOOTER_SELECT,
     " [↑↓] ",
     "Navigate ",
     " [Enter] ",
@@ -139,7 +140,7 @@ pub(crate) fn render_bottom_strip<B: EcBackend>(
         Span::styled(status.to_owned(), status_style),
         Span::styled("│ ", Style::default().fg(theme.muted)),
         key("1-9"),
-        what("Select"),
+        Span::styled(FOOTER_SELECT, Style::default().fg(theme.muted)),
         key("↑↓"),
         what("Navigate"),
         key("Enter"),
@@ -308,12 +309,24 @@ fn contains(area: Rect, col: u16, row: u16) -> bool {
 
 /// Row rect inside a card inner area at a content line offset.
 pub(crate) fn row_rect(inner: Rect, line: usize) -> Rect {
+    if line >= usize::from(inner.height) || inner.width == 0 {
+        return Rect::default();
+    }
     Rect {
         x: inner.x,
         y: inner.y + line as u16,
         width: inner.width,
         height: 1,
     }
+}
+
+/// A text target is clickable only when its entire caption is visible.
+pub(crate) fn text_region(row: Rect, offset: u16, text: &str) -> Rect {
+    let width = ratatui::text::Line::raw(text).width() as u16;
+    if row.is_empty() || offset.saturating_add(width) > row.width {
+        return Rect::default();
+    }
+    Rect::new(row.x.saturating_add(offset), row.y, width, 1)
 }
 
 /// Hit-tests a point against screen regions.
@@ -344,7 +357,7 @@ mod tests {
             &[
                 "│ ",
                 " [1-9] ",
-                "Select ",
+                FOOTER_SELECT,
                 " [↑↓] ",
                 "Navigate ",
                 " [Enter] ",

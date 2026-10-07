@@ -27,6 +27,14 @@ both stdin and stdout are terminals:
 - `Enter` edits / accepts / confirms depending on context;
   `Esc` cancels an edit or confirmation, or closes an overlay
 - `?` toggles help, `q` quits
+- Mouse row/card clicks select or focus; the wheel navigates rows.
+  Click the footer `Select` label to open the command palette.
+  Click a hardware value to open its existing editor, use `[-]` / `[+]`
+  to stage a change, then click `Review`. Only the explicit `Apply`
+  button in the review executes; `Cancel` discards the pending change.
+  Profile selection applies nothing: click `REVIEW CHANGES`, inspect the
+  review, then `Apply` or `Cancel`. READ-ONLY uses the same fail-closed
+  controls as the keyboard.
 
 When stdout is redirected or captured (pipes, scripts, CI), bare `mec` still
 prints exactly:
@@ -278,7 +286,7 @@ vim_keys = true
   accepted as an alias for `msi-dark` and normalized on save)
 - `vim_keys = false` unmaps `h`/`j`/`k`/`l`; arrows, Tab, digits, `P`,
   `?`, and quit shortcuts always work
-- unknown fields (including `mouse`, which MEC does not implement),
+- unknown fields (including `mouse`, which is not a configuration option),
   wrong types, and malformed documents are rejected; a missing file
   loads defaults without creating anything; an invalid file falls back
   to defaults with a startup notice while monitoring still launches
