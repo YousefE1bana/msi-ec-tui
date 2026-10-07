@@ -22,7 +22,7 @@ pub(crate) fn buttons(area: Rect) -> Vec<(Rect, AppAction)> {
     let mut buttons = Vec::new();
     if inner.height >= 4 && inner.width >= 42 {
         let y = inner.y + inner.height - 1;
-        buttons.push((Rect::new(inner.x, y, 20, 1), AppAction::CheckUpdates));
+        buttons.push((Rect::new(inner.x, y, 21, 1), AppAction::CheckUpdates));
         buttons.push((Rect::new(inner.x + 23, y, 8, 1), AppAction::HideAbout));
     }
     for (index, rect) in regions.into_iter().enumerate() {
@@ -168,7 +168,7 @@ mod tests {
                 "ABOUT MEC",
                 env!("CARGO_PKG_VERSION"),
                 "Not checked",
-                "CHECK FOR UPDATES",
+                "[ CHECK FOR UPDATES ]",
                 "No telemetry",
             ] {
                 assert!(text.contains(expected), "{w}x{h}: {expected}");
