@@ -62,6 +62,8 @@ mkdir -p "$TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 cp "$BINARY" "$TOPDIR/SOURCES/mec"
 chmod 755 "$TOPDIR/SOURCES/mec"
 cp "$REPO_DIR/README.md" "$REPO_DIR/LICENSE" "$REPO_DIR/SECURITY.md" "$TOPDIR/SOURCES/"
+cp "$REPO_DIR/packaging/desktop/mec.desktop" "$REPO_DIR/packaging/desktop/mec.svg" "$TOPDIR/SOURCES/"
+cp -R "$REPO_DIR/docs" "$TOPDIR/SOURCES/docs"
 sed -e "s/@VERSION@/${VERSION}/g" -e "s/@ARCH@/${RPM_ARCH}/g" \
   "$REPO_DIR/packaging/rpm/mec.spec" > "$TOPDIR/SPECS/mec.spec"
 

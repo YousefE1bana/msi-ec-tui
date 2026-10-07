@@ -10,6 +10,7 @@ pkgdesc='A safe capability-aware terminal control center for MSI laptops on Linu
 arch=('x86_64' 'aarch64')
 url='https://github.com/YousefE1bana/msi-ec-tui'
 license=('MIT')
+depends=('glibc>=2.39' 'gcc-libs')
 provides=('mec')
 conflicts=('mec')
 source_x86_64=("mec-x86_64-unknown-linux-gnu.tar.gz::https://github.com/YousefE1bana/msi-ec-tui/releases/download/v${pkgver}/mec-x86_64-unknown-linux-gnu.tar.gz")
@@ -23,4 +24,12 @@ package() {
   install -Dm644 "$srcdir/$topdir/README.md" "$pkgdir/usr/share/doc/mec/README.md"
   install -Dm644 "$srcdir/$topdir/LICENSE" "$pkgdir/usr/share/doc/mec/LICENSE"
   install -Dm644 "$srcdir/$topdir/SECURITY.md" "$pkgdir/usr/share/doc/mec/SECURITY.md"
+  if [[ -d "$srcdir/$topdir/docs" ]]; then
+    cp -R "$srcdir/$topdir/docs" "$pkgdir/usr/share/doc/mec/docs"
+  fi
+  # Stable v1.0.1 archives predate desktop assets; newer archives carry both.
+  if [[ -f "$srcdir/$topdir/mec.desktop" && -f "$srcdir/$topdir/mec.svg" ]]; then
+    install -Dm644 "$srcdir/$topdir/mec.desktop" "$pkgdir/usr/share/applications/mec.desktop"
+    install -Dm644 "$srcdir/$topdir/mec.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/mec.svg"
+  fi
 }

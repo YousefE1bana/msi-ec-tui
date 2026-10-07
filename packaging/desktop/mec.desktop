@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=MEC — MSI EC Control Center
+GenericName=MSI Laptop Control Center
+Comment=Monitor and safely control supported MSI laptops
+Exec=mec
+TryExec=mec
+Icon=mec
+Terminal=true
+Categories=System;Monitor;
+Keywords=MSI;Laptop;Battery;Fans;Hardware;
+StartupNotify=false
