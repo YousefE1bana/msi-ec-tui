@@ -128,12 +128,18 @@ fn render_system_card<B: EcBackend>(
 ) {
     let inner = shell::card(frame, area, "SYSTEM", focused, theme);
     let on_linux = std::env::consts::OS == "linux";
-    let msi = live.device().manufacturer == "MSI";
+    let msi = !matches!(
+        live.mode(),
+        SupportMode::ReadOnly(
+            crate::hardware::ReadOnlyReason::NonMsiHardware
+                | crate::hardware::ReadOnlyReason::UnverifiedHardwareIdentity
+        )
+    );
     let fw_known = live.device().ec_firmware_version.is_some();
     let mut lines = vec![
         verdict_line("MSI hardware", msi, theme),
         verdict_line("Linux", on_linux, theme),
-        verdict_line("msi-ec interface", !live.is_degraded(), theme),
+        interface_line(live.mode(), theme),
         verdict_line("EC firmware", fw_known, theme),
     ];
     lines.push(Line::from(""));
@@ -148,6 +154,25 @@ fn render_system_card<B: EcBackend>(
         Paragraph::new(ratatui::text::Text::from(lines)).style(shell::card_style(theme)),
         inner,
     );
+}
+
+/// The support verdict supplies interface evidence independently of
+/// telemetry. Identity failures provide no interface evidence.
+fn interface_line(mode: &SupportMode, theme: &Theme) -> Line<'static> {
+    use crate::hardware::ReadOnlyReason as R;
+    let (text, color) = match mode {
+        SupportMode::Ready => ("PASS", theme.success),
+        SupportMode::ReadOnly(R::MsiEcUnavailable) => ("Unavailable", theme.muted),
+        SupportMode::ReadOnly(R::MsiEcUnreadable) => ("FAIL: unreadable", theme.danger),
+        SupportMode::ReadOnly(R::InconsistentInterface) => ("WARN: inconsistent", theme.warning),
+        SupportMode::ReadOnly(R::NonMsiHardware | R::UnverifiedHardwareIdentity) => {
+            ("Not checked", theme.muted)
+        }
+    };
+    Line::from(vec![
+        ratatui::text::Span::styled("msi-ec interface: ", Style::default().fg(theme.muted)),
+        ratatui::text::Span::styled(text, Style::default().fg(color)),
+    ])
 }
 
 /// Support verdict mapped to PASS/WARN: supported passes, missing stays
@@ -497,5 +522,23 @@ mod tests {
                 render_diagnostics(frame, Rect::new(0, 0, 0, 0), &live, &caps);
             })
             .expect("zero-area diagnostics draws");
+    }
+    #[test]
+    fn waiting_missing_interface_does_not_pass() {
+        let (live, _) = live_for(
+            vec![],
+            SupportMode::ReadOnly(crate::hardware::ReadOnlyReason::MsiEcUnavailable),
+            0,
+        );
+        let text = screen_text(160, 50, |frame| {
+            render_diagnostics(
+                frame,
+                frame.area(),
+                &live,
+                &crate::hardware::Capabilities::default(),
+            )
+        });
+        assert!(!text.contains("msi-ec interface: PASS"));
+        assert!(text.contains("msi-ec interface: Unavailable"));
     }
 }

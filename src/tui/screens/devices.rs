@@ -208,8 +208,6 @@ fn render_table_card<B: EcBackend>(
     for control in control_rows(crate::app::Screen::Devices) {
         let selected = Some(*control) == controls.selected(crate::app::Screen::Devices);
         let current = current_value(*control, snapshot);
-        let staged = staged_value(*control, controls);
-        let show = staged.clone().unwrap_or_else(|| current.clone());
         let marker = if selected { "▸ " } else { "  " };
         lines.push(Line::from(vec![
             Span::styled(marker.to_owned(), Style::default().fg(theme.accent)),
@@ -224,14 +222,8 @@ fn render_table_card<B: EcBackend>(
                 },
             ),
             Span::styled(
-                format!("{show:<11}"),
-                if staged.is_some() {
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.foreground)
-                },
+                format!("{current:<11}"),
+                Style::default().fg(theme.foreground),
             ),
             Span::styled(
                 format!("{:<16}", capability_value(*control, capabilities)),
@@ -258,26 +250,6 @@ fn render_table_card<B: EcBackend>(
         Paragraph::new(Text::from(lines)).style(shell::card_style(theme)),
         inner,
     );
-}
-
-/// Staged draft value for a device row, if an editor holds one.
-fn staged_value(control: ControlId, controls: &ControlState) -> Option<String> {
-    let editor = controls.editor()?;
-    if editor.control() != control {
-        return None;
-    }
-    match editor.draft() {
-        crate::hardware::HardwareCommand::SetWebcam(v)
-        | crate::hardware::HardwareCommand::SetWebcamBlock(v) => Some(if *v {
-            "On".to_owned()
-        } else {
-            "Off".to_owned()
-        }),
-        crate::hardware::HardwareCommand::SetKeyboardBacklight(level) => {
-            Some(format!("Level {level}"))
-        }
-        _ => None,
-    }
 }
 
 fn render_details_card<B: EcBackend>(
@@ -738,5 +710,28 @@ mod tests {
                 );
             })
             .expect("zero-area devices draws");
+    }
+    #[test]
+    fn staged_device_keeps_current_value_in_current_column() {
+        let snapshot = healthy_snapshot();
+        let (live, _) = live_for(vec![Ok(snapshot.clone())], SupportMode::Ready, 1);
+        let caps = full_capabilities();
+        let mut controls = crate::tui::editing::ControlState::default();
+        assert!(controls.begin_edit(
+            crate::app::Screen::Devices,
+            Some(&snapshot),
+            &caps,
+            live.mode()
+        ));
+        controls.adjust(&caps, 1);
+        let text = screen_text(160, 50, |frame| {
+            render_devices(frame, frame.area(), &live, &caps, &controls)
+        });
+        let row = text
+            .lines()
+            .find(|line| line.contains("▸ Webcam "))
+            .unwrap();
+        assert!(row.contains("On"), "{row}");
+        assert!(text.contains("Editing: Webcam: Off"));
     }
 }

@@ -155,6 +155,15 @@ fn render_telemetry_card<B: EcBackend>(
 ) {
     let inner = shell::card(frame, area, "LIVE TELEMETRY", focused, theme);
     let snapshot = live.current_snapshot();
+    // Preserve all readings before decorative meters on short terminals.
+    if inner.height < 14 {
+        frame.render_widget(
+            Paragraph::new(Text::from(crate::tui::ui::thermals_lines(snapshot)))
+                .style(shell::card_style(theme)),
+            inner,
+        );
+        return;
+    }
     let bar_w = (inner.width as usize).saturating_sub(2).clamp(8, 48);
     let cpu = snapshot.and_then(|s| s.cpu_temperature);
     let gpu = snapshot.and_then(|s| s.gpu_temperature);
@@ -267,12 +276,12 @@ fn render_activity_card<B: EcBackend>(
     let snapshot = live.current_snapshot();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Shift verified: ", Style::default().fg(theme.muted)),
+            Span::styled("Shift current: ", Style::default().fg(theme.muted)),
             Span::styled(
                 shift_mode_text(snapshot.and_then(|s| s.shift_mode.as_ref())),
                 Style::default().fg(theme.foreground),
             ),
-            Span::styled("   Fan verified: ", Style::default().fg(theme.muted)),
+            Span::styled("   Fan current: ", Style::default().fg(theme.muted)),
             Span::styled(
                 fan_mode_text(snapshot.and_then(|s| s.fan_mode.as_ref())),
                 Style::default().fg(theme.foreground),
@@ -576,5 +585,19 @@ mod tests {
                 );
             })
             .expect("zero-area performance draws");
+    }
+    #[test]
+    fn sampled_state_never_claims_execution_verification() {
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        let text = screen_text(160, 50, |frame| {
+            render_performance(
+                frame,
+                frame.area(),
+                &live,
+                &full_capabilities(),
+                &crate::tui::editing::ControlState::default(),
+            )
+        });
+        assert!(!text.contains("verified"));
     }
 }

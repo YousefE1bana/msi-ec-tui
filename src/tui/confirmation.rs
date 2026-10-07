@@ -7,16 +7,16 @@
 //! execution re-evaluates everything fresh.
 //!
 //! [`Notice`] is the minimal post-attempt banner: success or failure text
-//! rendered with semantic styles. No queues, timers, or animation.
+//! rendered with semantic styles and monotonic expiry. No execution.
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::hardware::{Capabilities, HardwareCommand, HardwareSnapshot, SupportMode};
-use crate::profiles::{Profile, ProfilePlanner};
+use crate::profiles::{Profile, ProfilePlanner, ProfileTransactionPlanner};
 
 use super::theme::Theme;
 
@@ -191,7 +191,7 @@ pub(crate) fn confirmation_title(pending: &PendingMutation) -> &'static str {
 /// Centered dialog geometry with saturating math so tiny and zero areas
 /// stay panic-free.
 fn overlay_area(area: Rect, line_count: usize) -> Rect {
-    let width = area.width.saturating_sub(4).min(64);
+    let width = area.width.saturating_sub(4).min(100);
     let height = area.height.saturating_sub(2).min(line_count as u16 + 2);
     let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
     let y = area
@@ -212,6 +212,8 @@ pub struct ReviewRow {
     pub requested: String,
     /// True when requested differs from current.
     pub changed: bool,
+    /// Rejection or planning failure. Such a row must never claim SAME.
+    pub unavailable: Option<String>,
 }
 
 /// Pure review table for one pending mutation, derived from the same
@@ -224,49 +226,71 @@ pub(crate) fn review_rows(
     capabilities: &Capabilities,
 ) -> Vec<ReviewRow> {
     match pending {
-        PendingMutation::Command(command) => {
-            let requested_full = super::controls::command_text(command);
-            let (setting, requested) = requested_full
-                .split_once(": ")
-                .map(|(a, b)| (a.to_owned(), b.to_owned()))
-                .unwrap_or((requested_full.clone(), requested_full));
-            let current = super::controls::current_text(command, snapshot);
-            vec![ReviewRow {
-                changed: current != requested,
-                setting,
-                current,
-                requested,
-            }]
-        }
+        PendingMutation::Command(command) => vec![command_review_row(command, snapshot)],
         PendingMutation::Profile(request) => {
-            let preview = ProfilePlanner::preview(request.profile(), mode, capabilities);
-            preview
-                .entries()
-                .iter()
-                .filter_map(|entry| {
-                    let applicable = matches!(
-                        entry.status(),
-                        crate::profiles::ProfilePreviewStatus::Applicable
-                    );
-                    if !applicable {
-                        return None;
-                    }
-                    let requested_full = super::controls::command_text(entry.command());
-                    let (setting, requested) = requested_full
-                        .split_once(": ")
-                        .map(|(a, b)| (a.to_owned(), b.to_owned()))
-                        .unwrap_or((requested_full.clone(), requested_full));
-                    let current = super::controls::current_text(entry.command(), snapshot);
-                    Some(ReviewRow {
-                        changed: current != requested,
-                        setting,
-                        current,
-                        requested,
-                    })
-                })
-                .collect()
+            profile_review_rows(request.profile(), snapshot, mode, capabilities)
         }
     }
+}
+
+fn command_review_row(command: &HardwareCommand, snapshot: Option<&HardwareSnapshot>) -> ReviewRow {
+    let full = super::controls::command_text(command);
+    let (setting, requested) = full
+        .split_once(": ")
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .unwrap_or((full.clone(), full));
+    let current = super::controls::current_text(command, snapshot);
+    ReviewRow {
+        changed: current != requested,
+        unavailable: (current == "unknown").then(|| "Current value unavailable".to_owned()),
+        setting,
+        current,
+        requested,
+    }
+}
+
+/// Profile diffs use the existing pure transaction planner's changed /
+/// unchanged sets. Rejected or unplannable requests keep their reason;
+/// string formatting does not reimplement transaction rules.
+pub(crate) fn profile_review_rows(
+    profile: &Profile,
+    snapshot: Option<&HardwareSnapshot>,
+    mode: &SupportMode,
+    capabilities: &Capabilities,
+) -> Vec<ReviewRow> {
+    let preview = ProfilePlanner::preview(profile, mode, capabilities);
+    let plan = snapshot.map(|snapshot| ProfileTransactionPlanner::plan(&preview, snapshot));
+    preview
+        .entries()
+        .iter()
+        .map(|entry| {
+            let mut row = command_review_row(entry.command(), snapshot);
+            match entry.status() {
+                crate::profiles::ProfilePreviewStatus::Rejected(error) => {
+                    row.changed = false;
+                    row.unavailable = Some(format!("Rejected: {error}"));
+                }
+                crate::profiles::ProfilePreviewStatus::Applicable => match &plan {
+                    Some(Ok(plan)) => {
+                        row.changed = plan
+                            .steps()
+                            .iter()
+                            .any(|step| step.forward() == entry.command());
+                        row.unavailable = None;
+                    }
+                    Some(Err(error)) => {
+                        row.changed = false;
+                        row.unavailable = Some(format!("Plan unavailable: {error}"));
+                    }
+                    None => {
+                        row.changed = false;
+                        row.unavailable = Some("Current snapshot unavailable".to_owned());
+                    }
+                },
+            }
+            row
+        })
+        .collect()
 }
 
 /// Renders the modal confirmation as the approved review workspace:
@@ -283,116 +307,127 @@ pub(crate) fn render_confirmation(
     capabilities: &Capabilities,
     theme: &Theme,
 ) {
-    let rows = review_rows(pending, snapshot, mode, capabilities);
-    let changed = rows.iter().filter(|row| row.changed).count();
-    let mut lines = vec![
-        Line::styled(
-            confirmation_title(pending).trim().to_owned(),
-            Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                format!("{:<18}", "SETTING"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<14}", "CURRENT"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<14}", "REQUESTED"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "RESULT",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ];
-    for row in &rows {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<18}", row.setting),
-                Style::default().fg(theme.muted),
-            ),
-            Span::styled(
-                format!("{:<14}", row.current),
-                Style::default().fg(theme.muted),
-            ),
-            Span::styled(
-                format!("{:<14}", row.requested),
-                if row.changed {
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.muted)
-                },
-            ),
-            Span::styled(
-                if row.changed { "CHANGE" } else { "SAME" }.to_owned(),
-                if row.changed {
-                    Style::default().fg(theme.warning)
-                } else {
-                    Style::default().fg(theme.muted)
-                },
-            ),
-        ]));
+    if area.is_empty() {
+        return;
     }
-    lines.push(Line::from(""));
+    let rows = review_rows(pending, snapshot, mode, capabilities);
+    let changed = rows
+        .iter()
+        .filter(|row| row.changed && row.unavailable.is_none())
+        .count();
+    let unavailable = rows.iter().filter(|row| row.unavailable.is_some()).count();
+    let inner_width = overlay_area(area, 0).width.saturating_sub(2) as usize;
+    let accent = Style::default()
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(theme.muted);
+    let warning = Style::default()
+        .fg(theme.warning)
+        .add_modifier(Modifier::BOLD);
+    let mut lines = vec![Line::styled(
+        confirmation_title(pending).trim().to_owned(),
+        accent,
+    )];
+    if let PendingMutation::Profile(request) = pending {
+        lines.push(Line::from(format!(
+            "Profile: {} ({})",
+            request.profile().name().as_str(),
+            request.source().as_str()
+        )));
+    }
+    if inner_width >= 56 {
+        lines.push(Line::styled(
+            format!(
+                "{:<18}{:<14}{:<14}RESULT",
+                "SETTING", "CURRENT", "REQUESTED"
+            ),
+            accent,
+        ));
+    }
+    for row in &rows {
+        let result = if row.unavailable.is_some() {
+            "UNAVAILABLE"
+        } else if row.changed {
+            "CHANGE"
+        } else {
+            "SAME"
+        };
+        let style = if row.changed || row.unavailable.is_some() {
+            warning
+        } else {
+            muted
+        };
+        let table_line = Line::from(vec![
+            Span::styled(format!("{:<18}", row.setting), muted),
+            Span::styled(format!("{:<14}", row.current), muted),
+            Span::styled(format!("{:<14}", row.requested), style),
+            Span::styled(result, style),
+        ]);
+        if inner_width >= 56 && table_line.width() <= inner_width {
+            lines.push(table_line);
+        } else {
+            // Minimum-width columns cannot contain long driver mode names.
+            // Keep complete values on their own lines when necessary.
+            lines.push(Line::styled(format!("{} — {result}", row.setting), style));
+            for (label, value, value_style) in [
+                ("Current: ", &row.current, muted),
+                ("Requested: ", &row.requested, style),
+            ] {
+                let line = Line::from(vec![
+                    Span::styled(label, muted),
+                    Span::styled(value.clone(), value_style),
+                ]);
+                if line.width() <= inner_width {
+                    lines.push(line);
+                } else {
+                    lines.push(Line::styled(label.trim().to_owned(), muted));
+                    lines.push(Line::styled(value.clone(), value_style));
+                }
+            }
+        }
+    }
     lines.push(Line::styled(
         format!(
-            "{} will change · {} already matches",
-            match changed {
-                1 => "1 setting".to_owned(),
-                n => format!("{n} settings"),
-            },
-            rows.len() - changed,
+            "{changed} will change · {} already matches · {unavailable} unavailable",
+            rows.len() - changed - unavailable
         ),
-        Style::default().fg(theme.foreground),
+        muted,
     ));
-    lines.push(Line::styled(
-        "Nothing has been applied yet.",
-        Style::default()
-            .fg(theme.warning)
-            .add_modifier(Modifier::BOLD),
-    ));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("[Esc] ", Style::default().fg(theme.accent)),
-        Span::styled("Cancel  ", Style::default().fg(theme.muted)),
-        Span::styled("[Enter] ", Style::default().fg(theme.accent)),
-        Span::styled("Apply", Style::default().fg(theme.muted)),
-    ]));
-    let overlay = overlay_area(area, lines.len().max(8));
+    let safety_text = if inner_width < 32 {
+        "Not applied yet"
+    } else {
+        "Nothing has been applied yet."
+    };
+    let mut footer = vec![Line::styled(safety_text, warning)];
+    if inner_width < 32 {
+        footer.push(Line::styled("Esc Cancel", accent));
+        footer.push(Line::styled("Enter Apply", accent));
+    } else {
+        footer.push(Line::styled("[Esc] Cancel  [Enter] Apply", accent));
+    }
+    let overlay = overlay_area(area, lines.len() + footer.len() + 1);
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
         .style(theme.base_style())
         .border_style(Style::default().fg(theme.warning))
-        .title(Line::styled(
-            " REVIEW CHANGES ".to_owned(),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
+        .title(Line::styled(" REVIEW CHANGES ", accent));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
-    let text: Vec<Line<'static>> = lines;
+    // Reserve safety actions independently of content height or wrapping.
+    let bands = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(footer.len() as u16)])
+        .split(inner);
     frame.render_widget(
-        Paragraph::new(Text::from(text)).style(theme.base_style()),
-        inner,
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .style(theme.base_style()),
+        bands[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(footer)).style(theme.base_style()),
+        bands[1],
     );
 }
 
@@ -663,5 +698,191 @@ mod tests {
                 assert!(!text.contains(forbidden), "{forbidden:?}");
             }
         }
+    }
+    #[test]
+    fn battery_review_compares_complete_threshold_windows() {
+        let mut snapshot = crate::tui::screens::support::healthy_snapshot();
+        snapshot.battery_start_threshold = Some(70);
+        let command = HardwareCommand::SetBatteryThreshold(
+            crate::hardware::BatteryThreshold::from_end_percent(80).unwrap(),
+        );
+        let rows = review_rows(
+            &PendingMutation::Command(command),
+            Some(&snapshot),
+            &SupportMode::Ready,
+            &crate::tui::screens::support::full_capabilities(),
+        );
+        assert_eq!(rows[0].requested, "70%->80%");
+        assert!(!rows[0].changed);
+    }
+
+    #[test]
+    fn full_profile_review_preserves_safety_at_required_and_compact_sizes() {
+        let mut snapshot = crate::tui::screens::support::healthy_snapshot();
+        snapshot.battery_start_threshold = Some(70);
+        let mut caps = crate::tui::screens::support::full_capabilities();
+        caps.super_battery = true;
+        let profile = Profile::parse_toml(
+            r#"name = "Six settings"
+[performance]
+shift_mode = "sport"
+fan_mode = "silent"
+cooler_boost = true
+super_battery = true
+[battery]
+charge_end_threshold = 80
+[device]
+keyboard_backlight = 3
+"#,
+        )
+        .unwrap();
+        let pending = PendingMutation::Profile(ProfilePending::new(
+            profile,
+            "six".to_owned(),
+            ProfileSource::Custom,
+        ));
+        for (w, h) in [
+            (160, 50),
+            (120, 35),
+            (100, 30),
+            (80, 24),
+            (50, 16),
+            (40, 10),
+        ] {
+            let text = crate::tui::screens::support::screen_text(w, h, |frame| {
+                render_confirmation(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    Some(&snapshot),
+                    &SupportMode::Ready,
+                    &caps,
+                    &Theme::default(),
+                )
+            });
+            assert!(text.contains("applied yet"), "{w}x{h}: {text}");
+            assert!(text.contains("Cancel"), "{w}x{h}: {text}");
+            assert!(text.contains("Apply"), "{w}x{h}: {text}");
+            if w >= 80 {
+                for setting in [
+                    "Shift Mode",
+                    "Fan Mode",
+                    "Cooler Boost",
+                    "Super Battery",
+                    "Battery Limit",
+                    "Keyboard Backlight",
+                ] {
+                    assert!(text.contains(setting), "{w}x{h}: {setting}");
+                }
+                assert!(text.contains("70%->80%"));
+                assert!(text.contains("Six settings"));
+            }
+        }
+    }
+
+    #[test]
+    fn profile_review_uses_transaction_plan_and_preserves_missing_baselines() {
+        let profile = Profile::parse_toml(
+            r#"name = "Window"
+[battery]
+charge_end_threshold = 80
+"#,
+        )
+        .unwrap();
+        let caps = crate::tui::screens::support::full_capabilities();
+        let mut snapshot = crate::tui::screens::support::healthy_snapshot();
+        snapshot.battery_start_threshold = Some(70);
+        let preview = ProfilePlanner::preview(&profile, &SupportMode::Ready, &caps);
+        let plan = ProfileTransactionPlanner::plan(&preview, &snapshot).unwrap();
+        let rows = profile_review_rows(&profile, Some(&snapshot), &SupportMode::Ready, &caps);
+        assert_eq!(
+            rows.iter().filter(|row| row.changed).count(),
+            plan.steps().len()
+        );
+        assert_eq!(
+            rows.iter().filter(|row| !row.changed).count(),
+            plan.unchanged().len()
+        );
+        assert!(!rows[0].changed);
+        snapshot.battery_start_threshold = None;
+        let rows = profile_review_rows(&profile, Some(&snapshot), &SupportMode::Ready, &caps);
+        assert!(
+            rows[0]
+                .unavailable
+                .as_ref()
+                .unwrap()
+                .contains("unavailable")
+        );
+    }
+
+    #[test]
+    fn long_mode_review_preserves_full_current_and_requested_values() {
+        let current = "c".repeat(64);
+        let requested = "r".repeat(64);
+        let mut snapshot = crate::tui::screens::support::healthy_snapshot();
+        snapshot.fan_mode = Some(FanMode::try_from(current.as_str()).unwrap());
+        let pending = PendingMutation::Command(HardwareCommand::SetFanMode(
+            FanMode::try_from(requested.as_str()).unwrap(),
+        ));
+        for (w, h) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+            let text = crate::tui::screens::support::screen_text(w, h, |frame| {
+                render_confirmation(
+                    frame,
+                    frame.area(),
+                    &pending,
+                    Some(&snapshot),
+                    &SupportMode::Ready,
+                    &crate::tui::screens::support::full_capabilities(),
+                    &Theme::default(),
+                )
+            });
+            assert!(text.contains(&current), "{w}x{h}: {text}");
+            assert!(text.contains(&requested), "{w}x{h}: {text}");
+            assert!(text.contains("Cancel"));
+            assert!(text.contains("Apply"));
+        }
+        let mut caps = crate::tui::screens::support::full_capabilities();
+        caps.fan_modes
+            .push(FanMode::try_from(requested.as_str()).unwrap());
+        caps.shift_modes
+            .push(crate::hardware::ShiftMode::try_from(requested.as_str()).unwrap());
+        caps.super_battery = true;
+        snapshot.shift_mode = Some(crate::hardware::ShiftMode::try_from(current.as_str()).unwrap());
+        snapshot.battery_start_threshold = Some(70);
+        let profile = Profile::parse_toml(&format!(
+            r#"name = "Six long settings"
+[performance]
+shift_mode = "{requested}"
+fan_mode = "{requested}"
+cooler_boost = true
+super_battery = true
+[battery]
+charge_end_threshold = 80
+[device]
+keyboard_backlight = 3
+"#
+        ))
+        .unwrap();
+        let pending = PendingMutation::Profile(ProfilePending::new(
+            profile,
+            "long".to_owned(),
+            ProfileSource::Custom,
+        ));
+        let text = crate::tui::screens::support::screen_text(80, 24, |frame| {
+            render_confirmation(
+                frame,
+                frame.area(),
+                &pending,
+                Some(&snapshot),
+                &SupportMode::Ready,
+                &caps,
+                &Theme::default(),
+            )
+        });
+        assert_eq!(text.matches(&current).count(), 2, "{text}");
+        assert_eq!(text.matches(&requested).count(), 2, "{text}");
+        assert!(text.contains("Keyboard Backlight"));
+        assert!(text.contains("Nothing has been applied yet."));
+        assert!(text.contains("Apply"));
     }
 }

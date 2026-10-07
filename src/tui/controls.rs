@@ -34,7 +34,11 @@ pub(crate) fn command_text(command: &HardwareCommand) -> String {
             format!("Keyboard Backlight: {level}")
         }
         HardwareCommand::SetBatteryThreshold(threshold) => {
-            format!("Battery Limit: {}%", threshold.end_percent())
+            format!(
+                "Battery Limit: {}%->{}%",
+                threshold.start_percent(),
+                threshold.end_percent()
+            )
         }
     }
 }
@@ -417,7 +421,7 @@ mod tests {
         );
         assert_eq!(
             command_text(&HardwareCommand::SetBatteryThreshold(threshold())),
-            "Battery Limit: 80%"
+            "Battery Limit: 70%->80%"
         );
     }
 

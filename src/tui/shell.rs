@@ -227,9 +227,10 @@ pub(crate) fn inset(area: Rect) -> Rect {
     }
 }
 
-/// Narrow terminals stack panels vertically instead of side-by-side.
+/// Stack only below the full-screen minimum; stacking inside short
+/// percentage bands otherwise hides selected controls and drafts.
 pub(crate) fn is_narrow(area: Rect) -> bool {
-    area.width < 110
+    area.width < 60
 }
 
 /// Horizontal pair with a 1-cell gap on wide terminals; vertical stack on

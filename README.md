@@ -19,8 +19,8 @@ install/upgrade/uninstall guides.
 Running `cargo run` with no subcommand launches the interactive TUI when
 both stdin and stdout are terminals:
 
-- `1`–`7` jump directly to a screen (Dashboard, Performance, Fans,
-  Battery, Devices, Profiles, Diagnostics)
+- `1`–`8` jump directly to a screen (Dashboard, Performance, Fans,
+  Battery, Devices, Profiles, Diagnostics, Settings); `9` exits
 - Arrow keys / Tab move between screens; `h`/`j`/`k`/`l` too unless
   `vim_keys = false` is configured
 - `P` opens the command palette (screens, notifications, themes)
@@ -50,8 +50,8 @@ Implemented in this tree:
 - `mec monitor` with validated 500ms/1s/2s/5s polling,
   bounded in-memory history, Ctrl+C shutdown, and graceful
   snapshot-error degradation with recovery notices
-- Seven-screen interactive TUI (`mec` on a terminal): Dashboard,
-  Performance, Fans, Battery, Devices, Profiles, and Diagnostics with
+- Eight-screen interactive TUI (`mec` on a terminal): Dashboard,
+  Performance, Fans, Battery, Devices, Profiles, Diagnostics, and Settings with
   configurable polling, contextual selection/editing, and an explicit
   confirmation step before any mutation
 - Safe TUI hardware commands through the existing safety APIs, and TUI

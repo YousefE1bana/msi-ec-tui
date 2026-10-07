@@ -13,8 +13,7 @@ use crate::app::{AppAction, Screen};
 use super::responsive::{LayoutTier, layout_tier};
 
 /// Approved menu rows in order: the seven production screens, a Settings
-/// entry, and Exit. Production owns seven screens; Settings has no screen
-/// and routes to the closest existing read-only surface (Diagnostics).
+/// entry, and Exit. All eight production screens have their own route.
 pub const MENU_LABELS: [&str; 9] = [
     "Dashboard",
     "Performance",
@@ -229,8 +228,8 @@ pub(crate) fn grid_cards(workspace: Rect) -> Vec<Rect> {
 
 /// Maps one mouse event to a non-mutating [`AppAction`]. `palette_open`
 /// routes clicks into the palette overlay (select-and-activate through
-/// the existing palette path, or close on outside clicks); `profile_rows`
-/// bounds profile row selection. Returns `None` for anything inert:
+/// the existing palette path, or close on outside clicks); `profile_view`
+/// supplies the row count and existing selected index for scrolling. Returns `None` for anything inert:
 /// non-full tiers, unmapped areas, non-left buttons, hover/drag motion.
 ///
 /// Clicks select or focus only: rows enter keyboard-identical selection
@@ -241,7 +240,7 @@ pub fn action_for_mouse(
     full: Rect,
     current: Screen,
     palette_open: bool,
-    profile_rows: usize,
+    profile_view: (usize, usize),
     event: MouseEvent,
 ) -> Option<AppAction> {
     if layout_tier(full) != LayoutTier::Full {
@@ -290,10 +289,17 @@ pub fn action_for_mouse(
             if contains(foot_quit, col, row) {
                 return Some(AppAction::Quit);
             }
-            let regions = screen_regions(current, workspace, profile_rows)?;
+            let regions = screen_regions(current, workspace, profile_view.0)?;
             if let Some(index) = super::shell::hit_row(&regions.rows, col, row) {
                 return Some(match current {
-                    Screen::Profiles => AppAction::SelectProfileRow(index),
+                    Screen::Profiles => AppAction::SelectProfileRow(
+                        index
+                            + super::screens::profiles::visible_row_start(
+                                workspace,
+                                profile_view.0,
+                                profile_view.1,
+                            ),
+                    ),
                     _ => AppAction::SelectControlRow(index),
                 });
             }
@@ -303,7 +309,7 @@ pub fn action_for_mouse(
             None
         }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let regions = screen_regions(current, workspace, profile_rows)?;
+            let regions = screen_regions(current, workspace, profile_view.0)?;
             let over_rows = regions.rows.iter().any(|area| contains(*area, col, row));
             if over_rows && matches!(current, Screen::Profiles) {
                 // Profile rows move like keyboard arrows on Profiles.
@@ -518,7 +524,13 @@ mod tests {
         for (index, screen) in Screen::ALL.iter().enumerate() {
             let row = &regions.menu_rows[index];
             assert_eq!(
-                action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
+                action_for_mouse(
+                    FULL,
+                    Screen::Dashboard,
+                    false,
+                    (5, 0),
+                    click(row.x + 1, row.y)
+                ),
                 Some(AppAction::GoTo(*screen)),
                 "row {index} must navigate"
             );
@@ -531,7 +543,13 @@ mod tests {
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[SETTINGS_ROW];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                (5, 0),
+                click(row.x + 1, row.y)
+            ),
             Some(AppAction::GoTo(Screen::Settings))
         );
     }
@@ -542,7 +560,13 @@ mod tests {
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[EXIT_ROW];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                (5, 0),
+                click(row.x + 1, row.y)
+            ),
             Some(AppAction::Quit)
         );
     }
@@ -563,7 +587,7 @@ mod tests {
                 "probe point must avoid menu rows"
             );
             assert_eq!(
-                action_for_mouse(FULL, Screen::Dashboard, false, 5, click(col, row)),
+                action_for_mouse(FULL, Screen::Dashboard, false, (5, 0), click(col, row)),
                 Some(AppAction::FocusCard(index)),
                 "card {index} must focus"
             );
@@ -575,7 +599,13 @@ mod tests {
         let regions = dashboard_regions(FULL).expect("full area maps");
         let row = &regions.menu_rows[2];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                (5, 0),
+                click(row.x + 1, row.y)
+            ),
             Some(AppAction::GoTo(Screen::Fans))
         );
     }
@@ -588,7 +618,7 @@ mod tests {
                 FULL,
                 Screen::Dashboard,
                 false,
-                5,
+                (5, 0),
                 click(regions.foot_help.x + 1, regions.foot_help.y)
             ),
             Some(AppAction::ToggleHelp)
@@ -598,7 +628,7 @@ mod tests {
                 FULL,
                 Screen::Dashboard,
                 false,
-                5,
+                (5, 0),
                 click(regions.foot_quit.x + 1, regions.foot_quit.y)
             ),
             Some(AppAction::Quit)
@@ -626,7 +656,7 @@ mod tests {
                 FULL,
                 Screen::Dashboard,
                 false,
-                5,
+                (5, 0),
                 wheel(true, row.x + 1, row.y)
             ),
             Some(AppAction::MoveUp)
@@ -636,7 +666,7 @@ mod tests {
                 FULL,
                 Screen::Dashboard,
                 false,
-                5,
+                (5, 0),
                 wheel(false, row.x + 1, row.y)
             ),
             Some(AppAction::MoveDown)
@@ -650,11 +680,23 @@ mod tests {
         let col = card.x + 2;
         let row = card.y + 2;
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, false, 5, wheel(true, col, row)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                (5, 0),
+                wheel(true, col, row)
+            ),
             None
         );
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, false, 5, wheel(false, col, row)),
+            action_for_mouse(
+                FULL,
+                Screen::Dashboard,
+                false,
+                (5, 0),
+                wheel(false, col, row)
+            ),
             None
         );
     }
@@ -674,13 +716,13 @@ mod tests {
             assert_eq!(regions.rows.len(), rows, "{screen:?} row count");
             let row = &regions.rows[0];
             assert_eq!(
-                action_for_mouse(FULL, screen, false, 5, click(row.x + 1, row.y)),
+                action_for_mouse(FULL, screen, false, (5, 0), click(row.x + 1, row.y)),
                 Some(AppAction::SelectControlRow(0)),
                 "{screen:?} must select row 0"
             );
             let last = &regions.rows[rows - 1];
             assert_eq!(
-                action_for_mouse(FULL, screen, false, 5, click(last.x + 1, last.y)),
+                action_for_mouse(FULL, screen, false, (5, 0), click(last.x + 1, last.y)),
                 Some(AppAction::SelectControlRow(rows - 1)),
                 "{screen:?} must select last row"
             );
@@ -694,7 +736,13 @@ mod tests {
         assert_eq!(regions.rows.len(), 5);
         let row = &regions.rows[2];
         assert_eq!(
-            action_for_mouse(FULL, Screen::Profiles, false, 5, click(row.x + 1, row.y)),
+            action_for_mouse(
+                FULL,
+                Screen::Profiles,
+                false,
+                (5, 0),
+                click(row.x + 1, row.y)
+            ),
             Some(AppAction::SelectProfileRow(2))
         );
     }
@@ -709,7 +757,7 @@ mod tests {
             assert!(regions.rows.is_empty(), "{screen:?} has no rows");
             let card = &regions.cards[0];
             assert_eq!(
-                action_for_mouse(FULL, screen, false, 5, click(card.x + 2, card.y + 2)),
+                action_for_mouse(FULL, screen, false, (5, 0), click(card.x + 2, card.y + 2)),
                 Some(AppAction::FocusCard(0))
             );
         }
@@ -725,14 +773,14 @@ mod tests {
                 FULL,
                 Screen::Dashboard,
                 true,
-                5,
+                (5, 0),
                 click(overlay.x + 3, row_y)
             ),
             Some(AppAction::ActivatePaletteRow(2))
         );
         // Outside clicks close the palette like keyboard Cancel.
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, true, 5, click(2, 30)),
+            action_for_mouse(FULL, Screen::Dashboard, true, (5, 0), click(2, 30)),
             Some(AppAction::Cancel)
         );
     }
@@ -746,7 +794,7 @@ mod tests {
                 FULL,
                 Screen::Fans,
                 true,
-                5,
+                (5, 0),
                 wheel(true, overlay.x + 3, overlay.y + 3)
             ),
             Some(AppAction::MoveUp)
@@ -770,7 +818,7 @@ mod tests {
                 modifiers: KeyModifiers::empty(),
             };
             assert_eq!(
-                action_for_mouse(FULL, Screen::Dashboard, false, 5, event),
+                action_for_mouse(FULL, Screen::Dashboard, false, (5, 0), event),
                 None,
                 "{kind:?} must be inert"
             );
@@ -781,7 +829,7 @@ mod tests {
     fn clicks_outside_regions_are_inert() {
         // The top strip carries state but no actions in P1.
         assert_eq!(
-            action_for_mouse(FULL, Screen::Dashboard, false, 5, click(150, 0)),
+            action_for_mouse(FULL, Screen::Dashboard, false, (5, 0), click(150, 0)),
             None,
             "top strip must stay inert in P1"
         );
@@ -829,7 +877,7 @@ mod tests {
         points.push((regions.foot_quit.x + 1, regions.foot_quit.y));
         for (col, row) in points {
             if let Some(action) =
-                action_for_mouse(FULL, Screen::Dashboard, false, 5, click(col, row))
+                action_for_mouse(FULL, Screen::Dashboard, false, (5, 0), click(col, row))
             {
                 assert!(
                     matches!(
@@ -849,10 +897,27 @@ mod tests {
                 FULL,
                 Screen::Dashboard,
                 false,
-                5,
+                (5, 0),
                 wheel(true, row.x + 1, row.y)
             ),
             Some(AppAction::MoveUp)
         ));
+    }
+    #[test]
+    fn scrolled_profile_click_selects_the_drawn_row() {
+        let full = Rect::new(0, 0, 80, 24);
+        let workspace = super::super::shell::shell_split(full).1;
+        let regions = super::screen_regions(Screen::Profiles, workspace, 45).unwrap();
+        let last = regions.rows.last().unwrap();
+        assert_eq!(
+            action_for_mouse(
+                full,
+                Screen::Profiles,
+                false,
+                (45, 44),
+                click(last.x + 1, last.y)
+            ),
+            Some(AppAction::SelectProfileRow(44))
+        );
     }
 }

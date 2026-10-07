@@ -77,8 +77,8 @@ pub fn render_screen<B: EcBackend>(
 ///
 /// Layering is deterministic: active/compact screen at the bottom, then the
 /// result notice, then the command palette, then the notification history,
-/// then the modal confirmation, then help on top. Tiny skips overlays
-/// and stays a safe fallback.
+/// then the modal confirmation, then help on top. Tiny retains pending
+/// confirmation safety actions while skipping utility overlays.
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_theme<B: EcBackend>(
     frame: &mut Frame,
@@ -146,6 +146,19 @@ pub fn render_screen_with_theme<B: EcBackend>(
             palette,
             notifications,
             notifications_open,
+            theme,
+        );
+    }
+    if matches!(tier, LayoutTier::Tiny)
+        && let Some(pending) = controls.pending()
+    {
+        crate::tui::confirmation::render_confirmation(
+            frame,
+            area,
+            pending,
+            live.current_snapshot(),
+            live.mode(),
+            capabilities,
             theme,
         );
     }
@@ -1000,7 +1013,9 @@ mod tests {
                 false,
             );
         });
-        assert!(!text.is_empty());
+        assert!(text.contains("Not applied"));
+        assert!(text.contains("Esc Cancel"));
+        assert!(text.contains("Enter Apply"));
     }
 
     #[test]
@@ -2120,5 +2135,120 @@ mod tests {
         )
         .expect("failure notice present");
         assert_eq!(fg, Color::Red);
+    }
+    #[test]
+    fn selected_control_and_draft_survive_required_sizes() {
+        let snapshot = healthy_snapshot();
+        let mut capabilities = full_capabilities();
+        capabilities.super_battery = true;
+        for (width, height) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+            let (live, _) = live_for(vec![Ok(snapshot.clone())], SupportMode::Ready, 1);
+            let app = app_on(Screen::Performance);
+            let mut controls = crate::tui::editing::ControlState::default();
+            controls.select_index(Screen::Performance, 3);
+            assert!(controls.begin_edit(
+                Screen::Performance,
+                Some(&snapshot),
+                &capabilities,
+                live.mode()
+            ));
+            controls.adjust(&capabilities, 1);
+            let text = screen_text(width, height, |frame| {
+                render_screen(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &live,
+                    &capabilities,
+                    &crate::tui::ProfileCatalog::empty(),
+                    &crate::app::ProfileSelection::default(),
+                    &controls,
+                    &crate::tui::palette::CommandPalette::default(),
+                    &crate::tui::notifications::NotificationCenter::new(),
+                    false,
+                )
+            });
+            assert!(text.contains("▸ Super Battery"), "{width}x{height}: {text}");
+            assert!(
+                text.contains("Editing: Super Battery: On"),
+                "{width}x{height}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn real_fixtures_render_truthfully_at_required_sizes() {
+        use crate::hardware::{LinuxSysfsReader, SystemPaths};
+        for fixture in ["gf63", "partial-device", "broken-sysfs"] {
+            let paths = SystemPaths::new(
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures")
+                    .join(fixture),
+            );
+            let mut app = crate::tui::prepare_tui(paths, LinuxSysfsReader).unwrap();
+            app.refresh();
+            for (screen, heading) in [
+                (Screen::Performance, "PERFORMANCE CONTROL"),
+                (Screen::Fans, "FAN CONTROL"),
+                (Screen::Battery, "BATTERY STATUS"),
+                (Screen::Devices, "DEVICES"),
+                (Screen::Profiles, "PROFILES"),
+                (Screen::Diagnostics, "SYSTEM"),
+                (Screen::Settings, "INTERFACE"),
+            ] {
+                app.handle_action(AppAction::GoTo(screen));
+                for (w, h) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+                    let text = screen_text(w, h, |frame| {
+                        render_screen_with_theme(
+                            frame,
+                            frame.area(),
+                            app.state(),
+                            app.live(),
+                            app.capabilities(),
+                            app.profile_catalog(),
+                            app.profile_selection(),
+                            app.controls(),
+                            app.palette(),
+                            app.notifications(),
+                            app.notifications_open(),
+                            &app.theme(),
+                            app.config(),
+                        )
+                    });
+                    assert!(
+                        text.contains(heading),
+                        "{fixture} {screen:?} {w}x{h}: {text}"
+                    );
+                    assert!(!text.contains("1 Dashboard"));
+                    assert!(!text.contains("RPM"));
+                    if fixture == "broken-sysfs" {
+                        assert!(text.contains("READ-ONLY"));
+                    }
+                    if fixture == "partial-device"
+                        && matches!(
+                            screen,
+                            Screen::Performance | Screen::Fans | Screen::Battery | Screen::Devices
+                        )
+                    {
+                        assert!(text.contains("N/A") || text.contains("unknown"));
+                    }
+                    if fixture == "gf63" {
+                        for value in match screen {
+                            Screen::Performance => vec!["comfort", "auto", "63°C", "42%"],
+                            Screen::Fans => vec!["42%", "31%", "63°C", "51°C"],
+                            Screen::Battery => vec!["77%", "Charging", "Connected", "70%", "80%"],
+                            Screen::Devices => vec!["Webcam", "On", "Level 2"],
+                            Screen::Diagnostics => {
+                                vec!["MSI hardware: PASS", "msi-ec interface: PASS"]
+                            }
+                            Screen::Settings => vec!["MSI Dark", "1000 ms", "Vim keys"],
+                            _ => vec![],
+                        } {
+                            assert!(text.contains(value), "{screen:?} {w}x{h}: {value}: {text}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

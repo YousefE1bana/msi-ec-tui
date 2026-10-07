@@ -28,13 +28,13 @@ pub(crate) fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
         .title(Line::styled(
             format!(" {HELP_TITLE} "),
             Style::default()
-                .fg(theme.primary)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(overlay);
     frame.render_widget(block, overlay);
     let section = Style::default()
-        .fg(theme.secondary)
+        .fg(theme.accent)
         .bg(theme.background)
         .add_modifier(Modifier::BOLD);
     let styled: Vec<Line<'static>> = lines

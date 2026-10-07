@@ -126,6 +126,19 @@ pub(crate) fn hit_regions(workspace: Rect, row_count: usize) -> shell::ScreenReg
     shell::ScreenRegions { cards, rows }
 }
 
+/// The same pure viewport offset is used for drawing and mouse selection.
+fn row_start(inner: Rect, count: usize, selected: usize) -> usize {
+    let fit = usize::from(inner.height.saturating_sub(1));
+    selected
+        .saturating_sub(fit.saturating_sub(1))
+        .min(count.saturating_sub(fit))
+}
+
+pub(crate) fn visible_row_start(workspace: Rect, count: usize, selected: usize) -> usize {
+    let regions = hit_regions(workspace, count);
+    row_start(shell::inset(regions.cards[0]), count, selected)
+}
+
 /// Total selectable rows: five built-ins, then custom entries in catalog
 /// lexical order. Never zero in practice; zero is still safe.
 pub(crate) fn profile_row_count(catalog: &ProfileCatalog) -> usize {
@@ -261,8 +274,9 @@ fn render_table_card(
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
-    let fit = (inner.height.saturating_sub(1)) as usize;
-    for index in 0..profile_row_count(catalog).min(fit.max(1)) {
+    let fit = usize::from(inner.height.saturating_sub(1));
+    let start = row_start(inner, profile_row_count(catalog), selection.index());
+    for index in start..(start + fit).min(profile_row_count(catalog)) {
         let Some(row) = profile_row(index, catalog) else {
             continue;
         };
@@ -309,7 +323,12 @@ fn render_table_card(
             ),
         ]));
     }
-    if catalog.customs().is_empty() {
+    if !catalog.customs_available() {
+        lines.push(Line::styled(
+            "Custom profiles unavailable",
+            Style::default().fg(theme.warning),
+        ));
+    } else if catalog.customs().is_empty() {
         lines.push(Line::styled(
             "(none) custom profiles",
             Style::default().fg(theme.muted),
@@ -368,8 +387,15 @@ fn render_summary_card(
         ));
     }
     let mut changed = 0;
+    let mut unavailable = 0;
     for row in &rows {
-        if row.changed {
+        if let Some(reason) = &row.unavailable {
+            unavailable += 1;
+            lines.push(Line::styled(
+                format!("· {}: {} ({reason})", row.setting, row.requested),
+                Style::default().fg(theme.warning),
+            ));
+        } else if row.changed {
             changed += 1;
             lines.push(Line::from(vec![
                 Span::styled("· ", Style::default().fg(theme.warning)),
@@ -387,7 +413,10 @@ fn render_summary_card(
     }
     lines.push(Line::from(""));
     lines.push(Line::styled(
-        format!("{changed} changes · {} unchanged", rows.len() - changed),
+        format!(
+            "{changed} changes · {} unchanged · {unavailable} unavailable",
+            rows.len() - changed - unavailable
+        ),
         Style::default().fg(theme.muted),
     ));
     frame.render_widget(
@@ -429,22 +458,14 @@ fn render_action_card<B: EcBackend>(
     );
 }
 
-/// One previewed setting against current hardware state, derived from the
-/// existing [`ProfilePlanner::preview`]. Presentation only.
-struct SummaryRow {
-    setting: String,
-    current: String,
-    requested: String,
-    changed: bool,
-}
-
+/// Selected profile's descriptive diff from the existing pure planner.
 fn summary_rows(
     index: usize,
     catalog: &ProfileCatalog,
     mode: &SupportMode,
     snapshot: Option<&HardwareSnapshot>,
     capabilities: &Capabilities,
-) -> Vec<SummaryRow> {
+) -> Vec<crate::tui::confirmation::ReviewRow> {
     let Some(row) = profile_row(index, catalog) else {
         return Vec::new();
     };
@@ -455,32 +476,11 @@ fn summary_rows(
             .get(position)
             .and_then(|entry| entry.profile().cloned()),
     };
-    let Some(profile) = profile else {
-        return Vec::new();
-    };
-    let preview = ProfilePlanner::preview(&profile, mode, capabilities);
-    preview
-        .entries()
-        .iter()
-        .map(|entry| {
-            let requested_full = command_text(entry.command());
-            let (setting, requested) = requested_full
-                .split_once(": ")
-                .map(|(a, b)| (a.to_owned(), b.to_owned()))
-                .unwrap_or((requested_full.clone(), requested_full));
-            let current = current_text(entry.command(), snapshot);
-            let applicable = matches!(
-                entry.status(),
-                crate::profiles::ProfilePreviewStatus::Applicable
-            );
-            SummaryRow {
-                setting,
-                current: current.clone(),
-                requested: requested.clone(),
-                changed: applicable && current != requested,
-            }
+    profile
+        .map(|profile| {
+            crate::tui::confirmation::profile_review_rows(&profile, snapshot, mode, capabilities)
         })
-        .collect()
+        .unwrap_or_default()
 }
 
 /// Details and pure capability preview for one selected row. The preview
@@ -834,5 +834,62 @@ mod tests {
         let text = text_with_catalog(&full_capabilities(), &catalog);
         assert!(text.contains("Inspect Work") || text.contains("work"));
         assert!(text.contains("custom"));
+    }
+    #[test]
+    fn rejected_profile_summary_never_claims_same() {
+        let (live, _) = live_for(
+            vec![Ok(healthy_snapshot())],
+            SupportMode::ReadOnly(crate::hardware::ReadOnlyReason::MsiEcUnavailable),
+            1,
+        );
+        let text = screen_text(160, 50, |frame| {
+            render_profiles(
+                frame,
+                frame.area(),
+                &live,
+                &full_capabilities(),
+                &ProfileCatalog::empty(),
+                &crate::app::ProfileSelection::default(),
+            )
+        });
+        assert!(!text.contains("(same)"));
+        assert!(text.contains("Rejected"));
+    }
+    #[test]
+    fn unavailable_catalog_is_not_an_empty_catalog() {
+        let text = text_with_catalog(&full_capabilities(), &ProfileCatalog::unavailable());
+        assert!(text.contains("Custom profiles unavailable"));
+        assert!(!text.contains("(none) custom profiles"));
+    }
+
+    #[test]
+    fn selected_profile_scrolls_into_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::profiles::ProfileStore::new(dir.path().join("profiles"));
+        std::fs::create_dir_all(store.directory()).unwrap();
+        for n in 0..40 {
+            std::fs::write(
+                store.directory().join(format!("custom{n:02}.toml")),
+                format!("name = \"Custom{n:02}\"\n[performance]\nfan_mode = \"silent\"\n"),
+            )
+            .unwrap();
+        }
+        let catalog = ProfileCatalog::from_store(&store);
+        let mut selection = crate::app::ProfileSelection::default();
+        selection.set_index(44, 45);
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        for (w, h) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+            let text = screen_text(w, h, |frame| {
+                render_profiles(
+                    frame,
+                    frame.area(),
+                    &live,
+                    &full_capabilities(),
+                    &catalog,
+                    &selection,
+                )
+            });
+            assert!(text.contains("▸ Custom39"), "{w}x{h}: {text}");
+        }
     }
 }

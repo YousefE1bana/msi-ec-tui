@@ -735,7 +735,7 @@ where
                 app.viewport(),
                 app.state().current_screen(),
                 app.palette().is_open(),
-                app.profile_row_count(),
+                (app.profile_row_count(), app.profile_selection().index()),
                 mouse,
             ) {
                 app.expire_transient_notice();
@@ -3245,5 +3245,45 @@ mod tests {
         assert!(latest.message().contains("using defaults"));
         assert!(!latest.message().contains("home"));
         assert!(app.live().device().product_name.contains("GF63"));
+    }
+    #[test]
+    fn representative_keyboard_controls_remain_confirmation_gated() {
+        use crate::hardware::{BatteryThreshold, FanMode, HardwareCommand, ShiftMode};
+        for (screen, row, expected) in [
+            (
+                Screen::Performance,
+                0,
+                HardwareCommand::SetShiftMode(ShiftMode::try_from("sport").unwrap()),
+            ),
+            (
+                Screen::Fans,
+                0,
+                HardwareCommand::SetFanMode(FanMode::try_from("silent").unwrap()),
+            ),
+            (Screen::Fans, 1, HardwareCommand::SetCoolerBoost(true)),
+            (
+                Screen::Battery,
+                0,
+                HardwareCommand::SetBatteryThreshold(
+                    BatteryThreshold::from_end_percent(90).unwrap(),
+                ),
+            ),
+            (Screen::Devices, 0, HardwareCommand::SetWebcam(false)),
+            (Screen::Devices, 2, HardwareCommand::SetKeyboardBacklight(3)),
+        ] {
+            let mut app = healthy_control_app(screen);
+            for _ in 0..row {
+                app.handle_action(AppAction::MoveDown);
+            }
+            app.handle_action(AppAction::Activate);
+            app.handle_action(AppAction::MoveRight);
+            app.handle_action(AppAction::Activate);
+            assert_eq!(app.controls().pending_command(), Some(&expected));
+            assert!(app.executor().received_commands().is_empty());
+            assert!(app.executor().received_profiles().is_empty());
+            app.handle_action(AppAction::Activate);
+            assert_eq!(app.executor().received_commands(), &[expected]);
+            assert!(app.controls().pending().is_none());
+        }
     }
 }
