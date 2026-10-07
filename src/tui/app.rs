@@ -62,6 +62,8 @@ pub enum TuiError {
 /// terminal or filesystem handles beyond the backend itself.
 pub struct TuiApp<B, E = SafeTuiExecutor> {
     state: AppState,
+    update_receiver:
+        Option<std::sync::mpsc::Receiver<Result<crate::updates::UpdateStatus, String>>>,
     live: LiveHardware<B>,
     capabilities: Capabilities,
     profile_catalog: ProfileCatalog,
@@ -232,11 +234,26 @@ where
             return mouse::navigation_action(
                 full,
                 screen,
-                true,
+                Some(self.palette.selected_index()),
                 (self.profile_row_count(), self.profile_selection.index()),
                 read_only,
                 event,
             );
+        }
+        if self.state.about_visible() {
+            return mouse::button_action(&super::screens::about::buttons(full), event);
+        }
+        if screen == Screen::Settings
+            && super::responsive::layout_tier(full) == super::responsive::LayoutTier::Full
+            && let Some(action) = mouse::button_action(
+                &[(
+                    super::screens::settings::about_button(workspace),
+                    A::ShowAbout,
+                )],
+                event,
+            )
+        {
+            return Some(action);
         }
         if super::responsive::layout_tier(full) != super::responsive::LayoutTier::Full {
             return None;
@@ -310,7 +327,7 @@ where
         mouse::navigation_action(
             full,
             screen,
-            false,
+            None,
             (self.profile_row_count(), self.profile_selection.index()),
             read_only,
             event,
@@ -414,6 +431,23 @@ where
             }
             return;
         }
+        if self.state.about_visible() {
+            match action {
+                A::Cancel | A::HideAbout => self.state.apply(A::HideAbout),
+                A::Activate if self.state.focused_card() == 2 => self.start_update_check(),
+                A::CheckUpdates => self.start_update_check(),
+                A::Activate => {}
+                A::TogglePalette => self.palette.open(),
+                A::MoveUp => self
+                    .state
+                    .apply(A::FocusCard((self.state.focused_card() + 2) % 3)),
+                A::MoveDown => self
+                    .state
+                    .apply(A::FocusCard((self.state.focused_card() + 1) % 3)),
+                _ => self.state.apply(action),
+            }
+            return;
+        }
         let screen = self.state.current_screen();
         match action {
             A::MoveUp if self.controls.is_editing() => {}
@@ -476,6 +510,8 @@ where
                     &mode,
                 );
             }
+            A::Activate if screen == Screen::Settings => self.state.apply(A::ShowAbout),
+            A::CheckUpdates => {}
             A::Activate => {}
             // The palette opens only from normal browsing: no help (gated
             // above), no pending (gated above), no editor. Otherwise P does
@@ -504,12 +540,58 @@ where
         }
     }
 
+    // Only an explicit utility action starts networking. The receiver carries
+    // release metadata alone; it has no hardware or executor handles.
+    fn start_update_check(&mut self) {
+        if self.update_receiver.is_some() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.state.update_status = crate::updates::UpdateStatus::Checking;
+        match std::thread::Builder::new()
+            .name("mec-update-check".into())
+            .spawn(move || {
+                let _ = sender.send(crate::updates::check(env!("CARGO_PKG_VERSION")));
+            }) {
+            Ok(_) => self.update_receiver = Some(receiver),
+            Err(_) => {
+                self.state.update_status =
+                    crate::updates::UpdateStatus::Failed("Could not start check".into())
+            }
+        }
+    }
+
+    fn poll_update_check(&mut self) -> bool {
+        let Some(receiver) = &self.update_receiver else {
+            return false;
+        };
+        match receiver.try_recv() {
+            Ok(result) => {
+                self.state.update_status =
+                    result.unwrap_or_else(crate::updates::UpdateStatus::Failed);
+                self.update_receiver = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.state.update_status =
+                    crate::updates::UpdateStatus::Failed("Check interrupted".into());
+                self.update_receiver = None;
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+        }
+    }
+
     /// Runs the selected palette command. All commands are non-mutating:
     /// screen jumps mirror digit navigation, Notifications opens the
     /// read-only history overlay, Clear empties history (and the banner),
     /// Help opens Help, Quit requests quit. Zero executor calls.
     fn activate_palette(&mut self) {
         match self.palette.selected() {
+            PaletteCommand::About => {
+                self.palette.close();
+                self.state.apply(crate::app::AppAction::ShowAbout);
+            }
             PaletteCommand::Notifications => {
                 self.palette.close();
                 self.notifications_open = true;
@@ -761,6 +843,7 @@ where
     };
     let mut app = TuiApp {
         state: AppState::default(),
+        update_receiver: None,
         live: LiveHardware::new(device, mode, backend, SnapshotHistory::default()),
         capabilities,
         profile_catalog,
@@ -852,7 +935,9 @@ where
     Ev: EventSource,
     D: FnMut(&mut TuiApp<B, X>) -> std::io::Result<()>,
 {
-    match events.next_event(timeout)? {
+    let event = events.next_event(timeout)?;
+    let update_changed = app.poll_update_check();
+    match event {
         TuiEvent::Action(action) => {
             app.expire_transient_notice();
             app.handle_action(action);
@@ -871,7 +956,8 @@ where
             if let Some(action) = action {
                 app.handle_action(action);
             }
-            if (action.is_some() || notice_expired) && !app.state().should_quit() {
+            if (action.is_some() || notice_expired || update_changed) && !app.state().should_quit()
+            {
                 draw(app)?;
             }
         }
@@ -884,7 +970,15 @@ where
             app.expire_transient_notice();
             draw(app)?;
         }
-        TuiEvent::Ignored => {}
+        TuiEvent::Ignored => {
+            let had_notice = app.notice().is_some();
+            app.expire_transient_notice();
+            if (update_changed || (had_notice && app.notice().is_none()))
+                && !app.state().should_quit()
+            {
+                draw(app)?;
+            }
+        }
     }
     Ok(())
 }
@@ -907,7 +1001,16 @@ fn resolve_outcome(
 /// runs the 1-second loop, and always attempts terminal restoration.
 /// Returns typed errors; only `main` decides process exit codes.
 pub fn run_tui(paths: SystemPaths) -> Result<(), TuiError> {
+    run_tui_with_theme(paths, None)
+}
+
+/// Launch with a session-only theme override; never modifies configuration.
+pub fn run_tui_with_theme(paths: SystemPaths, theme: Option<ThemeName>) -> Result<(), TuiError> {
     let mut app = prepare_tui(paths, LinuxSysfsReader)?;
+    if let Some(name) = theme {
+        app.theme_name = name;
+        app.config.set_theme(name);
+    }
     let mut session = TerminalSession::enter().map_err(TuiError::Terminal)?;
     // The configured interval drives the loop timeout and the configured
     // vim-keys setting drives input mapping; CLI monitor semantics are
@@ -1250,6 +1353,7 @@ mod tests {
     ) -> TuiApp<LoopBackend, crate::tui::executor::FakeTuiExecutor> {
         TuiApp {
             state: AppState::default(),
+            update_receiver: None,
             live: LiveHardware::new(
                 DeviceInfo {
                     manufacturer: "MSI".to_owned(),
@@ -2589,9 +2693,9 @@ mod tests {
         }
         assert_eq!(app.palette().selected_index(), 0);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.palette().selected(), PaletteCommand::ThemeLight);
+        assert_eq!(app.palette().selected(), PaletteCommand::About);
         app.handle_action(AppAction::MoveUp);
-        assert_eq!(app.palette().selected(), PaletteCommand::ThemeTerminal);
+        assert_eq!(app.palette().selected(), PaletteCommand::ThemeGraphite);
     }
 
     #[test]
@@ -3416,4 +3520,126 @@ mod tests {
         }
     }
     include!("mouse_workflow_tests.rs");
+    #[test]
+    fn about_routes_keyboard_and_mouse_without_hardware_or_network() {
+        use crate::app::AppAction;
+        let mut app = healthy_control_app(Screen::Settings);
+        assert!(app.update_receiver.is_none());
+        app.handle_action(AppAction::Activate);
+        assert!(app.state.about_visible());
+        assert_eq!(
+            app.state.update_status,
+            crate::updates::UpdateStatus::NotChecked
+        );
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        app.handle_action(AppAction::Cancel);
+        assert!(!app.state.about_visible());
+        assert_eq!(app.state.current_screen(), Screen::Settings);
+        app.set_viewport(ratatui::layout::Rect::new(0, 0, 80, 24));
+        let (_, workspace, _) = super::super::shell::shell_split(app.viewport());
+        let rect = super::super::screens::settings::about_button(workspace);
+        let event = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        assert_eq!(app.mouse_action(event), Some(AppAction::ShowAbout));
+        app.handle_action(AppAction::ShowAbout);
+        app.handle_action(AppAction::GoTo(Screen::Battery));
+        assert!(!app.state.about_visible());
+        assert!(app.update_receiver.is_none());
+    }
+
+    #[test]
+    fn update_receiver_is_independent_and_duplicate_check_is_ignored() {
+        use crate::updates::UpdateStatus;
+        let mut app = healthy_control_app(Screen::Settings);
+        app.handle_action(AppAction::ShowAbout);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.update_receiver = Some(receiver);
+        app.state.update_status = UpdateStatus::Checking;
+        app.handle_action(AppAction::CheckUpdates); // existing in-flight receiver blocks a second request
+        assert_eq!(app.state.update_status, UpdateStatus::Checking);
+        sender.send(Err("offline fixture".into())).unwrap();
+        app.poll_update_check();
+        assert_eq!(
+            app.state.update_status,
+            UpdateStatus::Failed("offline fixture".into())
+        );
+        assert!(app.update_receiver.is_none());
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+        app.expire_transient_notice();
+        assert_eq!(
+            app.state.update_status,
+            UpdateStatus::Failed("offline fixture".into())
+        );
+    }
+
+    #[test]
+    fn palette_about_and_new_themes_are_non_mutating() {
+        use crate::tui::palette::PaletteCommand;
+        for command in [
+            PaletteCommand::About,
+            PaletteCommand::ThemeArctic,
+            PaletteCommand::ThemeGraphite,
+        ] {
+            let mut app = healthy_control_app(Screen::Dashboard);
+            app.palette.open();
+            app.palette.select_index(
+                PaletteCommand::ALL
+                    .iter()
+                    .position(|c| *c == command)
+                    .unwrap(),
+            );
+            app.handle_action(AppAction::Activate);
+            if let Some(theme) = command.theme() {
+                assert_eq!(app.theme_name(), theme);
+            } else {
+                assert!(app.state.about_visible());
+            }
+            assert_eq!(app.executor.command_calls(), 0);
+            assert_eq!(app.executor.profile_calls(), 0);
+            assert!(app.update_receiver.is_none());
+        }
+    }
+    #[test]
+    fn ignored_input_expires_notices_and_delivers_completed_update_without_writes() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut app = loop_app(vec![Ok(temperature(60))], Rc::clone(&log));
+        let old = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(30))
+            .unwrap();
+        app.controls
+            .set_notice(crate::tui::confirmation::Notice::failure_at(
+                "old failure".into(),
+                old,
+            ));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.update_receiver = Some(receiver);
+        app.state.update_status = crate::updates::UpdateStatus::Checking;
+        sender
+            .send(Ok(crate::updates::UpdateStatus::UpToDate("1.0.1".into())))
+            .unwrap();
+        let mut source = LoopSource::events(
+            vec![TuiEvent::Ignored, TuiEvent::Action(AppAction::Quit)],
+            Rc::clone(&log),
+        );
+        let mut draws = 0;
+        run_tui_loop(&mut app, &mut source, TIMEOUT, |_| {
+            draws += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(draws, 2);
+        assert!(app.notice().is_none());
+        assert_eq!(
+            app.state.update_status,
+            crate::updates::UpdateStatus::UpToDate("1.0.1".into())
+        );
+        assert_eq!(app.executor.command_calls(), 0);
+        assert_eq!(app.executor.profile_calls(), 0);
+    }
 }

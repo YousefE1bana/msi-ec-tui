@@ -17,6 +17,32 @@ use crate::hardware::{EcBackend, SupportMode};
 use super::theme::Theme;
 use super::ui::{support_mode_style, support_mode_text, telemetry_state_text, telemetry_style};
 
+/// A bounded table cell with a visible gap before the next column.
+/// Uses terminal display width so long or wide names cannot displace values.
+pub(crate) fn table_cell(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let available = width - 1;
+    let mut value = String::new();
+    for character in text.chars() {
+        let candidate = format!("{value}{character}");
+        if Span::raw(candidate.clone()).width() > available {
+            while !value.is_empty() && Span::raw(format!("{value}…")).width() > available {
+                value.pop();
+            }
+            if available > 0 {
+                value.push('…');
+            }
+            break;
+        }
+        value = candidate;
+    }
+    let padding = width.saturating_sub(Span::raw(value.clone()).width());
+    value.push_str(&" ".repeat(padding));
+    value
+}
+
 /// Footer segments in draw order. Widths derive from these exact literals;
 /// [`super::mouse`] measures the same strings so hit regions always match
 /// the drawn labels.
@@ -381,5 +407,23 @@ mod tests {
         let _ = bar_line(-1.0, 4, &theme);
         let _ = bar_line(0.5, 0, &theme);
         let _ = window_bar(0, 100, 0, &theme);
+    }
+    #[test]
+    fn table_cells_keep_values_separate_for_long_and_wide_names() {
+        assert_eq!(table_cell("Maximum Cooling", 16), "Maximum Cooling ");
+        assert_eq!(table_cell("Keyboard Backlight", 19), "Keyboard Backlight ");
+        for name in [
+            "Long custom profile name",
+            "電池性能設定設定設定",
+            "e\u{301} long profile",
+        ] {
+            for width in 0..20 {
+                let cell = table_cell(name, width);
+                assert_eq!(Span::raw(cell.clone()).width(), width);
+                if width > 0 {
+                    assert!(cell.ends_with(' '));
+                }
+            }
+        }
     }
 }

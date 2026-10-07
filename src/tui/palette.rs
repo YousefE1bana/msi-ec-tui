@@ -6,7 +6,7 @@
 //! palette intentionally offers no hardware-changing actions, so opening
 //! it can never initiate a mutation.
 //!
-//! Stable command order: the seven screens in canonical `1..7` order,
+//! Stable command order: the eight screens in canonical `1..8` order,
 //! then Notifications, Clear Notifications, Help, Quit, then one theme row
 //! per [`ThemeName`](super::theme::ThemeName) in stable identity order.
 
@@ -54,11 +54,17 @@ pub enum PaletteCommand {
     ThemeTerminal,
     /// Close the palette and switch to the Light theme.
     ThemeLight,
+    /// Optional navy / cyan theme.
+    ThemeArctic,
+    /// Optional graphite / violet theme.
+    ThemeGraphite,
+    /// Open product information without checking the network.
+    About,
 }
 
 impl PaletteCommand {
     /// All commands in stable display order.
-    pub const ALL: [PaletteCommand; 15] = [
+    pub const ALL: [PaletteCommand; 18] = [
         PaletteCommand::GoDashboard,
         PaletteCommand::GoPerformance,
         PaletteCommand::GoFans,
@@ -74,6 +80,9 @@ impl PaletteCommand {
         PaletteCommand::ThemeMsiDark,
         PaletteCommand::ThemeTerminal,
         PaletteCommand::ThemeLight,
+        PaletteCommand::ThemeArctic,
+        PaletteCommand::ThemeGraphite,
+        PaletteCommand::About,
     ];
 
     /// Stable user-facing label.
@@ -94,6 +103,9 @@ impl PaletteCommand {
             PaletteCommand::ThemeMsiDark => "Theme: MSI Dark",
             PaletteCommand::ThemeTerminal => "Theme: Terminal",
             PaletteCommand::ThemeLight => "Theme: Light",
+            PaletteCommand::ThemeArctic => "Theme: Arctic Midnight",
+            PaletteCommand::ThemeGraphite => "Theme: Graphite Violet",
+            PaletteCommand::About => "About MEC",
         }
     }
 
@@ -103,6 +115,8 @@ impl PaletteCommand {
             PaletteCommand::ThemeMsiDark => Some(super::theme::ThemeName::MsiDark),
             PaletteCommand::ThemeTerminal => Some(super::theme::ThemeName::Terminal),
             PaletteCommand::ThemeLight => Some(super::theme::ThemeName::Light),
+            PaletteCommand::ThemeArctic => Some(super::theme::ThemeName::Arctic),
+            PaletteCommand::ThemeGraphite => Some(super::theme::ThemeName::Graphite),
             _ => None,
         }
     }
@@ -124,7 +138,10 @@ impl PaletteCommand {
             | PaletteCommand::Quit
             | PaletteCommand::ThemeMsiDark
             | PaletteCommand::ThemeTerminal
-            | PaletteCommand::ThemeLight => None,
+            | PaletteCommand::ThemeLight
+            | PaletteCommand::ThemeArctic
+            | PaletteCommand::ThemeGraphite
+            | PaletteCommand::About => None,
         }
     }
 }
@@ -193,6 +210,16 @@ pub(crate) fn overlay_area(area: Rect, line_count: usize) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+/// First visible row, shared with hit testing. Keeps the selected row visible.
+pub(crate) fn visible_start(area: Rect, selected: usize) -> usize {
+    let height = overlay_area(area, PaletteCommand::ALL.len())
+        .height
+        .saturating_sub(2) as usize;
+    (selected + 1)
+        .saturating_sub(height)
+        .min(PaletteCommand::ALL.len().saturating_sub(height))
+}
+
 /// Renders the palette above the underlying screen. The selected row uses
 /// the accent role plus bold with a `>` marker. Safe for tiny and zero
 /// areas.
@@ -202,9 +229,13 @@ pub(crate) fn render_palette(
     palette: &CommandPalette,
     theme: &Theme,
 ) {
+    let overlay = overlay_area(area, PaletteCommand::ALL.len());
+    let start = visible_start(area, palette.selected_index());
     let rows: Vec<Line<'static>> = PaletteCommand::ALL
         .iter()
         .enumerate()
+        .skip(start)
+        .take(overlay.height.saturating_sub(2) as usize)
         .map(|(index, command)| {
             let text = command.label().to_owned();
             if index == palette.selected_index() % PaletteCommand::ALL.len() {
@@ -219,7 +250,6 @@ pub(crate) fn render_palette(
             }
         })
         .collect();
-    let overlay = overlay_area(area, rows.len());
     frame.render_widget(Clear, overlay);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -284,9 +314,9 @@ mod tests {
         let mut palette = CommandPalette::default();
         palette.move_up();
         assert_eq!(palette.selected_index(), PaletteCommand::ALL.len() - 1);
-        assert_eq!(palette.selected(), PaletteCommand::ThemeLight);
+        assert_eq!(palette.selected(), PaletteCommand::About);
         palette.move_up();
-        assert_eq!(palette.selected(), PaletteCommand::ThemeTerminal);
+        assert_eq!(palette.selected(), PaletteCommand::ThemeGraphite);
     }
 
     #[test]
@@ -310,6 +340,9 @@ mod tests {
                 "Theme: MSI Dark",
                 "Theme: Terminal",
                 "Theme: Light",
+                "Theme: Arctic Midnight",
+                "Theme: Graphite Violet",
+                "About MEC",
             ]
         );
     }

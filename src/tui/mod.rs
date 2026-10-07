@@ -25,7 +25,8 @@ pub mod theme;
 pub mod ui;
 
 pub use app::{
-    TuiApp, prepare_tui, prepare_tui_with_profile_store, run_tui, run_tui_loop, should_launch_tui,
+    TuiApp, prepare_tui, prepare_tui_with_profile_store, run_tui, run_tui_loop, run_tui_with_theme,
+    should_launch_tui,
 };
 pub use event::{
     CrosstermEventSource, EventSource, TuiEvent, event_to_tui_event,

@@ -34,7 +34,39 @@ pub(crate) const MENU_FIRST_ROW_OFFSET: u16 = 4;
 
 /// Minimum workspace width for the side-by-side card grid. Narrower
 /// terminals stack the six cards vertically.
-const WIDE_GRID_WIDTH: u16 = 110;
+const WIDE_GRID_WIDTH: u16 = 60;
+
+/// Short control cards keep all nine routes, dropping author metadata first.
+pub(crate) fn menu_offset(inner: Rect) -> u16 {
+    if inner.height >= MENU_FIRST_ROW_OFFSET + MENU_LABELS.len() as u16 {
+        MENU_FIRST_ROW_OFFSET
+    } else {
+        0
+    }
+}
+
+pub(crate) fn menu_regions(inner: Rect) -> Vec<Rect> {
+    if inner.height >= MENU_LABELS.len() as u16 {
+        return (0..MENU_LABELS.len())
+            .map(|i| super::shell::row_rect(inner, menu_offset(inner) as usize + i))
+            .collect();
+    }
+    let column_height = MENU_LABELS.len().div_ceil(2);
+    if inner.height < column_height as u16 {
+        return vec![Rect::default(); MENU_LABELS.len()];
+    }
+    let width = inner.width / 2;
+    (0..MENU_LABELS.len())
+        .map(|i| {
+            Rect::new(
+                inner.x + (i / column_height) as u16 * width,
+                inner.y + (i % column_height) as u16,
+                width,
+                1,
+            )
+        })
+        .collect()
+}
 
 /// Clickable geometry for one dashboard frame. Pure data so mapping stays
 /// unit-testable without a terminal.
@@ -148,9 +180,7 @@ pub fn dashboard_regions(full: Rect) -> Option<DashboardRegions> {
     // Menu rows live inside the control card (cards[0]) below its header
     // content. Border consumes one cell; content starts at inner.y.
     let inner = super::shell::inset(cards[0]);
-    let menu_rows = (0..MENU_LABELS.len())
-        .map(|i| super::shell::row_rect(inner, usize::from(MENU_FIRST_ROW_OFFSET) + i))
-        .collect();
+    let menu_rows = menu_regions(inner);
     let foot = footer_regions(footer, false);
     let foot_help = foot.help;
     let foot_quit = foot.quit;
@@ -213,7 +243,7 @@ pub(crate) fn grid_cards(workspace: Rect) -> Vec<Rect> {
 pub(crate) fn navigation_action(
     full: Rect,
     current: Screen,
-    palette_open: bool,
+    palette_selected: Option<usize>,
     profile_view: (usize, usize),
     read_only: bool,
     event: MouseEvent,
@@ -233,7 +263,7 @@ pub(crate) fn navigation_action(
     let foot = footer_regions(footer, read_only);
     let foot_help = foot.help;
     let foot_quit = foot.quit;
-    if palette_open {
+    if let Some(selected) = palette_selected {
         return match event.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if contains(foot_help, col, row) {
@@ -242,7 +272,7 @@ pub(crate) fn navigation_action(
                 } else if contains(foot_quit, col, row) {
                     Some(AppAction::Quit)
                 } else {
-                    palette_row_at(full, col, row).map(AppAction::ActivatePaletteRow)
+                    palette_row_at(full, col, row, selected).map(AppAction::ActivatePaletteRow)
                 }
             }
             MouseEventKind::ScrollUp
@@ -340,7 +370,14 @@ fn action_for_mouse(
     profile_view: (usize, usize),
     event: MouseEvent,
 ) -> Option<AppAction> {
-    navigation_action(full, current, palette_open, profile_view, false, event)
+    navigation_action(
+        full,
+        current,
+        palette_open.then_some(0),
+        profile_view,
+        false,
+        event,
+    )
 }
 
 /// Screen regions for mouse mapping: each migrated screen's shared
@@ -374,7 +411,7 @@ fn is_control_screen(screen: Screen) -> bool {
 
 /// Palette row under a point, if any. Geometry mirrors the overlay so
 /// clicks always land on drawn rows.
-fn palette_row_at(full: Rect, col: u16, row: u16) -> Option<usize> {
+fn palette_row_at(full: Rect, col: u16, row: u16, selected: usize) -> Option<usize> {
     use super::palette::{PaletteCommand, overlay_area};
     let overlay = overlay_area(full, PaletteCommand::ALL.len());
     let inner = Rect {
@@ -386,7 +423,7 @@ fn palette_row_at(full: Rect, col: u16, row: u16) -> Option<usize> {
     if !contains(inner, col, row) {
         return None;
     }
-    let index = (row - inner.y) as usize;
+    let index = super::palette::visible_start(full, selected) + (row - inner.y) as usize;
     if index < PaletteCommand::ALL.len() {
         Some(index)
     } else {
@@ -849,14 +886,13 @@ mod tests {
     }
 
     #[test]
-    fn narrow_full_tier_stacks_cards_vertically() {
+    fn narrow_full_tier_keeps_menu_and_telemetry_in_two_columns() {
         let area = Rect::new(0, 0, 100, 30);
         let regions = dashboard_regions(area).expect("100x30 is full tier");
         assert_eq!(regions.cards.len(), 6);
-        for pair in regions.cards.windows(2) {
-            assert!(pair[1].y > pair[0].y, "cards must stack");
-            assert_eq!(pair[1].x, pair[0].x);
-        }
+        assert_eq!(regions.cards[0].y, regions.cards[1].y);
+        assert!(regions.cards[1].x > regions.cards[0].x);
+        assert!(regions.menu_rows.iter().all(|r| !r.is_empty()));
         assert_eq!(regions.menu_rows.len(), 9);
     }
 
@@ -931,6 +967,36 @@ mod tests {
                 click(last.x + 1, last.y)
             ),
             Some(AppAction::SelectProfileRow(44))
+        );
+    }
+    #[test]
+    fn scrolled_palette_click_uses_the_visible_row_not_the_hidden_index() {
+        let area = Rect::new(0, 0, 80, 15);
+        let selected = super::super::palette::PaletteCommand::ALL.len() - 1;
+        let overlay = super::super::palette::overlay_area(area, selected + 1);
+        let start = super::super::palette::visible_start(area, selected);
+        assert!(start > 0);
+        assert_eq!(
+            super::navigation_action(
+                area,
+                Screen::Dashboard,
+                Some(selected),
+                (5, 0),
+                false,
+                click(overlay.x + 1, overlay.y + 1)
+            ),
+            Some(AppAction::ActivatePaletteRow(start))
+        );
+        assert_eq!(
+            super::navigation_action(
+                area,
+                Screen::Dashboard,
+                Some(selected),
+                (5, 0),
+                false,
+                click(overlay.x + 1, overlay.bottom() - 2)
+            ),
+            Some(AppAction::ActivatePaletteRow(selected))
         );
     }
 }

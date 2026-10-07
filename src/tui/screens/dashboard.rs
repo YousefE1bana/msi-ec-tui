@@ -130,6 +130,17 @@ fn render_grid<B: EcBackend>(
 /// nine approved entries.
 fn render_control_card(frame: &mut Frame, area: Rect, app: &AppState, theme: &Theme) {
     let inner = shell::card(frame, area, "MEC CONTROL", app.focused_card() == 0, theme);
+    if mouse::menu_offset(inner) == 0 {
+        for (index, region) in mouse::menu_regions(inner).into_iter().enumerate() {
+            let row = MENU_ORDER[index];
+            let text = format!("[{}] {}", index + 1, row.label());
+            frame.render_widget(
+                Paragraph::new(text).style(Style::default().fg(theme.accent).bg(theme.surface)),
+                region,
+            );
+        }
+        return;
+    }
     let w = inner.width as usize;
     let mut lines = vec![
         Line::from(vec![
@@ -1212,6 +1223,34 @@ mod tests {
         assert!(!text.contains("rpm"), "fan values never read as RPM");
         if std::env::var("MEC_DUMP_DASHBOARD").is_ok() {
             println!("{text}");
+        }
+    }
+    #[test]
+    fn every_numeric_route_remains_visible_at_required_sizes() {
+        use super::super::support::{healthy_snapshot, live_for};
+        let (live, _) = live_for(vec![Ok(healthy_snapshot())], SupportMode::Ready, 1);
+        for (w, h) in [(160, 50), (120, 35), (100, 30), (80, 24)] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|f| render_dashboard(f, f.area(), &AppState::default(), &live))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            for label in crate::tui::mouse::MENU_LABELS {
+                assert!(text.contains(label), "{w}x{h}: {label}");
+            }
+            for row in crate::tui::mouse::dashboard_regions(ratatui::layout::Rect::new(0, 0, w, h))
+                .unwrap()
+                .menu_rows
+            {
+                assert!(!row.is_empty());
+            }
         }
     }
 }

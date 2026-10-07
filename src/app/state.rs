@@ -74,9 +74,12 @@ impl Screen {
 }
 
 /// Interaction and navigation state for the interactive TUI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppState {
     current_screen: Screen,
+    about_visible: bool,
+    /// Status of the last explicit update check; never a hardware result.
+    pub(crate) update_status: crate::updates::UpdateStatus,
     help_visible: bool,
     should_quit: bool,
     /// Focused card/panel index for the mouse-driven focus highlight.
@@ -89,6 +92,11 @@ pub struct AppState {
 pub const FOCUSED_CARD_COUNT: usize = 6;
 
 impl AppState {
+    /// Whether the utility About section is visible.
+    pub fn about_visible(&self) -> bool {
+        self.about_visible
+    }
+
     /// Screen currently displayed.
     pub fn current_screen(&self) -> Screen {
         self.current_screen
@@ -117,7 +125,23 @@ impl AppState {
     /// `TogglePalette` is a no-op here: the palette overlay owns it above
     /// this layer.
     pub fn apply(&mut self, action: AppAction) {
+        if matches!(
+            action,
+            AppAction::GoTo(_)
+                | AppAction::NextScreen
+                | AppAction::PreviousScreen
+                | AppAction::MoveLeft
+                | AppAction::MoveRight
+        ) {
+            self.about_visible = false;
+        }
         match action {
+            AppAction::ShowAbout => {
+                self.about_visible = true;
+                self.focused_card = 2;
+            }
+            AppAction::HideAbout => self.about_visible = false,
+            AppAction::CheckUpdates => {}
             AppAction::Quit => self.should_quit = true,
             AppAction::NextScreen => self.current_screen = self.current_screen.next(),
             AppAction::PreviousScreen => {

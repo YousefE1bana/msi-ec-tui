@@ -8,7 +8,7 @@
 
 use ratatui::style::{Color, Style};
 
-/// Stable identity for the three approved named themes.
+/// Stable identity for the existing themes and two optional candidates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeName {
     /// Dark background with an MSI-inspired red primary accent.
@@ -17,12 +17,22 @@ pub enum ThemeName {
     Terminal,
     /// Light background with a non-red primary accent.
     Light,
+    /// Navy surfaces with ice-cyan focus. Optional candidate.
+    Arctic,
+    /// Graphite surfaces with violet focus. Optional candidate.
+    Graphite,
 }
 
 impl ThemeName {
     /// All themes in stable order.
-    pub const fn all() -> [ThemeName; 3] {
-        [ThemeName::MsiDark, ThemeName::Terminal, ThemeName::Light]
+    pub const fn all() -> [ThemeName; 5] {
+        [
+            ThemeName::MsiDark,
+            ThemeName::Terminal,
+            ThemeName::Light,
+            ThemeName::Arctic,
+            ThemeName::Graphite,
+        ]
     }
 
     /// Exact user-facing name.
@@ -31,6 +41,8 @@ impl ThemeName {
             ThemeName::MsiDark => "MSI Dark",
             ThemeName::Terminal => "Terminal",
             ThemeName::Light => "Light",
+            ThemeName::Arctic => "Arctic Midnight",
+            ThemeName::Graphite => "Graphite Violet",
         }
     }
 
@@ -41,10 +53,12 @@ impl ThemeName {
             ThemeName::MsiDark => "msi-dark",
             ThemeName::Terminal => "terminal",
             ThemeName::Light => "light",
+            ThemeName::Arctic => "arctic",
+            ThemeName::Graphite => "graphite",
         }
     }
 
-    /// Parses a config slug. Accepts the three canonical values plus the
+    /// Parses a config slug. Accepts the canonical values plus the
     /// `default` alias (design-spec compatibility), which maps to the
     /// interactive product default MSI Dark. Anything else is rejected.
     pub fn from_config_name(value: &str) -> Option<Self> {
@@ -52,6 +66,8 @@ impl ThemeName {
             "msi-dark" | "default" => Some(ThemeName::MsiDark),
             "terminal" => Some(ThemeName::Terminal),
             "light" => Some(ThemeName::Light),
+            "arctic" => Some(ThemeName::Arctic),
+            "graphite" => Some(ThemeName::Graphite),
             _ => None,
         }
     }
@@ -120,6 +136,36 @@ impl Theme {
                 danger: Color::LightRed,
                 muted: Color::Gray,
                 border: Color::DarkGray,
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
+            },
+            ThemeName::Arctic => Self {
+                background: Color::Rgb(8, 15, 25),
+                surface: Color::Rgb(17, 29, 43),
+                foreground: Color::Rgb(224, 235, 244),
+                primary: Color::Rgb(117, 210, 234),
+                accent: Color::Rgb(117, 210, 234),
+                secondary: Color::Rgb(145, 170, 212),
+                success: Color::Green,
+                warning: Color::Yellow,
+                danger: Color::LightRed,
+                muted: Color::Rgb(144, 159, 177),
+                border: Color::Rgb(63, 79, 97),
+                meter_fill: Color::Rgb(79, 159, 173),
+                meter_track: Color::Rgb(34, 50, 56),
+            },
+            ThemeName::Graphite => Self {
+                background: Color::Rgb(13, 13, 17),
+                surface: Color::Rgb(24, 23, 30),
+                foreground: Color::Rgb(232, 228, 239),
+                primary: Color::Rgb(183, 160, 240),
+                accent: Color::Rgb(183, 160, 240),
+                secondary: Color::Rgb(142, 166, 199),
+                success: Color::Green,
+                warning: Color::Yellow,
+                danger: Color::LightRed,
+                muted: Color::Rgb(155, 150, 165),
+                border: Color::Rgb(73, 69, 83),
                 meter_fill: Color::Rgb(79, 159, 173),
                 meter_track: Color::Rgb(34, 50, 56),
             },
@@ -218,14 +264,23 @@ mod tests {
     }
 
     #[test]
-    fn theme_name_has_exactly_three_stable_names() {
+    fn theme_names_preserve_existing_order_and_append_candidates() {
         use super::ThemeName;
-        assert_eq!(ThemeName::all().len(), 3);
+        assert_eq!(ThemeName::all().len(), 5);
         let names: Vec<&str> = ThemeName::all()
             .iter()
             .map(|name| name.display_name())
             .collect();
-        assert_eq!(names, vec!["MSI Dark", "Terminal", "Light"]);
+        assert_eq!(
+            names,
+            vec![
+                "MSI Dark",
+                "Terminal",
+                "Light",
+                "Arctic Midnight",
+                "Graphite Violet"
+            ]
+        );
     }
 
     #[test]

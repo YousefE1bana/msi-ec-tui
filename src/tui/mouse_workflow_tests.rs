@@ -568,7 +568,7 @@ mod p3_mouse {
         assert!(crate::tui::shell::row_rect(Rect::new(5, 5, 30, 1), 1).is_empty());
         assert!(crate::tui::shell::text_region(Rect::new(5, 5, 4, 1), 0, "[Review]").is_empty());
         let dashboard = crate::tui::mouse::dashboard_regions(Rect::new(0, 0, 80, 24)).unwrap();
-        assert!(dashboard.menu_rows.iter().all(|rect| rect.is_empty()));
+        assert!(dashboard.menu_rows.iter().all(|rect| !rect.is_empty()));
     }
 
     #[test]

@@ -111,7 +111,7 @@ pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
     shell::ScreenRegions { cards, rows }
 }
 
-const DEVICE_NAME_WIDTH: usize = 18;
+const DEVICE_NAME_WIDTH: usize = 19;
 
 pub(crate) fn value_region(
     row: Rect,
@@ -198,7 +198,7 @@ fn render_table_card<B: EcBackend>(
     let snapshot = live.current_snapshot();
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            format!("{:<20}", "DEVICE"),
+            format!("{:<21}", "DEVICE"),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -229,11 +229,7 @@ fn render_table_card<B: EcBackend>(
         lines.push(Line::from(vec![
             Span::styled(marker.to_owned(), Style::default().fg(theme.accent)),
             Span::styled(
-                format!(
-                    "{:<width$}",
-                    control_name(*control),
-                    width = DEVICE_NAME_WIDTH
-                ),
+                shell::table_cell(control_name(*control), DEVICE_NAME_WIDTH),
                 if selected {
                     Style::default()
                         .fg(theme.foreground)
@@ -247,7 +243,7 @@ fn render_table_card<B: EcBackend>(
                 Style::default().fg(theme.foreground),
             ),
             Span::styled(
-                format!("{:<16}", capability_value(*control, capabilities)),
+                shell::table_cell(&capability_value(*control, capabilities), 16),
                 Style::default().fg(theme.muted),
             ),
             Span::styled(
@@ -492,6 +488,9 @@ mod tests {
         for heading in ["DEVICE", "CURRENT", "CAPABILITY", "ACTION"] {
             assert!(text.contains(heading), "{heading:?} missing");
         }
+        // A long capability must not run into the action column.
+        assert!(text.contains("… level"));
+        assert!(!text.contains(")level"));
     }
 
     #[test]

@@ -8,6 +8,12 @@ use super::state::Screen;
 /// Intent applied to [`super::AppState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppAction {
+    /// Open product information without any network request.
+    ShowAbout,
+    /// Return from About to the underlying screen.
+    HideAbout,
+    /// Explicitly request a bounded, read-only release check.
+    CheckUpdates,
     /// Request application exit.
     Quit,
     /// Advance to the next screen in canonical order.

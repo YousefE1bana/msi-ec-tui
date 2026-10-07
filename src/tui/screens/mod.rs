@@ -5,6 +5,7 @@
 //! The dispatcher owns the shared navigation chrome and renders the help
 //! overlay last so it sits above the active screen.
 
+pub(crate) mod about;
 pub(crate) mod battery;
 pub(crate) mod dashboard;
 pub(crate) mod devices;
@@ -135,6 +136,9 @@ pub fn render_screen_with_theme<B: EcBackend>(
             );
         }
         LayoutTier::Tiny => render_compact(frame, area, theme),
+    }
+    if app.about_visible() {
+        about::render(frame, area, app, live, theme);
     }
     if !matches!(tier, LayoutTier::Tiny) {
         render_overlays(

@@ -83,6 +83,17 @@ pub(crate) fn hit_regions(workspace: Rect) -> shell::ScreenRegions {
     }
 }
 
+/// Visible utility button; coordinates come from the same interface card.
+pub(crate) fn about_button(workspace: Rect) -> Rect {
+    let cards = hit_regions(workspace).cards;
+    let card = cards.first().copied().unwrap_or_default();
+    let inner = shell::inset(card);
+    if inner.height <= 4 {
+        return Rect::default();
+    }
+    Rect::new(inner.x, inner.y + 4, inner.width.min(13), 1)
+}
+
 fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
@@ -119,6 +130,7 @@ fn render_interface_card(
             ),
         ]),
         Line::from(""),
+        Line::styled("[ ABOUT MEC ]  Enter", Style::default().fg(theme.accent)),
         Line::styled(
             "Display-only · switch themes with P",
             Style::default().fg(theme.muted),
@@ -143,7 +155,7 @@ fn render_input_card(
         Line::from(vec![
             Span::styled("Keyboard:  ", Style::default().fg(theme.muted)),
             Span::styled(
-                "1–9 · arrows · Tab · Enter · Esc",
+                "1–8 · arrows · Tab · Enter · Esc",
                 Style::default().fg(theme.foreground),
             ),
         ]),
@@ -163,7 +175,7 @@ fn render_input_card(
             ),
         ]),
         Line::styled(
-            "Clicks never confirm or apply",
+            "Review then Apply confirms a change",
             Style::default().fg(theme.muted),
         ),
     ];
@@ -301,7 +313,7 @@ mod tests {
     fn states_display_only_safety() {
         let text = text();
         assert!(text.contains("Display-only"));
-        assert!(text.contains("never confirm"));
+        assert!(text.contains("Review then Apply"));
     }
 
     #[test]

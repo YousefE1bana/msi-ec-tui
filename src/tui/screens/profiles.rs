@@ -238,7 +238,7 @@ fn render_table_card(
     let inner = shell::card(frame, area, "PROFILES", focused, theme);
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            format!("{:<16}", "PROFILE"),
+            format!("{:<18}", "PROFILE"),
             Style::default()
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
@@ -297,7 +297,7 @@ fn render_table_card(
         lines.push(Line::from(vec![
             Span::styled(marker.to_owned(), Style::default().fg(theme.accent)),
             Span::styled(
-                format!("{name:<15}"),
+                shell::table_cell(&name, 16),
                 if selected {
                     Style::default()
                         .fg(theme.foreground)
