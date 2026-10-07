@@ -1,348 +1,124 @@
+<p align="center"><img src="docs/assets/branding/mec-icon-256.png" alt="MEC logo" width="112"></p>
+
 # MEC — MSI EC Control Center
 
-> A safe, fast, capability-aware terminal control center for MSI laptops on Linux.
+Safe hardware monitoring and control for supported MSI laptops on Linux.
 
-MEC is an open-source Linux terminal control center for monitoring and
-safely controlling supported MSI laptops through the
-[`msi-ec`](https://github.com/BeardOverflow/msi-ec) Linux kernel module.
+[![CI](https://github.com/YousefE1bana/msi-ec-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/YousefE1bana/msi-ec-tui/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/YousefE1bana/msi-ec-tui)](https://github.com/YousefE1bana/msi-ec-tui/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## Status
+![Production dashboard on an MSI GF63 Thin 11UC](docs/assets/screenshots/dashboard.png)
 
-MEC v1.0.0 is the first published stable release. The current
-package/release line is 1.0.1, a patch release fixing false hardware
-verification failures and the `mec --version` flag. PLAN-006
-(interactive TUI) is implemented, and PLAN-007 release packaging is
-implemented: x86_64 and ARM64 release archives with `SHA256SUMS`, `.deb`
-and `.rpm` packages built natively per architecture, reproducible AUR
-(`mec-bin`) package generation from the released checksums, and
-install/upgrade/uninstall guides.
-Running `cargo run` with no subcommand launches the interactive TUI when
-both stdin and stdout are terminals:
+**Stable release: v1.0.1.** This branch prepares the v1.1 interface shown above;
+v1.1.0 has not been published. Screenshots are real production renders on the
+physical laptop, not mock telemetry.
 
-- `1`–`8` jump directly to a screen (Dashboard, Performance, Fans,
-  Battery, Devices, Profiles, Diagnostics, Settings); `9` exits
-- Arrow keys / Tab move between screens; `h`/`j`/`k`/`l` too unless
-  `vim_keys = false` is configured
-- `P` opens the command palette (screens, notifications, themes)
-- `Enter` edits / accepts / confirms depending on context;
-  `Esc` cancels an edit or confirmation, or closes an overlay
-- `?` toggles help, `q` quits
-- Mouse row/card clicks select or focus; the wheel navigates rows.
-  Click the footer `Select` label to open the command palette.
-  Click a hardware value to open its existing editor, use `[-]` / `[+]`
-  to stage a change, then click `Review`. Only the explicit `Apply`
-  button in the review executes; `Cancel` discards the pending change.
-  Profile selection applies nothing: click `REVIEW CHANGES`, inspect the
-  review, then `Apply` or `Cancel`. READ-ONLY uses the same fail-closed
-  controls as the keyboard.
+MEC brings temperatures, fan percentages, power state, performance controls,
+battery charge limits, and supported devices into one terminal workspace.
+Keyboard and mouse changes are staged, reviewed, and explicitly confirmed.
+Writes use capability checks and verified readback. Profiles add transaction
+preflight and rollback. Unsupported hardware remains READ-ONLY.
 
-When stdout is redirected or captured (pipes, scripts, CI), bare `mec` still
-prints exactly:
+## Install
 
-```text
-MEC — MSI EC Control Center
+Download and inspect the installer before running it:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/YousefE1bana/msi-ec-tui/feat/v1.1-tui-redesign/install.sh
+less install.sh
+bash install.sh --dry-run
+bash install.sh
+mec doctor
+mec
 ```
 
-Implemented in this tree:
+The installer in this development branch will become available at that URL only
+after the branch is pushed. From this checkout, run `bash install.sh` directly.
+It selects the **latest stable release**, verifies its exact SHA256SUMS entry,
+and prefers `.deb` / `.rpm`; otherwise it uses a user-local portable binary.
+`--version 1.0.1` pins a stable release. Checksums check integrity; they are not
+cryptographic publisher signatures. The installer does not install kernel code.
 
-- MSI identity detection from Linux DMI
-- Dynamic `msi-ec` capability discovery (no model allowlists)
-- Conservative `READY` / `READ-ONLY` compatibility policy
-- Read-only `msi-ec` backend with validated hardware snapshots
-- `mec doctor [--sys-root PATH]` diagnostics (read-only)
-- Privacy-conscious `mec doctor --export` compatibility report for
-  GitHub issues (no serials, hostnames, network data, profile/config
-  contents, or live telemetry)
-- `mec status` with human-readable and `--json` output
-- Runtime battery state (charge, status, AC presence)
-- `mec monitor` with validated 500ms/1s/2s/5s polling,
-  bounded in-memory history, Ctrl+C shutdown, and graceful
-  snapshot-error degradation with recovery notices
-- Eight-screen interactive TUI (`mec` on a terminal): Dashboard,
-  Performance, Fans, Battery, Devices, Profiles, Diagnostics, and Settings with
-  configurable polling, contextual selection/editing, and an explicit
-  confirmation step before any mutation
-- Safe TUI hardware commands through the existing safety APIs, and TUI
-  profile preview/apply through the transactional pipeline
-- Custom profile catalog (built-ins plus `~/.config/mec/profiles/`)
-- Command palette (`P`) with screens, notification history, and theme
-  switching
-- Bounded notification history (16 entries) behind the result banner
-- Temperature history sparklines (Dashboard) and fan percentage/raw
-  history graphs (Fans); fan values are never RPM
-- Named themes MSI Dark / Terminal / Light with runtime switching
-- Persistent `~/.config/mec/config.toml` settings (refresh interval,
-  theme, vim keys) with strict validation and atomic saves
-- Responsive Full / Compact / Tiny modes with degraded-telemetry
-  presentation
-- Typed hardware commands with pure validation against fresh
-  support/capability state (`HardwareCommand`)
-- Restricted `msi-ec` sysfs writer covering a closed set of known nodes,
-  existing-node-only writes, and mandatory readback verification
-- Explicit CLI controls that run every command through the full safe
-  pipeline (fresh support evaluation, fresh capability discovery,
-  validation, verified write)
-- Strict declarative TOML profiles with typed validation (`Profile`)
-- Capability-aware profile previews (`ProfilePlanner::preview`) with
-  changed-vs-unchanged detection against the current hardware snapshot
-- Transaction planning from the current snapshot: changed settings only,
-  in a stable order
-- Ordered transactional application through the existing verified
-  `HardwareCommand` write boundary, with rollback in reverse order and
-  verified rollback results on failure
-- Safe high-level `apply_profile` composition (single sysfs root,
-  current-process permissions, no elevation)
-- Five capability-aware built-in presets (see below); unsupported
-  settings are omitted, never forced
-- Read-only custom-profile discovery/loading from
-  `~/.config/mec/profiles/` (see below)
-- Profile CLI: `mec profile list`, `mec profile show <PROFILE>`,
-  `mec profile apply <PROFILE>`
-- Reusable fake sysfs fixtures under `tests/fixtures/`
+Requirements: Linux, compatible physical MSI hardware, a working
+[msi-ec driver](https://github.com/BeardOverflow/msi-ec), and a true-color terminal
+for the intended appearance. Release binaries target x86_64/aarch64 glibc Linux
+(glibc 2.39 or newer). aarch64 hardware support is unverified. See
+[installation](docs/installation.md), [compatibility](docs/compatibility.md), and
+[driver setup](docs/hardware-support.md) before installing on another distro.
 
-### CLI controls
+READY is a support verdict, not a privilege grant. Desktop launchers run as your
+normal user; root-owned sysfs controls can reject writes. MEC never elevates
+itself. See [permissions and troubleshooting](docs/troubleshooting.md).
 
-Hardware mutation is exposed through explicit CLI controls and through
-confirmed TUI actions (same safe pipeline either way):
+The candidate-only About, update-check, mouse workflow, and new themes below
+require building this checkout; installing stable v1.0.1 does not add them. See
+[source installation](docs/installation.md).
 
-```text
-mec fan mode <MODE>
-mec shift <MODE>
-mec cooler-boost <on|off>
-mec super-battery <on|off>
-mec webcam <on|off>
-mec webcam-block <on|off>
-mec keyboard-backlight <LEVEL>
-mec battery limit <END_PERCENT>
-```
+## Controls
 
-Each control prints one `MEC control applied: ...` line only after the
-complete pipeline, including readback verification, succeeds; failures
-print `MEC control failed: ...` to stderr with a non-zero exit.
+| Input | Action |
+|---|---|
+| `1`–`8` | Dashboard, Performance, Fans, Battery, Devices, Profiles, Diagnostics, Settings |
+| `9` / `q` | Exit |
+| Arrows / `h j k l` | Navigate rows or adjust an open editor (vim keys configurable) |
+| Tab / Shift-Tab | Next / previous screen |
+| Enter | Edit → Review → explicit Apply |
+| Esc | Cancel pending edit/review; close overlays |
+| `P` / `?` | Command palette / Help |
+| Click row / value | Select / enter the existing editor |
+| Wheel | Navigate rows and lists |
+| Review / Apply | Inspect staged changes / explicitly confirm on review |
 
-`mec battery limit 80` sets the `msi-ec` end threshold to 80%, which the
-driver represents as the typed pair start = 70 / end = 80 (a fixed
-10-point hysteresis). Start and end are not independently configurable.
+Clicking a telemetry card only focuses it. Selecting a profile applies nothing.
+The review displays current/requested values and says nothing has been applied
+until confirmation. Fan telemetry is **percentage/raw data, not RPM**.
+Settings exposes actual preferences; About offers an explicit update check.
+`mec update-check` queries GitHub without installing anything or sending telemetry.
 
-### Profile CLI
+## Profiles and CLI
 
-Profiles can be applied from the CLI or, after an explicit on-screen
-confirmation, from the TUI Profiles screen. Both paths resolve through
-the same safe transactional pipeline.
-
-```text
+```sh
+mec status
+mec status --json
+mec doctor --export
 mec profile list
-mec profile show <PROFILE>
-mec profile apply <PROFILE>
+mec profile show silent
 ```
 
-`mec profile list` lists the five built-ins first, then valid
-custom-profile slugs in lexical order. It performs no hardware writes.
+Built-ins: Balanced, Silent, Gaming, Battery Saver, Maximum Cooling. They resolve
+only advertised performance capabilities. Custom TOML profiles are strict data,
+never shell scripts. Read [profiles](docs/profiles.md) before applying one.
+CLI mutation commands execute explicitly; the TUI adds stage/review confirmation.
 
-`mec profile show <PROFILE>` resolves and displays a profile in a
-deterministic normalized view. It performs no hardware writes.
+## Themes
 
-`mec profile apply <PROFILE>` resolves a profile and applies it only
-through the safe transactional pipeline. Failures print
-`MEC profile failed: ...` to stderr with a non-zero exit.
+MSI Dark remains the default. Optional candidates retain the same layouts and
+semantic green/amber/red status colors:
 
-A PROFILE argument is a canonical slug: an exact built-in slug wins,
-otherwise it must name a custom profile in the store.
-
-### Built-in presets
-
-```text
-balanced          Balanced
-silent            Silent
-gaming            Gaming
-battery-saver     Battery Saver
-maximum-cooling   Maximum Cooling
+```sh
+mec                     # configured theme; MSI Dark on a fresh configuration
+mec --theme arctic      # Arctic Midnight, this session only
+mec --theme graphite    # Graphite Violet, this session only
 ```
 
-Built-ins are capability-aware: they resolve against the currently
-discovered hardware capabilities and may omit settings the hardware does
-not expose. Resolution is data, not authorization — `apply_profile`
-re-evaluates support, capabilities, and the hardware snapshot before any
-write.
+Palette theme choices persist in the existing configuration.
+[Configuration](docs/configuration.md) · [theme comparison](docs/themes.md)
 
-### Custom profile storage
+## Documentation
 
-Custom profiles live in:
+[Install](docs/installation.md) · [Upgrade](docs/upgrade.md) ·
+[Uninstall](docs/uninstall.md) · [Hardware support](docs/hardware-support.md) ·
+[Compatibility](docs/compatibility.md) · [Troubleshooting](docs/troubleshooting.md) ·
+[Architecture](docs/architecture.md) · [Screenshots](docs/screenshots.md) · [Physical validation](docs/physical-validation.md) ·
+[Release-candidate audit](docs/release-candidate-validation.md)
 
-```text
-~/.config/mec/profiles/
-```
+For bugs, review `mec doctor --export` for private information before sharing it.
+Use [GitHub issues](https://github.com/YousefE1bana/msi-ec-tui/issues) for public bugs;
+report vulnerabilities through [SECURITY.md](SECURITY.md).
+[Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
 
-A custom slug maps to `<slug>.toml` directly beneath that directory.
-Current rules:
-
-- lowercase ASCII letters, digits, and hyphens; 1..=64 bytes; first and
-  last characters alphanumeric
-- built-in slugs (`balanced`, `silent`, `gaming`, `battery-saver`,
-  `maximum-cooling`) are reserved and can never shadow a built-in
-- only direct-child regular `.toml` files are discovered; foreign
-  extensions, directories, hidden/temp files, invalid names, and reserved
-  names are ignored
-- symlink profile files are ignored by listing and rejected on load
-- maximum profile file size is 64 KiB
-- malformed profiles fail with a typed parse error; listing does not
-  parse file contents, so a malformed file is still listed and fails on
-  load/show/apply
-- MEC currently only reads custom profiles; there is no profile
-  save/delete CLI and the store never creates the directory itself
-
-### Profile data safety
-
-Profiles are declarative TOML DATA ONLY. They are never sourced as shell,
-executed, environment-expanded, or treated as command hooks; they contain
-no raw sysfs paths and no raw EC register programs. A profile may request
-only the fields implemented by the schema.
-
-Example (every section optional, at least one setting required):
-
-```toml
-name = "Gaming"
-
-[performance]
-shift_mode = "turbo"
-fan_mode = "advanced"
-cooler_boost = true
-super_battery = false
-
-[battery]
-charge_end_threshold = 80
-
-[device]
-keyboard_backlight = 2
-```
-
-`charge_end_threshold = 80` maps to the existing `msi-ec` typed 70/80
-threshold pair. There is no independent start-threshold profile field.
-
-### Transaction semantics
-
-Conceptual flow:
-
-```text
-Profile
-  ↓
-fresh support/capability evaluation
-  ↓
-preview / validation
-  ↓
-current hardware snapshot
-  ↓
-transaction plan
-  ↓
-changed settings only
-  ↓
-ordered verified writes
-  ↓
-success
-```
-
-On failure:
-
-```text
-failure
-  ↓
-rollback
-  ↓
-reverse order
-  ↓
-verified rollback result
-```
-
-Notes:
-
-- unchanged requested settings are not rewritten
-- unsupported custom-profile requests fail closed
-- `READ-ONLY` support state prevents profile mutation
-- writes continue to use the closed typed `HardwareCommand`/write
-  boundary with mandatory readback verification
-- rollback failures are surfaced with typed errors; rollback is
-  best-effort application-level compensation, not an atomic
-  kernel-level transaction
-- profile transactions for the same hardware root are serialized with a
-  Linux advisory lock held for the full apply/rollback lifetime, so two
-  concurrent `mec profile apply` processes cannot interleave
-
-### TUI configuration
-
-TUI settings persist in:
-
-```text
-~/.config/mec/config.toml
-```
-
-```toml
-refresh_interval_ms = 1000
-theme = "msi-dark"
-vim_keys = true
-```
-
-- `refresh_interval_ms` must be one of `500`, `1000`, `2000`, `5000`
-- `theme` is one of `msi-dark`, `terminal`, `light` (`default` is
-  accepted as an alias for `msi-dark` and normalized on save)
-- `vim_keys = false` unmaps `h`/`j`/`k`/`l`; arrows, Tab, digits, `P`,
-  `?`, and quit shortcuts always work
-- unknown fields (including `mouse`, which is not a configuration option),
-  wrong types, and malformed documents are rejected; a missing file
-  loads defaults without creating anything; an invalid file falls back
-  to defaults with a startup notice while monitoring still launches
-- saves are atomic (temp file plus rename) with user-only permissions
-- theme changes from the command palette persist across launches
-
-### Privilege model
-
-Control commands execute with the current process permissions. MEC performs
-no sudo/pkexec/polkit/setuid escalation and ships no privileged helper: a
-write the OS denies returns a typed failure (`AccessDenied` chain). The
-interactive TUI runs unprivileged; supported `READY` controls execute only
-after an explicit confirmation, while `READ-ONLY` compatibility mode
-prohibits writes entirely. A dedicated privilege/packaging deployment
-model remains future work.
-
-Explicitly NOT completed yet:
-
-- Automatic privileged helper / privilege deployment integration
-- Physical validation of the remaining write paths (battery threshold,
-  shift mode, fan mode, profile transaction, TUI mutation)
-- Optional advanced fan-curve features not representable through the
-  safe typed commands
-- GUI, cloud, or telemetry features (out of v1 scope)
-
-See the [design](docs/superpowers/specs/2026-09-18-mec-design.md) and
-[implementation plan](docs/superpowers/plans/2026-09-18-mec-v1-implementation-plan.md).
-
-## Planned hardware support
-
-- Primary physical test target: MSI GF series laptops
-- Other MSI laptops through capabilities exposed by the `msi-ec` kernel module
-
-Read behavior has been manually smoke-tested on real MSI hardware.
-Physical write validation has been completed on MSI GF63 Thin 11UC for
-keyboard backlight, webcam, webcam block, and Cooler Boost; other write
-paths remain covered by fake/temp sysfs integration tests and await
-physical validation.
-
-## Installation
-
-Prebuilt `.deb`, `.rpm`, and portable `.tar.gz` artifacts (x86_64 and
-ARM64) plus an AUR binary packaging workflow are documented in:
-
-- [Installation](docs/installation.md)
-- [Upgrade](docs/upgrade.md)
-- [Uninstall](docs/uninstall.md)
-
-## Building
-
-```bash
-cargo build
-```
-
-Rust `1.98.1` is pinned in `rust-toolchain.toml`.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
+Created by **Yousef Osama** — [YousefE1bana](https://github.com/YousefE1bana).
+MEC is an independent project. It uses the upstream
+[BeardOverflow/msi-ec](https://github.com/BeardOverflow/msi-ec) Linux driver;
+its original geometric logo does not use MSI vendor artwork.

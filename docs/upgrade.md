@@ -37,7 +37,9 @@ untouched.
 
 ## 3. Portable tarball upgrades
 
-There is nothing to upgrade in place. Verify the new `SHA256SUMS` as
+For a user-local install, rerun `bash install.sh` to discover and verify the latest stable version. Config and profiles are preserved. An explicit `--version` can select another stable release.
+
+For a manually extracted archive, verify the new `SHA256SUMS` as
 described in [Installation](installation.md), extract the new archive
 for your architecture, and use the new `mec` binary:
 
@@ -52,7 +54,7 @@ changes. Remove the old extracted directory when you are done with it.
 
 ## 4. AUR package upgrades
 
-Once an AUR entry is published (none exists yet), upgrade it with your
+If an AUR entry is published (publication is not claimed here), upgrade it with your
 normal AUR helper like any other `mec-bin` update. The packaging model
 is unchanged: the new GitHub release tarball for your architecture is
 installed as `/usr/bin/mec` plus refreshed documentation, while

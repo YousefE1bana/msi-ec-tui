@@ -17,29 +17,24 @@ Only the latest release of MEC receives security fixes.
 
 ## Scope
 
-The current implementation performs READ-ONLY inspection of:
+MEC inspects DMI identity, discovered msi-ec capabilities, live telemetry,
+battery thresholds, and keyboard backlight interfaces. Supported typed mutations
+use fresh support/capability validation, a restricted sysfs write boundary,
+mandatory readback with bounded EC settling retries, and serialization.
+Profiles use preflight, transactional application, and rollback.
 
-- DMI identity (`sys_vendor`, `product_name`, and related fields)
-- `msi-ec`/sysfs capability interfaces (presence and available-mode lists)
-- Supported telemetry/state nodes (temperatures, fan values, modes, booleans)
-- Linux class interfaces used for battery thresholds and keyboard backlight
+MEC does not implement raw EC access, arbitrary path/value writes, a privileged
+helper, shell execution from profiles, or automatic privilege escalation.
+The TUI uses current-process permissions. READY means supported hardware;
+it does not grant OS write permission. Unknown or inconsistent hardware fails
+closed to READ-ONLY. Mouse and keyboard converge at the same confirmation flow.
 
-The current code has:
-
-- no hardware write implementation
-- no raw EC/debug register access
-- no privileged write helper
-- no profile-apply execution
-
-Future security-sensitive areas include:
-
-- Any path that allows writing values to sysfs paths MEC has not validated as
-  supported by the detected hardware.
-- Any bypass of capability checks, read-only mode, or the transactional
-  apply/rollback flow.
-- Arbitrary path or value injection through CLI arguments, profile files, or
-  configuration files.
-- Privilege boundary issues (MEC aims to keep the TUI usable unprivileged).
+Security-sensitive areas include path injection, capability/support bypasses,
+readback or rollback regressions, privilege boundaries, and untrusted profile,
+configuration, or release metadata. Update discovery is opt-in, TLS verified,
+size/time bounded, and sends no hardware telemetry. The installer verifies the
+exact selected SHA256SUMS entry. Checksums provide integrity, not publisher
+signature authentication; GitHub release access remains a trust dependency.
 
 ## Hardening principles
 
