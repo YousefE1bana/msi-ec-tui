@@ -27,4 +27,4 @@ vim_keys = true
 - theme changes from the command palette persist across launches
 
 
-Optional candidate slugs: `arctic` (Arctic Midnight), `graphite` (Graphite Violet). The default remains `msi-dark`; existing `terminal` and `light` are preserved. Palette theme choices save atomically. `mec --theme arctic` or `mec --theme graphite` overrides this session only.
+Optional theme slugs: `arctic` (Arctic Midnight), `graphite` (Graphite Violet). The default remains `msi-dark`; existing `terminal` and `light` are preserved. Palette theme choices save atomically. `mec --theme arctic` or `mec --theme graphite` overrides this session only.

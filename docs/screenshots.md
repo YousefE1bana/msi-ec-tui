@@ -1,9 +1,10 @@
 # Production screenshot gallery
 
 Captured on the physical GF63 Thin 11UC with KDE Spectacle, Konsole and the
-production release binary. All telemetry is real. These are v1.1 candidate
-images; the latest published stable release remains v1.0.1. There are 47 captures
-including the three smaller viewport sets and a real [access-denied result](assets/screenshots/permission-error-80x24.png).
+production release binary. All telemetry is real. These 47 captures document
+the v1.1 interface during physical QA before the package-version bump; any
+visible 1.0.1 version label records that capture, not the current release. The
+current package and About version are 1.1.0. The gallery includes the three smaller viewport sets and a real [access-denied result](assets/screenshots/permission-error-80x24.png).
 
 ![Dashboard](assets/screenshots/dashboard.png)
 

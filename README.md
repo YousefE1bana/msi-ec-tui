@@ -10,9 +10,9 @@ Safe hardware monitoring and control for supported MSI laptops on Linux.
 
 ![Production dashboard on an MSI GF63 Thin 11UC](docs/assets/screenshots/dashboard.png)
 
-**Stable release: v1.0.1.** This branch prepares the v1.1 interface shown above;
-v1.1.0 has not been published. Screenshots are real production renders on the
-physical laptop, not mock telemetry.
+**Stable release: v1.1.0.** Screenshots show the production v1.1 interface on
+a physical laptop with real telemetry. See [release notes](docs/releases/v1.1.0.md)
+for changes, validation and known limitations.
 
 MEC brings temperatures, fan percentages, power state, performance controls,
 battery charge limits, and supported devices into one terminal workspace.
@@ -25,7 +25,7 @@ preflight and rollback. Unsupported hardware remains READ-ONLY.
 Download and inspect the installer before running it:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/YousefE1bana/msi-ec-tui/feat/v1.1-tui-redesign/install.sh
+curl -fsSLO https://raw.githubusercontent.com/YousefE1bana/msi-ec-tui/main/install.sh
 less install.sh
 bash install.sh --dry-run
 bash install.sh
@@ -33,11 +33,9 @@ mec doctor
 mec
 ```
 
-The installer in this development branch will become available at that URL only
-after the branch is pushed. From this checkout, run `bash install.sh` directly.
-It selects the **latest stable release**, verifies its exact SHA256SUMS entry,
+The installer selects the **latest stable release**, verifies its exact SHA256SUMS entry,
 and prefers `.deb` / `.rpm`; otherwise it uses a user-local portable binary.
-`--version 1.0.1` pins a stable release. Checksums check integrity; they are not
+`--version 1.1.0` pins a stable release. Checksums check integrity; they are not
 cryptographic publisher signatures. The installer does not install kernel code.
 
 Requirements: Linux, compatible physical MSI hardware, a working
@@ -50,10 +48,6 @@ for the intended appearance. Release binaries target x86_64/aarch64 glibc Linux
 READY is a support verdict, not a privilege grant. Desktop launchers run as your
 normal user; root-owned sysfs controls can reject writes. MEC never elevates
 itself. See [permissions and troubleshooting](docs/troubleshooting.md).
-
-The candidate-only About, update-check, mouse workflow, and new themes below
-require building this checkout; installing stable v1.0.1 does not add them. See
-[source installation](docs/installation.md).
 
 ## Controls
 
@@ -93,7 +87,7 @@ CLI mutation commands execute explicitly; the TUI adds stage/review confirmation
 
 ## Themes
 
-MSI Dark remains the default. Optional candidates retain the same layouts and
+MSI Dark remains the default. Optional themes retain the same layouts and
 semantic green/amber/red status colors:
 
 ```sh
@@ -111,7 +105,7 @@ Palette theme choices persist in the existing configuration.
 [Uninstall](docs/uninstall.md) · [Hardware support](docs/hardware-support.md) ·
 [Compatibility](docs/compatibility.md) · [Troubleshooting](docs/troubleshooting.md) ·
 [Architecture](docs/architecture.md) · [Screenshots](docs/screenshots.md) · [Physical validation](docs/physical-validation.md) ·
-[Release-candidate audit](docs/release-candidate-validation.md)
+[Pre-release validation record](docs/release-candidate-validation.md)
 
 For bugs, review `mec doctor --export` for private information before sharing it.
 Use [GitHub issues](https://github.com/YousefE1bana/msi-ec-tui/issues) for public bugs;

@@ -50,7 +50,7 @@ command. The installed driver was inspected without modification. Firmware or
 hardware coupling is a possible explanation, not a proven cause. Super Battery
 was explicitly restored to its captured Off state. Owners should inspect the
 complete current state after applying a profile; this observation must be
-reviewed before publishing the candidate.
+considered when using eco mode; it is disclosed in the v1.1.0 release notes.
 
 Cooler Boost passed state/readback checks. Fan telemetry is percentage/raw data,
 not RPM, and does not prove acoustic response or airflow. This pass makes no

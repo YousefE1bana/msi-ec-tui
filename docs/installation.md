@@ -1,12 +1,13 @@
 # Installation
 
-Stable is v1.0.1; the v1.1 UI on this branch is not published. See the
-[README](../README.md) for the inspect-first development installer. From a checkout:
+MEC v1.1.0 includes the production mouse workflow, About, update discovery and
+optional themes. See the [README](../README.md) for the inspect-first installer.
+From a checkout:
 
 ```sh
 bash install.sh --help
 bash install.sh --dry-run
-bash install.sh --version 1.0.1 --dry-run
+bash install.sh --version 1.1.0 --dry-run
 bash install.sh
 ```
 
@@ -22,8 +23,8 @@ Native families use apt-get (.deb), dnf/zypper (.rpm), with a portable fallback
 where no matching package manager is available. This is package-format mapping,
 not proof of hardware/distro support; consult [compatibility](compatibility.md).
 Tar installs to ~/.local/bin/mec. Put that directory in your desktop session PATH.
-Future RC tar assets carry a launcher/icon; v1.0.1 tar assets do not.
-The RC native packages install `/usr/share/applications/mec.desktop` and
+v1.1.0 tar assets carry a launcher/icon; older v1.0.1 tar assets do not.
+The native packages install `/usr/share/applications/mec.desktop` and
 `/usr/share/icons/hicolor/scalable/apps/mec.svg`. The launcher uses `Exec=mec`,
 `Terminal=true`, and your current permissions. No service or permission rules
 are installed.
@@ -48,6 +49,6 @@ silently installed. Unknown hardware must remain READ-ONLY.
 
 Config is `~/.config/mec/config.toml`; profiles are `~/.config/mec/profiles/`.
 Installations do not overwrite user data. AUR publication is not claimed.
-There are no cryptographic release signatures in the v1.0.1 asset set.
+There are no cryptographic release signatures in the v1.1.0 asset set.
 
 After installing, run `mec --version` and `mec doctor` before opening the TUI.

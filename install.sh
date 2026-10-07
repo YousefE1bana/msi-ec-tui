@@ -9,7 +9,7 @@ INSTALL_STARTED=false
 usage() {
   cat <<'HELP'
 MEC installer — Linux / glibc / x86_64 or aarch64
-Usage: bash install.sh [--version 1.0.1] [--dry-run] [--help]
+Usage: bash install.sh [--version 1.1.0] [--dry-run] [--help]
 Default: discover latest stable GitHub Release, verify exact SHA256SUMS entry,
 then install a native .deb/.rpm or a user-local portable binary.
 --dry-run performs discovery only: no artifact install or sudo.
@@ -185,7 +185,7 @@ PY
       install -m644 "$payload/mec.desktop" "$HOME/.local/share/applications/mec.desktop"
       install -m644 "$payload/mec.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/mec.svg"
       printf 'Desktop launcher installed; ensure ~/.local/bin is in your desktop session PATH.\n'
-    else printf 'This stable archive has no desktop assets; RC packages add them.\n'; fi
+    else printf 'This older stable archive has no desktop assets.\n'; fi
     printf 'Ensure ~/.local/bin is in PATH.\n'
   else
     INSTALL_STARTED=true

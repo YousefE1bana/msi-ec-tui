@@ -1178,8 +1178,8 @@ mod tests {
     }
 
     #[test]
-    fn package_version_is_v1_0_1() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "1.0.1");
+    fn package_version_is_v1_1_0() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "1.1.0");
     }
 
     #[test]

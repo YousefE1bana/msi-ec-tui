@@ -1,8 +1,10 @@
 # v1.1 release-candidate validation record
 
-This is a development checkpoint, not a v1.1.0 release announcement. The Cargo
-version and latest published stable release remain **1.0.1**. No push, tag,
-release, PR, AUR publication or default-theme promotion was performed.
+This is a **historical pre-release validation snapshot**, recorded before the
+v1.1.0 version bump and publication. At this checkpoint Cargo and the published
+stable release were **1.0.1**; no push, tag, release, PR, AUR publication or
+default-theme promotion had been performed. Present-tense results below describe
+that checkpoint. See [v1.1.0 release notes](releases/v1.1.0.md) for this release.
 
 Starting revision: `7395a4db8e35579c22c540517b3f5b979a541b96`, branch
 `feat/v1.1-tui-redesign`, clean worktree. P1/P2/P3 history was preserved. All

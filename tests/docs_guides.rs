@@ -126,9 +126,15 @@ fn guides_make_no_false_claims() {
             }
         }
     }
-    // README distinguishes the published stable version from the candidate UI.
+    // Public installation entry points and notes follow the authoritative version.
+    let version = env!("CARGO_PKG_VERSION");
     let readme = read("README.md");
-    assert!(readme.contains("Stable release: v1.0.1"));
-    assert!(readme.contains("1.0.1"));
-    assert!(readme.contains("v1.1.0 has not been published"));
+    assert!(readme.contains(&format!("Stable release: v{version}")));
+    assert!(readme.contains(&format!("docs/releases/v{version}.md")));
+    assert!(readme.contains("/main/install.sh"));
+    assert!(!readme.contains("has not been published"));
+    assert!(install.contains(&format!("--version {version}")));
+    assert!(upgrade.contains(&format!("mec_{version}_amd64.deb")));
+    assert!(upgrade.contains(&format!("mec-{version}-1.x86_64.rpm")));
+    assert!(read("install.sh").contains(&format!("--version {version}")));
 }
